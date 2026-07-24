@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+.env.test
+coverage/
+*.log
+uploads/
+backups/
+.idea/
+.claude/

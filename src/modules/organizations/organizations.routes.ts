@@ -1,0 +1,36 @@
+import { Router } from "express";
+import { asyncHandler } from "@/middleware/asyncHandler";
+import { isAuth, isSuperAdmin } from "@/middleware/auth.middleware";
+import operatorPermissionsRouter from "@/modules/operatorPermissions/operatorPermissions.routes";
+import tariffIntervalsRouter from "@/modules/tariffIntervals/tariffIntervals.routes";
+import {
+  addOperatorHandler,
+  blockHandler,
+  capacityHandler,
+  createHandler,
+  globalStatsHandler,
+  listHandler,
+  pricingModeHandler,
+  statsHandler,
+  updateHandler,
+} from "./organizations.controller";
+
+const router = Router();
+
+router.use(isAuth, isSuperAdmin);
+
+router.get("/", asyncHandler(listHandler));
+router.post("/", asyncHandler(createHandler));
+router.put("/:id", asyncHandler(updateHandler));
+router.patch("/:id/block", asyncHandler(blockHandler));
+router.get("/:id/stats", asyncHandler(statsHandler));
+router.put("/:id/pricing-mode", asyncHandler(pricingModeHandler));
+router.put("/:id/capacity", asyncHandler(capacityHandler));
+router.post("/:id/operator", asyncHandler(addOperatorHandler));
+router.use("/:id/tariff-intervals", tariffIntervalsRouter);
+router.use("/:id/permissions", operatorPermissionsRouter);
+
+export const adminStatsRouter = Router();
+adminStatsRouter.get("/", isAuth, isSuperAdmin, asyncHandler(globalStatsHandler));
+
+export default router;
