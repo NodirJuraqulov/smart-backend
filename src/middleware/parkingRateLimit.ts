@@ -7,15 +7,6 @@ function tooManyRequestsHandler(req: Request, res: Response) {
   res.status(429).json({ message: "Juda ko'p so'rov, birozdan keyin urinib ko'ring" });
 }
 
-export const agentParkingRateLimit = rateLimit({
-  windowMs: WINDOW_MS,
-  limit: 3,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req: Request): string => `agent_org:${req.orgId}`,
-  handler: tooManyRequestsHandler,
-});
-
 export const operatorParkingRateLimit = rateLimit({
   windowMs: WINDOW_MS,
   limit: 5,

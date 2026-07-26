@@ -1,3 +1,4 @@
+import { randomBytes } from "crypto";
 import bcrypt from "bcrypt";
 import { DateTime } from "luxon";
 import { db } from "@/config/db";
@@ -28,13 +29,6 @@ function organizationsBaseQuery() {
     "total_capacity",
     "created_at"
   );
-}
-
-const HEARTBEAT_ONLINE_THRESHOLD_MS = 2 * 60 * 1000;
-
-function computeIsOnline(lastHeartbeatAt: Date | null): boolean {
-  if (!lastHeartbeatAt) return false;
-  return Date.now() - new Date(lastHeartbeatAt).getTime() < HEARTBEAT_ONLINE_THRESHOLD_MS;
 }
 
 function assertValidTimezone(timezone: string) {
@@ -76,32 +70,7 @@ interface UpdateOrganizationInput {
 }
 
 export async function listOrganizations() {
-  const rows = await db<OrganizationRecord & { last_heartbeat_at: Date | null }>("tb_organizations")
-    .leftJoin("tb_settings", "tb_settings.org_id", "tb_organizations.id")
-    .select(
-      "tb_organizations.id",
-      "tb_organizations.name",
-      "tb_organizations.address",
-      "tb_organizations.is_active",
-      "tb_organizations.timezone",
-      "tb_organizations.pricing_mode",
-      "tb_organizations.total_capacity",
-      "tb_organizations.created_at",
-      "tb_settings.last_heartbeat_at"
-    )
-    .orderBy("tb_organizations.created_at", "desc");
-
-  return rows.map((row) => ({
-    id: row.id,
-    name: row.name,
-    address: row.address,
-    is_active: row.is_active,
-    timezone: row.timezone,
-    pricing_mode: row.pricing_mode,
-    total_capacity: row.total_capacity,
-    created_at: row.created_at,
-    is_online: computeIsOnline(row.last_heartbeat_at),
-  }));
+  return organizationsBaseQuery().orderBy("created_at", "desc");
 }
 
 async function findOrganizationOrFail(id: number) {
@@ -155,7 +124,7 @@ export async function createOrganization(input: CreateOrganizationInput) {
       const [orgId] = await trx("tb_organizations").insert({
         name,
         address: address ?? null,
-        // Column default ('Asia/Tashkent') applies when omitted.
+        webhook_token: randomBytes(32).toString("hex"),
         ...(input.timezone !== undefined ? { timezone: input.timezone } : {}),
       });
 
@@ -306,6 +275,76 @@ export async function updateCapacity(id: number, totalCapacity: number | null) {
   return { ...organization, total_capacity: totalCapacity };
 }
 
+interface IntegrationSettings {
+  id: number;
+  relay_entry_ip: string | null;
+  relay_exit_ip: string | null;
+  printer_ip: string | null;
+  camera_brand: string | null;
+  webhook_token: string | null;
+  last_webhook_entry_at: Date | null;
+  last_webhook_exit_at: Date | null;
+}
+
+async function findIntegrationSettingsOrFail(id: number): Promise<IntegrationSettings> {
+  const organization = await db<IntegrationSettings>("tb_organizations")
+    .select(
+      "id",
+      "relay_entry_ip",
+      "relay_exit_ip",
+      "printer_ip",
+      "camera_brand",
+      "webhook_token",
+      "last_webhook_entry_at",
+      "last_webhook_exit_at"
+    )
+    .where({ id })
+    .first();
+  if (!organization) {
+    throw new ApiError("Stoyanka topilmadi", 404);
+  }
+  return organization;
+}
+
+export async function getIntegrationSettings(id: number): Promise<IntegrationSettings> {
+  return findIntegrationSettingsOrFail(id);
+}
+
+interface UpdateIntegrationSettingsInput {
+  relay_entry_ip?: string | null;
+  relay_exit_ip?: string | null;
+  printer_ip?: string | null;
+  camera_brand?: string | null;
+}
+
+export async function updateIntegrationSettings(
+  id: number,
+  input: UpdateIntegrationSettingsInput
+): Promise<IntegrationSettings> {
+  await findIntegrationSettingsOrFail(id);
+
+  const updates: UpdateIntegrationSettingsInput = {};
+  if (input.relay_entry_ip !== undefined) updates.relay_entry_ip = input.relay_entry_ip;
+  if (input.relay_exit_ip !== undefined) updates.relay_exit_ip = input.relay_exit_ip;
+  if (input.printer_ip !== undefined) updates.printer_ip = input.printer_ip;
+  if (input.camera_brand !== undefined) updates.camera_brand = input.camera_brand;
+
+  if (Object.keys(updates).length > 0) {
+    await db("tb_organizations").where({ id }).update(updates);
+  }
+
+  return findIntegrationSettingsOrFail(id);
+}
+
+export async function regenerateWebhookToken(id: number): Promise<string> {
+  await findIntegrationSettingsOrFail(id);
+
+  const token = randomBytes(32).toString("hex");
+  await db("tb_organizations").where({ id }).update({ webhook_token: token });
+
+  return token;
+}
+
 export async function toggleBlockOrganization(id: number, isActive?: boolean) {
   const organization = await findOrganizationOrFail(id);
 
@@ -329,7 +368,6 @@ export async function getOrganizationStats(id: number) {
     [currentlyParked],
     [totalSessions],
     [totalRevenue],
-    settings,
   ] = await Promise.all([
     db("tb_parking_sessions")
       .where({ org_id: id })
@@ -348,10 +386,7 @@ export async function getOrganizationStats(id: number) {
       .count<{ count: string }[]>("id as count"),
     db("tb_parking_sessions").where({ org_id: id }).count<{ count: string }[]>("id as count"),
     db("tb_payments").where({ org_id: id }).sum<{ total: string | null }[]>("amount as total"),
-    db("tb_settings").select("last_heartbeat_at").where({ org_id: id }).first(),
   ]);
-
-  const lastHeartbeatAt = settings?.last_heartbeat_at ?? null;
 
   return {
     organization_id: id,
@@ -361,8 +396,6 @@ export async function getOrganizationStats(id: number) {
     currently_parked: Number(currentlyParked.count),
     total_sessions: Number(totalSessions.count),
     total_revenue: Number(totalRevenue.total ?? 0),
-    is_online: computeIsOnline(lastHeartbeatAt),
-    last_heartbeat_at: lastHeartbeatAt,
   };
 }
 
@@ -392,9 +425,7 @@ export async function getGlobalStats() {
       .whereBetween("paid_at", [monthStart, monthEnd])
       .sum<{ total: string | null }[]>("amount as total"),
     db("tb_parking_sessions").where({ status: "active" }).count<{ count: string }[]>("id as count"),
-    db("tb_organizations")
-      .leftJoin("tb_settings", "tb_settings.org_id", "tb_organizations.id")
-      .select("tb_organizations.id", "tb_organizations.name", "tb_settings.last_heartbeat_at"),
+    db("tb_organizations").select("id", "name"),
     db("tb_payments")
       .whereBetween("paid_at", [todayStart, todayEnd])
       .groupBy("org_id")
@@ -420,17 +451,12 @@ export async function getGlobalStats() {
     .sort((a, b) => b.today_revenue - a.today_revenue)
     .slice(0, 5);
 
-  const offlineOrganizationsCount = organizations.filter(
-    (org) => !computeIsOnline(org.last_heartbeat_at)
-  ).length;
-
   return {
     total_organizations: Number(totalOrganizations),
     active_organizations: Number(activeOrganizations),
     total_revenue_today: Number(totalRevenueToday ?? 0),
     total_revenue_monthly: Number(totalRevenueMonthly ?? 0),
     total_currently_parked: Number(totalCurrentlyParked),
-    offline_organizations_count: offlineOrganizationsCount,
     top_organizations: topOrganizations,
   };
 }

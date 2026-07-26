@@ -18,9 +18,10 @@ import vipVehiclesRouter from "./modules/vipVehicles/vipVehicles.routes";
 import settingsRouter from "./modules/settings/settings.routes";
 import parkingRouter from "./modules/parking/parking.routes";
 import reportsRouter from "./modules/reports/reports.routes";
-import agentRouter, { agentConfigRouter, agentHeartbeatRouter } from "./modules/agent/agent.routes";
 import activityLogsRouter from "./modules/activityLogs/activityLogs.routes";
-import liveViewRouter from "./modules/liveView/liveView.routes";
+import webhookRouter from "./modules/webhook/webhook.routes";
+import publicDisplayRouter from "./modules/publicDisplay/publicDisplay.routes";
+import paymentRouter from "./modules/payment/payment.routes";
 
 const app = express();
 
@@ -41,6 +42,8 @@ app.use(
   })
 );
 app.use(cors({ origin: env.corsOrigin }));
+app.use("/api/webhook", webhookRouter);
+app.use("/api/payments", paymentRouter);
 app.use(express.json({ limit: "10mb" }));
 app.use(morgan(env.nodeEnv === "development" ? "dev" : "combined"));
 
@@ -123,11 +126,8 @@ app.use("/api/vip-vehicles", vipVehiclesRouter);
 app.use("/api/settings", settingsRouter);
 app.use("/api/parking", parkingRouter);
 app.use("/api/reports", reportsRouter);
-app.use("/api/agent/parking", agentRouter);
-app.use("/api/agent/config", agentConfigRouter);
-app.use("/api/agent/heartbeat", agentHeartbeatRouter);
 app.use("/api/admin/activity-logs", activityLogsRouter);
-app.use("/api/live-view", liveViewRouter);
+app.use("/api/public/display", publicDisplayRouter);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

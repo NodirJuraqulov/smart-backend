@@ -1,6 +1,6 @@
-# s-backend
+# smart-backend
 
-AutoStoyanka — avtomatik avtoturargoh boshqaruv tizimining backend qismi. Kamera orqali (s-agent va s-python OCR xizmati bilan) mashina raqamini aniqlab, kirish/chiqishni qayd qiladi, tarif bo'yicha to'lovni hisoblaydi, shlagbaumni boshqaradi, va operator/super-admin uchun REST API + real-vaqt (Socket.IO) hodisalarini taqdim etadi.
+AutoStoyanka — avtomatik avtoturargoh boshqaruv tizimining backend qismi. IP-kamera (Hikvision va shu kabi ANPR qurilmalar) mashina raqamini o'zi aniqlab, to'g'ridan-to'g'ri webhook orqali backendga yuboradi — kirish/chiqishni qayd qiladi, tarif bo'yicha to'lovni hisoblaydi, shlagbaumni rele orqali ochadi, chek chop etadi, va operator/super-admin uchun REST API + real-vaqt (Socket.IO) hodisalarini, jamoat ekranlari (public display) uchun esa autentifikatsiyasiz API va WebSocket xonasini taqdim etadi.
 
 ## O'rnatish
 
@@ -50,12 +50,13 @@ To'liq production deploy qo'llanmasi uchun `DEPLOYMENT.md`ga qarang.
 | `JWT_SECRET` | JWT token imzolash kaliti (kamida 32 belgi) |
 | `JWT_EXPIRES_IN` | Access token amal qilish muddati |
 | `REFRESH_TOKEN_EXPIRES_DAYS` | Refresh token amal qilish muddati (kun) |
-| `ENCRYPTION_KEY` | Kamera parollarini shifrlash uchun 32 baytli (64 hex belgi) kalit |
-| `PYTHON_OCR_URL` | s-python (raqam aniqlash) xizmati manzili |
-| `INTERNAL_API_KEY` | s-python bilan bir xil bo'lishi shart bo'lgan ichki kalit |
 | `CORS_ORIGIN` | Frontend manzili |
-| `UPLOADS_MAX_SIZE_MB` | Yuklanadigan rasm fayli hajm chegarasi |
+| `UPLOADS_MAX_SIZE_MB` | Yuklangan fayllar uchun umumiy hajm chegarasi |
 | `PLATFORM_DEFAULT_TIMEZONE` | Ko'p tashkilotli hisobotlar uchun standart vaqt zonasi |
+| `PAYME_ENABLED` | Payme onlayn to'lov integratsiyasi yoqilganmi (`true`/`false`) — hozircha faqat skelet, `false` qoldiring |
+| `CLICK_ENABLED` | Click onlayn to'lov integratsiyasi yoqilganmi (`true`/`false`) — hozircha faqat skelet, `false` qoldiring |
+
+Har bir tashkilot (`tb_organizations`) uchun rele/printer/kamera IP manzillari va webhook tokeni bazada saqlanadi — `.env`da emas, `PUT /api/admin/organizations/:id/integration-settings` orqali sozlanadi.
 
 ## API endpointlar
 
@@ -63,14 +64,24 @@ To'liq production deploy qo'llanmasi uchun `DEPLOYMENT.md`ga qarang.
 - `POST /login`
 - `POST /refresh`
 - `POST /logout`
-- `GET /me`
+- `GET /me` (auth)
 
-### Admin — Organizations (`/api/admin/organizations`)
+### Admin — Organizations (`/api/admin/organizations`, faqat super_admin)
 - `GET /`
 - `POST /`
 - `PUT /:id`
 - `PATCH /:id/block`
 - `GET /:id/stats`
+- `PUT /:id/pricing-mode`
+- `PUT /:id/capacity`
+- `POST /:id/operator`
+- `POST /:id/relay/test`
+- `POST /:id/printer/test`
+- `GET /:id/integration-settings`
+- `PUT /:id/integration-settings`
+- `POST /:id/integration-settings/regenerate-token`
+- `/:id/tariff-intervals/*`
+- `/:id/permissions/*`
 
 ### Admin — Stats (`/api/admin/stats`)
 - `GET /`
@@ -88,23 +99,49 @@ To'liq production deploy qo'llanmasi uchun `DEPLOYMENT.md`ga qarang.
 - `GET /`
 - `POST /`
 - `PUT /:id`
+
+### Tariff Intervals (`/api/tariff-intervals`)
+- `GET /`
+- `POST /`
+- `PUT /:intervalId`
+- `DELETE /:intervalId`
+
+### Subscription Plans (`/api/subscription-plans`)
+- `GET /`
+- `POST /`
+- `PUT /:id`
+- `DELETE /:id`
+
+### Subscriptions (`/api/subscriptions`)
+- `GET /`
+- `POST /`
+- `PUT /:id`
+- `POST /:id/renew`
+- `DELETE /:id`
+
+### VIP Vehicles (`/api/vip-vehicles`)
+- `GET /`
+- `POST /`
+- `PUT /:id`
 - `DELETE /:id`
 
 ### Settings (`/api/settings`)
 - `GET /`
 - `PUT /`
-- `POST /barrier/test`
-- `POST /agent-key/generate`
 
 ### Parking (`/api/parking`)
-- `POST /entry`
 - `POST /entry/manual`
-- `POST /exit`
 - `POST /exit/manual`
+- `GET /capacity`
 - `GET /active`
 - `GET /sessions`
+- `GET /sessions/awaiting-payment`
 - `GET /sessions/:id`
 - `POST /sessions/:id/force-close`
+- `POST /sessions/:id/open-barrier`
+- `POST /sessions/:id/print-receipt`
+- `POST /sessions/:id/confirm-cash-payment`
+- `POST /sessions/:id/payment-method`
 - `DELETE /sessions/clear-test` (faqat `NODE_ENV !== production`)
 
 ### Reports (`/api/reports`)
@@ -112,19 +149,24 @@ To'liq production deploy qo'llanmasi uchun `DEPLOYMENT.md`ga qarang.
 - `GET /monthly`
 - `GET /yearly`
 
-### Agent — Parking (`/api/agent/parking`)
-- `POST /entry`
-- `POST /exit`
-- `POST /verify`
+### Public Display (`/api/public/display`, AUTH TALAB QILINMAYDI)
+- `GET /:orgId/status`
 
-### Agent — Config (`/api/agent/config`)
-- `GET /`
+### Webhook (`/api/webhook`, AUTH TALAB QILINMAYDI — `webhook_token` orqali)
+- `POST /debug/:token/:direction(entry|exit)`
+- `POST /hikvision/:token/:direction(entry|exit)`
 
-### Agent — Heartbeat (`/api/agent/heartbeat`)
-- `POST /`
-
-### Live View (`/api/live-view`)
-- `GET /`
+### Payments (`/api/payments`, AUTH TALAB QILINMAYDI — hozircha skelet/stub)
+- `POST /payme/webhook`
+- `POST /click/webhook`
 
 ### Health
 - `GET /health`
+
+## WebSocket (Socket.IO)
+
+Ikki xil ulanish rejimi mavjud:
+- **Autentifikatsiyalangan** (`handshake.auth.token` — JWT): operator/owner `org_{orgId}` xonasiga, super_admin `admins` xonasiga qo'shiladi.
+- **Public display** (`handshake.auth.orgId` — auth talab qilinmaydi): `public:org:{orgId}` xonasiga qo'shiladi.
+
+Hodisalar: `entry_detected`, `parking_full`, `exit_awaiting_payment`, `exit_completed`, `plate_not_recognized_for_exit`, `relay_failed`, `webhook_parse_failed`.

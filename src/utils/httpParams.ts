@@ -1,5 +1,4 @@
 import { Request, Response } from "express";
-import { ApiError } from "@/utils/ApiError";
 
 export function parseId(req: Request, res: Response): number | null {
   const id = Number(req.params.id);
@@ -40,36 +39,3 @@ export function parsePaymentMethod(req: Request, res: Response): "cash" | "onlin
   return value;
 }
 
-const MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
-
-const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8, 0xff]);
-const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-
-function isValidImageBuffer(buffer: Buffer): boolean {
-  return (
-    buffer.subarray(0, JPEG_SIGNATURE.length).equals(JPEG_SIGNATURE) ||
-    buffer.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)
-  );
-}
-
-export function resolveImageInput(req: Request): string | undefined {
-  let buffer: Buffer;
-
-  if (req.file) {
-    buffer = req.file.buffer;
-  } else if (req.body?.image) {
-    buffer = Buffer.from(req.body.image, "base64");
-  } else {
-    return undefined;
-  }
-
-  if (buffer.length > MAX_IMAGE_SIZE_BYTES) {
-    throw new ApiError("Fayl hajmi juda katta", 400);
-  }
-
-  if (!isValidImageBuffer(buffer)) {
-    throw new ApiError("Faqat JPEG/PNG rasm qabul qilinadi", 400);
-  }
-
-  return buffer.toString("base64");
-}

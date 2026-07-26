@@ -1,5 +1,4 @@
 import { NextFunction, Request, Response } from "express";
-import multer from "multer";
 import { ApiError } from "@/utils/ApiError";
 
 export function notFoundHandler(req: Request, res: Response) {
@@ -14,15 +13,6 @@ export function errorHandler(
 ) {
   if (err instanceof ApiError) {
     res.status(err.statusCode).json({ message: err.message, ...err.details });
-    return;
-  }
-
-  if (err instanceof multer.MulterError) {
-    if (err.code === "LIMIT_FILE_SIZE") {
-      res.status(400).json({ message: "Fayl hajmi juda katta" });
-      return;
-    }
-    res.status(400).json({ message: "Fayl yuklashda xatolik" });
     return;
   }
 

@@ -5,21 +5,8 @@ import {
   parseOptionalOrgIdFromBody,
   parseOptionalOrgIdFromQuery,
   parsePaymentMethod,
-  resolveImageInput,
 } from "@/utils/httpParams";
-import { resolveOrgIdRequired } from "@/utils/orgScope";
 import * as parkingService from "./parking.service";
-
-export async function entryHandler(req: Request, res: Response) {
-  const bodyOrgId = parseOptionalOrgIdFromBody(req, res);
-  if (bodyOrgId === null) return;
-
-  const orgId = resolveOrgIdRequired(req.user!, bodyOrgId);
-  const operatorId = req.user!.role === "operator" || req.user!.role === "owner" ? req.user!.id : null;
-
-  const result = await parkingService.entryAuto(orgId, operatorId, resolveImageInput(req));
-  res.status(result.detected ? 201 : 200).json(result);
-}
 
 export async function entryManualHandler(req: Request, res: Response) {
   const orgId = parseOptionalOrgIdFromBody(req, res);
@@ -33,25 +20,6 @@ export async function entryManualHandler(req: Request, res: Response) {
 
   const session = await parkingService.entryManual(req.user!, { org_id: orgId, plate_number });
   res.status(201).json({ session });
-}
-
-export async function exitHandler(req: Request, res: Response) {
-  const bodyOrgId = parseOptionalOrgIdFromBody(req, res);
-  if (bodyOrgId === null) return;
-  const paymentMethod = parsePaymentMethod(req, res);
-  if (paymentMethod === null) return;
-
-  const orgId = resolveOrgIdRequired(req.user!, bodyOrgId);
-  const operatorId = req.user!.role === "operator" || req.user!.role === "owner" ? req.user!.id : null;
-
-  const result = await parkingService.exitAuto(
-    orgId,
-    operatorId,
-    resolveImageInput(req),
-    undefined,
-    paymentMethod
-  );
-  res.status(200).json(result);
 }
 
 export async function exitManualHandler(req: Request, res: Response) {
@@ -88,6 +56,22 @@ export async function activeHandler(req: Request, res: Response) {
 
   const sessions = await parkingService.listActive(req.user!, orgId);
   res.json({ sessions });
+}
+
+export async function awaitingPaymentHandler(req: Request, res: Response) {
+  const orgId = parseOptionalOrgIdFromQuery(req, res);
+  if (orgId === null) return;
+
+  const sessions = await parkingService.listAwaitingPayment(req.user!, orgId);
+  res.json({ sessions });
+}
+
+export async function confirmCashPaymentHandler(req: Request, res: Response) {
+  const id = parseId(req, res);
+  if (id === null) return;
+
+  const result = await parkingService.confirmCashPayment(req.user!, id);
+  res.json(result);
 }
 
 export async function sessionsHandler(req: Request, res: Response) {
@@ -170,6 +154,28 @@ export async function forceCloseHandler(req: Request, res: Response) {
     amount: result.session?.amount,
   });
 
+  res.json(result);
+}
+
+export async function openBarrierHandler(req: Request, res: Response) {
+  const id = parseId(req, res);
+  if (id === null) return;
+
+  const { direction } = req.body ?? {};
+  if (direction !== "entry" && direction !== "exit") {
+    res.status(400).json({ message: "direction 'entry' yoki 'exit' bo'lishi kerak" });
+    return;
+  }
+
+  const result = await parkingService.openBarrierForSession(req.user!, id, direction);
+  res.json(result);
+}
+
+export async function printReceiptHandler(req: Request, res: Response) {
+  const id = parseId(req, res);
+  if (id === null) return;
+
+  const result = await parkingService.printReceiptForSession(req.user!, id);
   res.json(result);
 }
 

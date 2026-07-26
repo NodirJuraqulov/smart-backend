@@ -29,8 +29,6 @@ export const env = {
     expiresIn: process.env.JWT_EXPIRES_IN || "15m",
   },
 
-  encryptionKey: required("ENCRYPTION_KEY"),
-
   refreshToken: {
     expiresDays: Number(process.env.REFRESH_TOKEN_EXPIRES_DAYS) || 30,
   },
@@ -42,6 +40,11 @@ export const env = {
   uploadsMaxSizeMB: Number(process.env.UPLOADS_MAX_SIZE_MB) || 2000,
 
   platformDefaultTimezone: process.env.PLATFORM_DEFAULT_TIMEZONE || "Asia/Tashkent",
+
+  payments: {
+    paymeEnabled: process.env.PAYME_ENABLED === "true",
+    clickEnabled: process.env.CLICK_ENABLED === "true",
+  },
 };
 
 const WEAK_DB_PASSWORDS = ["password", "123456", "12345678", "admin", "root", "qwerty", "changeme"];
@@ -53,10 +56,6 @@ function validateProductionSafety(): void {
 
   if (env.jwt.secret === "dev_secret_change_me" || env.jwt.secret.length < 32) {
     errors.push("JWT_SECRET dev qiymatida qolgan yoki juda qisqa (kamida 32 belgi kerak)");
-  }
-
-  if (env.encryptionKey.length !== 64) {
-    errors.push("ENCRYPTION_KEY noto'g'ri uzunlikda (32 bayt = 64 hex belgi kerak)");
   }
 
   if (env.corsOrigin === "*" || env.corsOrigin.includes("localhost")) {

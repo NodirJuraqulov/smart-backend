@@ -1,0 +1,73 @@
+name: CI
+
+"on":
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: "test_root_password"
+          MYSQL_DATABASE: "stoyanka_test"
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+
+    env:
+      NODE_ENV: "test"
+      DB_HOST: "127.0.0.1"
+      DB_PORT: "3306"
+      DB_NAME: "stoyanka_test"
+      DB_USER: "root"
+      DB_PASSWORD: "test_root_password"
+      DB_POOL_MIN: "1"
+      DB_POOL_MAX: "5"
+      JWT_SECRET: "test_jwt_secret_min_32_characters_long"
+      JWT_EXPIRES_IN: "15m"
+      REFRESH_TOKEN_EXPIRES_DAYS: "30"
+      CORS_ORIGIN: "http://localhost:5173"
+      UPLOADS_MAX_SIZE_MB: "2000"
+      PLATFORM_DEFAULT_TIMEZONE: "Asia/Tashkent"
+      PAYME_ENABLED: "false"
+      CLICK_ENABLED: "false"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Node.js o'rnatish
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Bog'liqliklarni o'rnatish
+        run: npm install
+
+      - name: Migration'larni test database'ga qo'llash
+        run: npx knex --knexfile knexfile.ts migrate:latest
+
+      - name: Testlarni ishga tushirish
+        run: npm test
+
+      - name: TypeScript tekshiruvi
+        run: npx tsc --noEmit
+
+      - name: Lint tekshiruvi
+        run: npx oxlint src tests
+
+      - name: Build
+        run: npm run build

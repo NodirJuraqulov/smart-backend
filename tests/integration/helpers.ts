@@ -168,15 +168,47 @@ export async function createTestSubscription(
   return id;
 }
 
-export async function createTestActiveSession(orgId: number, plateNumber: string): Promise<number> {
+export async function createTestActiveSession(
+  orgId: number,
+  plateNumber: string,
+  enteredAt: Date = new Date(Date.now() - 60 * 1000)
+): Promise<number> {
   const [id] = await db("tb_parking_sessions").insert({
     org_id: orgId,
     plate_number: plateNumber,
-    entered_at: new Date(),
+    entered_at: enteredAt,
     status: "active",
     entry_method: "manual",
     session_source: "regular",
     active_plate_key: `${orgId}:${plateNumber}`,
+  });
+  return id;
+}
+
+interface TestAwaitingPaymentSessionOverrides {
+  enteredAt?: Date;
+  exitedAt?: Date;
+  amount?: number;
+}
+
+export async function createTestAwaitingPaymentSession(
+  orgId: number,
+  plateNumber: string,
+  overrides: TestAwaitingPaymentSessionOverrides = {}
+): Promise<number> {
+  const enteredAt = overrides.enteredAt ?? new Date(Date.now() - 30 * 60 * 1000);
+  const exitedAt = overrides.exitedAt ?? new Date();
+  const [id] = await db("tb_parking_sessions").insert({
+    org_id: orgId,
+    plate_number: plateNumber,
+    entered_at: enteredAt,
+    exited_at: exitedAt,
+    duration_minutes: Math.round((exitedAt.getTime() - enteredAt.getTime()) / 60000),
+    amount: overrides.amount ?? 15000,
+    status: "awaiting_payment",
+    entry_method: "auto",
+    exit_method: "auto",
+    session_source: "regular",
   });
   return id;
 }

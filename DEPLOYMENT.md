@@ -1,6 +1,6 @@
-# s-backend — Production'ga chiqarish qo'llanmasi
+# smart-backend — Production'ga chiqarish qo'llanmasi
 
-Bu hujjat faqat **s-backend**ga tegishli amaliy qadamlar: `.env` ni qanday
+Bu hujjat faqat **smart-backend**ga tegishli amaliy qadamlar: `.env` ni qanday
 to'ldirish, sirlarni qanday generatsiya qilish, va deploydan oldin/keyin
 nimani tekshirish kerak.
 
@@ -20,9 +20,6 @@ Keyin quyidagi qiymatlarni **haqiqiy** ma'lumotlar bilan to'ldiring.
 # JWT_SECRET (64 bayt = 128 hex belgi)
 node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
 
-# ENCRYPTION_KEY (32 bayt = 64 hex belgi — AES-256-GCM uchun aniq shu uzunlikda bo'lishi SHART)
-node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-
 # DB_PASSWORD (kuchli, tasodifiy parol)
 node -e "console.log(require('crypto').randomBytes(24).toString('base64'))"
 ```
@@ -34,13 +31,12 @@ Har birini `.env`dagi mos o'zgaruvchiga qo'ying:
 | `DB_HOST`/`DB_PORT`/`DB_NAME`/`DB_USER` | Production MySQL server ma'lumotlari |
 | `DB_PASSWORD` | Yuqoridagi generatsiya qilingan parol |
 | `JWT_SECRET` | Yuqoridagi generatsiya qilingan hex string |
-| `ENCRYPTION_KEY` | Yuqoridagi generatsiya qilingan hex string (**32 bayt/64 belgi aniq**) |
 | `CORS_ORIGIN` | Frontend production domeni, masalan `https://app.stoyanka.uz` |
+| `PAYME_ENABLED`/`CLICK_ENABLED` | Haqiqiy Payme/Click integratsiyasi ulanmaguncha `false` qoldiring |
 
-**MUHIM**: `ENCRYPTION_KEY`ni deploy qilgandan keyin O'ZGARTIRMANG — bu
-kalit `tb_settings.camera_password_encrypted`dagi barcha shifrlangan
-parollarni ochish uchun kerak. Kalit yo'qolsa/o'zgarsa, barcha saqlangan
-kamera parollari qayta kiritilishi kerak bo'ladi.
+Rele, printer, kamera IP manzillari va webhook tokeni `.env`da EMAS — har bir
+tashkilot uchun bazada saqlanadi va `PUT /api/admin/organizations/:id/integration-settings`
+orqali sozlanadi.
 
 ## 2. Startup xavfsizlik tekshiruvi
 
@@ -49,7 +45,6 @@ avtomatik tekshiradi va MOS KELMASA serverni **ishga tushirishdan oldin**
 `process.exit(1)` bilan to'xtatadi:
 
 - `JWT_SECRET` dev qiymatida qolgan yoki 32 belgidan qisqa
-- `ENCRYPTION_KEY` 64 hex belgidan (32 bayt) boshqa uzunlikda
 - `CORS_ORIGIN` `localhost` ga ishora qilsa yoki umuman belgilanmagan (`*`)
 - `DB_PASSWORD` bo'sh, 8 belgidan qisqa, yoki oddiy parollar ro'yxatida
   (`password`, `123456`, `admin` va h.k.)
@@ -136,31 +131,45 @@ alohida (PM2 o'rnatilgandan keyin, bir marta) qo'lda ishga tushiriladi.
 
 ## 5. Nginx konfiguratsiyasi (reverse proxy)
 
-**MUHIM — OCR so'rovlari uchun timeout**: haqiqiy YOLOv8+PaddleOCR inference
-5+ soniya davom etishi kuzatilgan (yuqori yuklamada, so'rovlar s-python'ning
-navbatida kutganda, undan ham ko'proq). Agar Nginx standart timeout bilan
-qolsa, bu so'rovlar backend/s-python o'zi to'g'ri ishlayotgan bo'lsa ham
-Nginx darajasida **504 Gateway Timeout** bilan uzilib qolishi mumkin — bu
-"yo'lda" kesib tashlanadigan, backend hech qanday aloqasi bo'lmagan xato.
+**MUHIM — kamera/to'lov webhooklari uchun `client_max_body_size`**:
+`/api/webhook/*` va `/api/payments/*` route'lari `express.raw()` orqali
+XOM (parse qilinmagan) body qabul qiladi — Hikvision multipart/XML signali
+uchun `20mb`gacha, Payme/Click uchun `5mb`gacha ruxsat berilgan
+(`src/modules/webhook/webhook.routes.ts`, `src/modules/payment/payment.routes.ts`).
+Nginx'ning standart `client_max_body_size` qiymati atigi `1m` — agar buni
+oshirmasangiz, kattaroq kamera signali Node'ga yetib borishdan OLDIN Nginx
+darajasida **413 Request Entity Too Large** bilan rad etiladi (bu — backend
+kodi bilan hech qanday aloqasi yo'q, sof Nginx cheklovi).
 
-**Live View (`/socket.io`) esa BUTUNLAY BOSHQA holat**: bu — bir martalik
-so'rov emas, operator kamerani soatlab ochiq qoldirishi mumkin bo'lgan
-uzluksiz ulanish. Oddiy API so'rovlari uchun mos timeout bu yerda ulanishni
-operator hali tomosha qilib turganida ham uzib qo'yadi.
+**Rele/printer timeout haqida**: webhook orqali kirish/chiqish so'rovi
+ichida backend LAN qurilmalariga (rele, termal printer) TCP so'rov yuboradi —
+har biri 5 soniyalik ichki timeout bilan (`src/modules/relay/relay.service.ts`,
+`src/modules/printer/printer.service.ts`). Eng yomon holatda (ikkalasi ham
+javob bermasa) bitta so'rov ~10-11 soniyagacha davom etishi mumkin — bu esa
+Nginx'ning odatiy (`60s`) `proxy_read_timeout`idan ancha kam, shuning uchun
+alohida uzaytirish SHART EMAS.
+
+**Public display / operator paneli — WebSocket (`/socket.io`)**: bu — bir
+martalik so'rov emas, brauzer soatlab ochiq qoldirishi mumkin bo'lgan uzluksiz
+ulanish (real-vaqt parking hodisalari, jamoat ekranlari). Oddiy API so'rovlari
+uchun mos timeout bu yerda ulanishni foydalanuvchi hali sahifani ochiq
+turganida ham uzib qo'yadi.
 
 ```nginx
 server {
     listen 443 ssl;
     server_name sizning-domeningiz.uz;
 
-    # Frontend (s-frontend build chiqishi, masalan `npm run build` dan keyingi dist/)
+    client_max_body_size 20m;
+
+    # Frontend (smart-frontend build chiqishi, masalan `npm run build` dan keyingi dist/)
     # Backend bilan BIR XIL domenda joylashgani uchun CSP'dagi 'self' ikkalasini
     # ham qamrab oladi — connect-src/img-src'ga alohida backend manzili KERAK EMAS
-    # (buni s-backend/src/app.ts'dagi helmet CSP va s-frontend/vite.config.ts'dagi
+    # (buni smart-backend/src/app.ts'dagi helmet CSP va smart-frontend/vite.config.ts'dagi
     # dev CSP bilan solishtiring — u yerda frontend/backend turli portda bo'lgani
     # uchun manzillar aniq ko'rsatilgan).
     location / {
-        root /var/www/s-frontend/dist;
+        root /var/www/smart-frontend/dist;
         try_files $uri /index.html;
 
         add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; frame-ancestors 'self'" always;
@@ -169,14 +178,6 @@ server {
     location /api {
         proxy_pass http://localhost:5000;
         proxy_set_header Host $host;
-
-        # OCR so'rovlari sekin bo'lishi mumkin
-        # (5-15 soniya, yuqori yuklamada undan ko'p) —
-        # standart 60s odatda yetarli, lekin ehtiyot
-        # uchun aniq belgilanadi:
-        proxy_read_timeout 30s;
-        proxy_connect_timeout 10s;
-        proxy_send_timeout 30s;
     }
 
     location /socket.io {
@@ -185,10 +186,8 @@ server {
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
 
-        # Live View uchun UZOQ MUDDATLI ulanish
-        # (operator kamerani soatlab ochiq qoldirishi
-        # mumkin) — bu ODATIY so'rovlardan FARQLI,
-        # timeout YO'Q yoki JUDA UZOQ bo'lishi kerak:
+        # Uzluksiz WebSocket ulanishi uchun — operator/public display
+        # sahifani uzoq vaqt ochiq qoldirishi mumkin:
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
     }
@@ -199,20 +198,29 @@ server {
 }
 ```
 
-**Eslatma**: `/api`dagi `30s` — odatiy holat uchun yetarli zaxira bilan
-tanlangan (kuzatilgan real inference vaqti ~5s). Agar production'da
-yuqori parallel yuklama ostida (bir nechta stoyanka bir vaqtda entry/exit
-yuborganda, s-python'ning ichki navbatida kutish ortishi mumkin) baribir
-`504` ko'rina boshlasa, shu qiymatni oshirishni ko'rib chiqing — bu Nginx
-konfiguratsiyasi, kod o'zgarishi talab qilmaydi.
+**Eslatma — kamera/Payme/Click tarmoq kirishi**: `/api/webhook/*` va
+`/api/payments/*` server-serverga (kamera qurilmasi, Payme/Click serverlari)
+so'rov yuboradi, brauzer orqali emas — shuning uchun ular frontend origin'idan
+mustaqil ravishda, to'g'ridan-to'g'ri ushbu domenga yetib borishi kerak. Agar
+serveringiz oldida qo'shimcha firewall/WAF bo'lsa, kamera qurilmasi va
+Payme/Click'ning IP diapazonlaridan `POST /api/webhook/*` va
+`POST /api/payments/*`ga kirish RUXSAT etilganini tasdiqlang.
 
 ## 6. Deploydan keyin tekshirish ro'yxati
 
 - [ ] `GET /health` — `status: "ok"` va `db_pool` ma'lumoti to'g'ri qaytmoqda
 - [ ] `POST /api/auth/login` — super_admin bilan kirish ishlayapti
+- [ ] `POST /api/webhook/debug/:webhook_token/entry` (haqiqiy tashkilot
+  tokeni bilan) — `200 {"ok": true}` qaytarayotganini va
+  `tb_webhook_debug_logs`ga yozilganini tekshiring
+- [ ] `GET /api/admin/organizations/:id/integration-settings` — `webhookEntryUrl`/
+  `webhookExitUrl` to'g'ri, production domeningizga ishora qilayotganini
+  tasdiqlang (kamerani shu URL'larga sozlang)
 - [ ] `uploads/` va `backups/` papkalari server diskida yozish huquqiga ega
-- [ ] Kunlik backup joblari (`0 3 * * *`) va rasm tozalash (`0 4 * * *`)
-  konsol logida "rejalashtirildi" deb ko'rinmoqda
+- [ ] Rejalashtirilgan cron joblar konsol logida "rejalashtirildi" deb
+  ko'rinmoqda: backup (`0 3 * * *`), rasm backup (`15 3 * * *`), rasm
+  xotirasini tozalash (`0 4 * * *`), webhook hodisalarini tozalash
+  (`0 5 * * *`), webhook debug loglarini tozalash (`15 5 * * *`)
 - [ ] `.env` fayli **git repo tarkibida emasligini** tasdiqlang
   (`.gitignore`da `.env` bor, faqat `.env.production.example` commit qilinadi)
 - [ ] MySQL serverning `max_connections`i `DB_POOL_MAX` dan (va agar bir
@@ -220,5 +228,5 @@ konfiguratsiyasi, kod o'zgarishi talab qilmaydi.
   ekanini tekshiring
 - [ ] Brauzerda frontend domenini oching, DevTools → Network → istalgan
   so'rov Response Headers'ida `Content-Security-Policy` borligini va
-  konsolda "Refused to..." xatosi yo'qligini tasdiqlang (login, Live View,
-  rasm ko'rish, WebSocket ulanishi — barchasi tekshirilsin)
+  konsolda "Refused to..." xatosi yo'qligini tasdiqlang (login, public
+  display, WebSocket ulanishi — barchasi tekshirilsin)

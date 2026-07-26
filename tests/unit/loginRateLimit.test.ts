@@ -1,3 +1,4 @@
+import http from "http";
 import express from "express";
 import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
@@ -13,7 +14,7 @@ vi.mock("@/modules/auth/auth.service", async (importOriginal) => {
 import { loginIpRateLimit, loginUsernameRateLimit } from "@/middleware/loginRateLimit";
 import { loginHandler } from "@/modules/auth/auth.controller";
 
-function buildApp() {
+function buildServer(): http.Server {
   const app = express();
   app.use(express.json());
   app.post("/login", loginIpRateLimit, loginUsernameRateLimit, async (req, res, next) => {
@@ -23,19 +24,21 @@ function buildApp() {
       next(err);
     }
   });
-  return app;
+  return http.createServer(app);
 }
 
 describe("login rate limiting", () => {
   it("5 marta muvaffaqiyatsiz urinish 401 qaytaradi, 6-chisi 429 bilan bloklanadi", async () => {
-    const app = buildApp();
+    const server = buildServer();
 
     for (let attempt = 1; attempt <= 5; attempt++) {
-      const res = await request(app).post("/login").send({ login: "rl_user", password: "wrong" });
+      const res = await request(server).post("/login").send({ login: "rl_user", password: "wrong" });
       expect(res.status).toBe(401);
     }
 
-    const blocked = await request(app).post("/login").send({ login: "rl_user", password: "wrong" });
+    const blocked = await request(server).post("/login").send({ login: "rl_user", password: "wrong" });
     expect(blocked.status).toBe(429);
+
+    server.close();
   });
 });

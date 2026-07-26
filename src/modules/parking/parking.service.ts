@@ -5,9 +5,17 @@ import { AuthTokenPayload } from "@/modules/auth/auth.service";
 import { ApiError } from "@/utils/ApiError";
 import { isDuplicateKeyError } from "@/utils/dbErrors";
 import { resolveOrgIdFilter, resolveOrgIdRequired } from "@/utils/orgScope";
-import { saveParkingImage } from "@/utils/imageStorage";
-import { detectPlate, OcrResult } from "@/services/ocr.service";
-import { emitDetectionFailed, emitParkingEntry, emitParkingExit } from "@/websocket/socketServer";
+import {
+  emitEntryDetected,
+  emitExitAwaitingPayment,
+  emitExitCompleted,
+  emitParkingFull,
+  emitPlateNotRecognizedForExit,
+  emitRelayFailed,
+} from "@/websocket/socketServer";
+import { openBarrier } from "@/modules/relay/relay.service";
+import { printReceipt } from "@/modules/printer/printer.service";
+import { logActivity } from "@/utils/activityLog";
 
 type SessionSource = "regular" | "subscription" | "vip";
 
@@ -25,7 +33,7 @@ interface SessionRecord {
   exited_at: Date | null;
   duration_minutes: number | null;
   amount: string | null;
-  status: "active" | "completed";
+  status: "active" | "completed" | "awaiting_payment";
   entry_method: "auto" | "manual";
   exit_method: "auto" | "manual" | "forced" | null;
   image_entry: string | null;
@@ -83,33 +91,6 @@ function parseIntervalsSnapshot(
 
 function escapeLikePattern(value: string): string {
   return value.replace(/[\\%_]/g, (char) => `\\${char}`);
-}
-
-const MAX_CAPTURED_AT_AGE_MS = 24 * 60 * 60 * 1000;
-
-function resolveCapturedAt(capturedAt: string | undefined): Date {
-  if (!capturedAt) {
-    return new Date();
-  }
-
-  const parsed = new Date(capturedAt);
-  if (Number.isNaN(parsed.getTime())) {
-    console.warn(`captured_at formati noto'g'ri ("${capturedAt}") — hozirgi vaqt ishlatildi`);
-    return new Date();
-  }
-
-  const now = Date.now();
-  if (parsed.getTime() > now) {
-    console.warn(`captured_at kelajakdagi sana ("${capturedAt}") — hozirgi vaqt ishlatildi`);
-    return new Date();
-  }
-
-  if (now - parsed.getTime() > MAX_CAPTURED_AT_AGE_MS) {
-    console.warn(`captured_at 24 soatdan eski ("${capturedAt}") — hozirgi vaqt ishlatildi`);
-    return new Date();
-  }
-
-  return parsed;
 }
 
 export function timeStringToMinutes(time: string): number {
@@ -439,70 +420,6 @@ async function completeSession(
   });
 }
 
-async function captureAndDetect(
-  imageBase64: string | undefined
-): Promise<{ imagePath: string | null; ocrResult: OcrResult }> {
-  if (!imageBase64) {
-    return {
-      imagePath: null,
-      ocrResult: { detected: false, plate: null, confidence: 0, candidateFound: false },
-    };
-  }
-
-  const ocrResult = await detectPlate(imageBase64);
-  if (!ocrResult.candidateFound) {
-    return { imagePath: null, ocrResult };
-  }
-
-  const imagePath = await saveParkingImage(imageBase64);
-  return { imagePath, ocrResult };
-}
-
-export async function entryAuto(
-  orgId: number,
-  operatorId: number | null,
-  image: string | undefined,
-  capturedAt?: string
-) {
-  await assertWithinWorkHours(orgId);
-  await assertCapacityAvailable(orgId);
-
-  const enteredAt = resolveCapturedAt(capturedAt);
-  const { imagePath, ocrResult } = await captureAndDetect(image);
-
-  if (!ocrResult.candidateFound) {
-    return { detected: false as const, reason: "no_candidate" as const, message: "Nomer aniqlanmadi" };
-  }
-
-  if (!ocrResult.detected || !ocrResult.plate) {
-    console.warn(`OCR: nomer-kandidat topildi, lekin o'qib bo'lmadi (org_id: ${orgId}, entry)`);
-    emitParkingEntry(orgId, { session: null, detected: false });
-    emitDetectionFailed(orgId, { type: "entry", image_url: imagePath });
-    return { detected: false as const, reason: "ocr_failed" as const, message: "Nomer aniqlanmadi" };
-  }
-
-  await assertNoActiveSessionForPlate(orgId, ocrResult.plate);
-  const sessionSource = await resolveSessionSource(orgId, ocrResult.plate);
-  const pricing = await resolveEntryPricing(orgId, sessionSource);
-
-  const session = await insertActiveSession({
-    org_id: orgId,
-    plate_number: ocrResult.plate,
-    entry_method: "auto",
-    image_entry: imagePath,
-    operator_id: operatorId,
-    entered_at: enteredAt,
-    session_source: sessionSource,
-    tariff_price_per_hour: pricing.tariff_price_per_hour,
-    tariff_grace_period_minutes: pricing.tariff_grace_period_minutes,
-    tariff_intervals_snapshot: pricing.tariff_intervals_snapshot,
-  });
-
-  emitParkingEntry(orgId, { session, detected: true });
-
-  return { detected: true as const, session, confidence: ocrResult.confidence };
-}
-
 export async function entryManual(
   actor: AuthTokenPayload,
   input: { org_id?: number; plate_number: string }
@@ -515,7 +432,7 @@ export async function entryManual(
   const sessionSource = await resolveSessionSource(orgId, input.plate_number);
   const pricing = await resolveEntryPricing(orgId, sessionSource);
 
-  return insertActiveSession({
+  const session = await insertActiveSession({
     org_id: orgId,
     plate_number: input.plate_number,
     entry_method: "manual",
@@ -527,41 +444,11 @@ export async function entryManual(
     tariff_grace_period_minutes: pricing.tariff_grace_period_minutes,
     tariff_intervals_snapshot: pricing.tariff_intervals_snapshot,
   });
-}
 
-export async function exitAuto(
-  orgId: number,
-  operatorId: number | null,
-  image: string | undefined,
-  capturedAt?: string,
-  paymentMethod: "cash" | "online" = "cash"
-) {
-  const exitedAt = resolveCapturedAt(capturedAt);
-  const { imagePath, ocrResult } = await captureAndDetect(image);
+  await openBarrierOrWarn(orgId, "entry", input.plate_number);
+  emitEntryDetected(orgId, { plateNumber: input.plate_number, enteredAt: session!.entered_at });
 
-  if (!ocrResult.candidateFound) {
-    return { detected: false as const, reason: "no_candidate" as const, message: "Nomer aniqlanmadi" };
-  }
-
-  if (!ocrResult.detected || !ocrResult.plate) {
-    console.warn(`OCR: nomer-kandidat topildi, lekin o'qib bo'lmadi (org_id: ${orgId}, exit)`);
-    emitParkingExit(orgId, { session: null, payment: null, detected: false });
-    emitDetectionFailed(orgId, { type: "exit", image_url: imagePath });
-    return { detected: false as const, reason: "ocr_failed" as const, message: "Nomer aniqlanmadi" };
-  }
-
-  const result = await completeSession(
-    orgId,
-    ocrResult.plate,
-    operatorId,
-    "auto",
-    imagePath,
-    exitedAt,
-    paymentMethod
-  );
-  emitParkingExit(orgId, { session: result.session, payment: result.payment, detected: true });
-
-  return { detected: true as const, ...result, confidence: ocrResult.confidence };
+  return session;
 }
 
 export async function exitManual(
@@ -570,7 +457,7 @@ export async function exitManual(
 ) {
   const orgId = resolveOrgIdRequired(actor, input.org_id);
   const operatorId = actor.role === "operator" || actor.role === "owner" ? actor.id : null;
-  return completeSession(
+  const result = await completeSession(
     orgId,
     input.plate_number,
     operatorId,
@@ -579,6 +466,175 @@ export async function exitManual(
     new Date(),
     input.payment_method ?? "cash"
   );
+
+  await openBarrierOrWarn(orgId, "exit", input.plate_number);
+
+  const printResult = await printReceiptForSession(actor, result.session.id);
+  if (!printResult.success) {
+    console.warn(`Chek chop etilmadi (session #${result.session.id}): ${JSON.stringify(printResult)}`);
+  }
+
+  emitExitCompleted(orgId, {
+    plateNumber: input.plate_number,
+    amount: Number(result.session.amount),
+  });
+
+  return result;
+}
+
+async function openBarrierOrWarn(
+  orgId: number,
+  direction: "entry" | "exit",
+  plateNumber: string
+): Promise<void> {
+  const success = await openBarrier(orgId, direction);
+  if (!success) {
+    emitRelayFailed(orgId, {
+      direction,
+      plateNumber,
+      message: "Shlagbaum avtomatik ochilmadi, qo'lda oching",
+    });
+  }
+}
+
+async function moveSessionToAwaitingPayment(
+  orgId: number,
+  plateNumber: string,
+  exitedAt: Date
+): Promise<SessionRecord> {
+  return db.transaction(async (trx) => {
+    const session = await sessionsBaseQuery(trx)
+      .where({ org_id: orgId, plate_number: plateNumber, status: "active" })
+      .orderBy("entered_at", "desc")
+      .forUpdate()
+      .first();
+
+    if (!session) {
+      throw new ApiError(`"${plateNumber}" nomeri uchun faol sessiya topilmadi`, 404);
+    }
+
+    const enteredAt = new Date(session.entered_at);
+    const durationMinutes = calculateDurationMinutes(enteredAt, exitedAt);
+
+    const intervalsSnapshot = parseIntervalsSnapshot(session.tariff_intervals_snapshot);
+    let amount: number;
+    if (intervalsSnapshot) {
+      amount = calculateAmount(durationMinutes, 0, 0, intervalsSnapshot);
+    } else if (session.tariff_price_per_hour !== null) {
+      const pricePerHour = Number(session.tariff_price_per_hour);
+      const gracePeriodMinutes = session.tariff_grace_period_minutes ?? 0;
+      amount = calculateAmount(durationMinutes, pricePerHour, gracePeriodMinutes);
+    } else {
+      const tariff = await findTariff(trx, orgId);
+      amount = calculateAmount(durationMinutes, Number(tariff.price_per_hour), tariff.grace_period_minutes);
+    }
+
+    await trx("tb_parking_sessions").where({ id: session.id }).update({
+      status: "awaiting_payment",
+      exited_at: exitedAt,
+      duration_minutes: durationMinutes,
+      amount,
+    });
+
+    return {
+      ...session,
+      status: "awaiting_payment" as const,
+      exited_at: exitedAt,
+      duration_minutes: durationMinutes,
+      amount: String(amount),
+    };
+  });
+}
+
+export async function createEntryFromWebhook(orgId: number, plateNumber: string, confidence: number | null) {
+  try {
+    await assertWithinWorkHours(orgId);
+    await assertCapacityAvailable(orgId);
+    await assertNoActiveSessionForPlate(orgId, plateNumber);
+
+    const sessionSource = await resolveSessionSource(orgId, plateNumber);
+    const pricing = await resolveEntryPricing(orgId, sessionSource);
+
+    const session = await insertActiveSession({
+      org_id: orgId,
+      plate_number: plateNumber,
+      entry_method: "auto",
+      image_entry: null,
+      operator_id: null,
+      entered_at: new Date(),
+      session_source: sessionSource,
+      tariff_price_per_hour: pricing.tariff_price_per_hour,
+      tariff_grace_period_minutes: pricing.tariff_grace_period_minutes,
+      tariff_intervals_snapshot: pricing.tariff_intervals_snapshot,
+    });
+
+    await openBarrierOrWarn(orgId, "entry", plateNumber);
+    emitEntryDetected(orgId, { plateNumber, enteredAt: session!.entered_at });
+    await logActivity(null, "parking.entry_webhook", "session", session!.id, { plateNumber, orgId });
+
+    return { created: true as const, session, confidence };
+  } catch (err) {
+    if (err instanceof ApiError && err.details?.reason === "parking_full") {
+      emitParkingFull(orgId, { plateNumber });
+      return { created: false as const, reason: "parking_full" as const };
+    }
+    if (err instanceof ApiError && err.statusCode === 409) {
+      console.warn(`Webhook kirish: "${plateNumber}" mashinasi allaqachon stoyankada (org_id: ${orgId})`);
+      return { created: false as const, reason: "already_active" as const };
+    }
+    if (err instanceof ApiError) {
+      console.warn(`Webhook kirish rad etildi (org_id: ${orgId}, plate: ${plateNumber}): ${err.message}`);
+      return { created: false as const, reason: "rejected" as const };
+    }
+    throw err;
+  }
+}
+
+export async function createExitFromWebhook(orgId: number, plateNumber: string, confidence: number | null) {
+  try {
+    const activeSession = await sessionsBaseQuery(db)
+      .where({ org_id: orgId, plate_number: plateNumber, status: "active" })
+      .orderBy("entered_at", "desc")
+      .first();
+
+    if (!activeSession) {
+      console.warn(`Webhook chiqish: "${plateNumber}" uchun faol sessiya topilmadi (org_id: ${orgId})`);
+      emitPlateNotRecognizedForExit(orgId, {
+        plateNumber,
+        message: "Operator bilan bog'laning — nomer faol sessiyalar orasida topilmadi",
+      });
+      return { updated: false as const, reason: "not_found" as const };
+    }
+
+    const exitedAt = new Date();
+
+    if (activeSession.session_source !== "regular") {
+      const result = await completeSession(orgId, plateNumber, null, "auto", null, exitedAt);
+      await openBarrierOrWarn(orgId, "exit", plateNumber);
+      emitExitCompleted(orgId, { plateNumber, amount: 0 });
+      return { updated: true as const, status: "completed" as const, session: result.session, confidence };
+    }
+
+    const session = await moveSessionToAwaitingPayment(orgId, plateNumber, exitedAt);
+    emitExitAwaitingPayment(orgId, {
+      plateNumber,
+      amount: Number(session.amount),
+      enteredAt: session.entered_at,
+      durationMinutes: session.duration_minutes,
+    });
+    await logActivity(null, "parking.exit_webhook", "session", session.id, {
+      plateNumber,
+      amount: Number(session.amount),
+    });
+
+    return { updated: true as const, status: "awaiting_payment" as const, session, confidence };
+  } catch (err) {
+    if (err instanceof ApiError) {
+      console.warn(`Webhook chiqish rad etildi (org_id: ${orgId}, plate: ${plateNumber}): ${err.message}`);
+      return { updated: false as const, reason: "rejected" as const };
+    }
+    throw err;
+  }
 }
 
 export async function listActive(actor: AuthTokenPayload, requestedOrgId?: number) {
@@ -649,6 +705,138 @@ export async function getSessionById(actor: AuthTokenPayload, id: number) {
   return session;
 }
 
+export async function openBarrierForSession(
+  actor: AuthTokenPayload,
+  id: number,
+  direction: "entry" | "exit"
+) {
+  const session = await findSessionOrFail(id);
+  assertInScope(actor, session);
+
+  const success = await openBarrier(session.org_id, direction);
+  return { success };
+}
+
+export async function printReceiptForSession(actor: AuthTokenPayload, id: number) {
+  const session = await findSessionOrFail(id);
+  assertInScope(actor, session);
+
+  const organization = await db("tb_organizations")
+    .select("name", "printer_ip")
+    .where({ id: session.org_id })
+    .first();
+
+  if (!organization?.printer_ip) {
+    return { success: false as const, reason: "printer_not_configured" as const };
+  }
+
+  const success = await printReceipt(organization.printer_ip, {
+    orgName: organization.name,
+    plateNumber: session.plate_number,
+    enteredAt: new Date(session.entered_at),
+    exitedAt: session.exited_at ? new Date(session.exited_at) : new Date(),
+    durationMinutes: session.duration_minutes ?? 0,
+    amount: Number(session.amount ?? 0),
+    paymentMethod: session.payment_method,
+    issuedAt: new Date(),
+  });
+
+  return { success };
+}
+
+const AWAITING_PAYMENT_OVERDUE_MINUTES = 5;
+
+export async function listAwaitingPayment(actor: AuthTokenPayload, requestedOrgId?: number) {
+  const orgId = resolveOrgIdFilter(actor, requestedOrgId);
+
+  const query = sessionsBaseQuery(db)
+    .where({ status: "awaiting_payment" })
+    .orderBy("exited_at", "asc");
+  if (orgId !== undefined) {
+    query.andWhere({ org_id: orgId });
+  }
+
+  const sessions = await query;
+  const now = Date.now();
+
+  return sessions.map((session) => {
+    const exitedAt = session.exited_at ? new Date(session.exited_at).getTime() : now;
+    const overdueMinutes = (now - exitedAt) / 60000;
+    return { ...session, is_overdue: overdueMinutes > AWAITING_PAYMENT_OVERDUE_MINUTES };
+  });
+}
+
+export async function confirmCashPayment(actor: AuthTokenPayload, id: number) {
+  const existing = await findSessionOrFail(id);
+  assertInScope(actor, existing);
+
+  if (existing.status !== "awaiting_payment") {
+    throw new ApiError("Sessiya to'lov kutish holatida emas", 400);
+  }
+
+  const operatorId = actor.role === "operator" || actor.role === "owner" ? actor.id : null;
+
+  const result = await db.transaction(async (trx) => {
+    const session = await sessionsBaseQuery(trx).where({ id }).forUpdate().first();
+    if (!session) {
+      throw new ApiError("Sessiya topilmadi", 404);
+    }
+    if (session.status !== "awaiting_payment") {
+      throw new ApiError("Sessiya to'lov kutish holatida emas", 400);
+    }
+
+    await trx("tb_parking_sessions").where({ id }).update({
+      status: "completed",
+      payment_method: "cash",
+      operator_id: operatorId,
+    });
+
+    const [paymentId] = await trx("tb_payments").insert({
+      org_id: session.org_id,
+      session_id: id,
+      amount: session.amount ?? 0,
+      payment_method: "cash",
+    });
+
+    return {
+      session: {
+        ...session,
+        status: "completed" as const,
+        payment_method: "cash" as const,
+        operator_id: operatorId,
+      },
+      payment: {
+        id: paymentId,
+        org_id: session.org_id,
+        session_id: id,
+        amount: session.amount ?? "0",
+        payment_method: "cash" as const,
+        paid_at: new Date(),
+      },
+    };
+  });
+
+  await openBarrierOrWarn(result.session.org_id, "exit", result.session.plate_number);
+
+  const printResult = await printReceiptForSession(actor, id);
+  if (!printResult.success) {
+    console.warn(`Chek chop etilmadi (session #${id}): ${JSON.stringify(printResult)}`);
+  }
+
+  emitExitCompleted(result.session.org_id, {
+    plateNumber: result.session.plate_number,
+    amount: Number(result.session.amount),
+  });
+
+  await logActivity(actor.id, "parking.cash_payment_confirmed", "session", id, {
+    plateNumber: result.session.plate_number,
+    amount: Number(result.session.amount),
+    actorId: actor.id,
+  });
+
+  return result;
+}
+
 export async function updateSessionPaymentMethod(
   actor: AuthTokenPayload,
   id: number,
@@ -704,7 +892,7 @@ export async function forceCloseSession(
 
   const operatorId = actor.role === "operator" || actor.role === "owner" ? actor.id : null;
 
-  return db.transaction(async (trx) => {
+  const result = await db.transaction(async (trx) => {
     const lockedSession = await sessionsBaseQuery(trx).where({ id }).forUpdate().first();
     if (!lockedSession) {
       throw new ApiError("Sessiya topilmadi", 404);
@@ -770,6 +958,23 @@ export async function forceCloseSession(
       },
     };
   });
+
+  const orgId = result.session!.org_id;
+  const plateNumber = result.session!.plate_number;
+
+  await openBarrierOrWarn(orgId, "exit", plateNumber);
+
+  const printResult = await printReceiptForSession(actor, id);
+  if (!printResult.success) {
+    console.warn(`Chek chop etilmadi (session #${id}): ${JSON.stringify(printResult)}`);
+  }
+
+  emitExitCompleted(orgId, {
+    plateNumber,
+    amount: Number(result.session!.amount),
+  });
+
+  return result;
 }
 
 export async function getCapacity(actor: AuthTokenPayload, requestedOrgId?: number) {

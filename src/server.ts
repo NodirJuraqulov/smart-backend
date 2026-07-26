@@ -5,7 +5,8 @@ import { env } from "./config/env";
 import { scheduleBackupJob } from "./jobs/backupJob";
 import { scheduleStorageCleanupJob } from "./jobs/storageCleanupJob";
 import { scheduleUploadsBackupJob } from "./jobs/uploadsBackupJob";
-import { shutdownAllStreams } from "./websocket/liveViewRelay";
+import { scheduleWebhookDebugLogsCleanupJob } from "./jobs/webhookDebugLogsCleanupJob";
+import { scheduleWebhookEventsCleanupJob } from "./jobs/webhookEventsCleanupJob";
 import { initSocketServer } from "./websocket/socketServer";
 
 process.on("uncaughtException", (error) => {
@@ -23,6 +24,8 @@ const io = initSocketServer(httpServer);
 scheduleBackupJob();
 scheduleUploadsBackupJob();
 scheduleStorageCleanupJob();
+scheduleWebhookEventsCleanupJob();
+scheduleWebhookDebugLogsCleanupJob();
 
 httpServer.listen(env.port, () => {
   console.log(`Server running on port ${env.port} [${env.nodeEnv}]`);
@@ -32,8 +35,6 @@ const SHUTDOWN_TIMEOUT_MS = 10_000;
 
 async function gracefulShutdown(signal: string): Promise<void> {
   console.log(`${signal} qabul qilindi, server toza to'xtatilmoqda...`);
-
-  shutdownAllStreams();
 
   const closeHttpServer = new Promise<void>((resolve) => {
     httpServer.close(() => {

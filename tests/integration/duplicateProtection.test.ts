@@ -1,9 +1,7 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { entryAuto, entryManual, exitManual } from "@/modules/parking/parking.service";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { entryManual, exitManual } from "@/modules/parking/parking.service";
 import { AuthTokenPayload } from "@/modules/auth/auth.service";
 import { ApiError } from "@/utils/ApiError";
-import { detectPlate } from "@/services/ocr.service";
-import { saveParkingImage } from "@/utils/imageStorage";
 import {
   assertTestDatabase,
   cleanupOrganization,
@@ -13,9 +11,6 @@ import {
   createTestTariff,
   createTestUser,
 } from "./helpers";
-
-vi.mock("@/services/ocr.service", () => ({ detectPlate: vi.fn() }));
-vi.mock("@/utils/imageStorage", () => ({ saveParkingImage: vi.fn() }));
 
 let orgId: number;
 let operator: AuthTokenPayload;
@@ -34,7 +29,6 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await cleanupOrganization(orgId);
-  vi.clearAllMocks();
 });
 
 afterAll(async () => {
@@ -74,20 +68,5 @@ describe("entryManual — duplicate himoyasi", () => {
     await entryManual(operator, { plate_number: "01A200AA" });
     const other = await entryManual(operator, { plate_number: "01A201AA" });
     expect(other).toBeTruthy();
-  });
-});
-
-describe("entryAuto — duplicate himoyasi (OCR mock orqali)", () => {
-  it("bir xil aniqlangan nomer, hali chiqmagan holda — rad etiladi", async () => {
-    const plate = "01A300AA";
-    vi.mocked(saveParkingImage).mockResolvedValue("uploads/parking/fake.jpg");
-    vi.mocked(detectPlate).mockResolvedValue({ detected: true, plate, confidence: 0.99, candidateFound: true });
-
-    const first = await entryAuto(orgId, null, "ZmFrZS1pbWFnZQ==");
-    expect(first.detected).toBe(true);
-
-    await expect(entryAuto(orgId, null, "ZmFrZS1pbWFnZQ==")).rejects.toMatchObject({
-      statusCode: 409,
-    });
   });
 });

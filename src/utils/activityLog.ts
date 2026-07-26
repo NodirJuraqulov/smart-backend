@@ -1,7 +1,7 @@
 import { db } from "@/config/db";
 
 export async function logActivity(
-  actorId: number,
+  actorId: number | null,
   action: string,
   targetType?: string,
   targetId?: number,
