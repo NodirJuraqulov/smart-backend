@@ -9,19 +9,26 @@ function tooManyRequestsHandler(req: Request, res: Response) {
   res.status(429).json({ message: "Juda ko'p so'rov, birozdan keyin urinib ko'ring" });
 }
 
-export const webhookRateLimit = rateLimit({
-  windowMs: WINDOW_MS,
-  limit: MAX_REQUESTS,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req: Request): string => `webhook_token:${req.params.token}`,
-  handler: tooManyRequestsHandler,
-});
+export function createWebhookRateLimit(limit: number) {
+  return rateLimit({
+    windowMs: WINDOW_MS,
+    limit,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req: Request): string => `webhook_token:${req.params.token}`,
+    handler: tooManyRequestsHandler,
+  });
+}
 
-export const paymentWebhookRateLimit = rateLimit({
-  windowMs: WINDOW_MS,
-  limit: PAYMENT_MAX_REQUESTS,
-  standardHeaders: true,
-  legacyHeaders: false,
-  handler: tooManyRequestsHandler,
-});
+export function createPaymentWebhookRateLimit(limit: number) {
+  return rateLimit({
+    windowMs: WINDOW_MS,
+    limit,
+    standardHeaders: true,
+    legacyHeaders: false,
+    handler: tooManyRequestsHandler,
+  });
+}
+
+export const webhookRateLimit = createWebhookRateLimit(MAX_REQUESTS);
+export const paymentWebhookRateLimit = createPaymentWebhookRateLimit(PAYMENT_MAX_REQUESTS);

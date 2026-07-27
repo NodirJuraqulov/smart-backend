@@ -1,3 +1,4 @@
+import http from "http";
 import express from "express";
 import request from "supertest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -41,12 +42,7 @@ vi.mock("@/modules/relay/relay.service", () => ({
 
 let orgId: number;
 let webhookToken: string;
-
-function buildApp() {
-  const app = express();
-  app.use("/api/webhook", webhookRouter);
-  return app;
-}
+let server: http.Server;
 
 function buildHikvisionBody(plateNumber: string, confidence = 92): { contentType: string; rawBody: Buffer } {
   const boundary = `Boundary${Math.random().toString(36).slice(2)}`;
@@ -64,7 +60,7 @@ function buildHikvisionBody(plateNumber: string, confidence = 92): { contentType
 
 async function postWebhook(direction: "entry" | "exit", plateNumber: string, confidence = 92) {
   const { contentType, rawBody } = buildHikvisionBody(plateNumber, confidence);
-  return request(buildApp())
+  return request(server)
     .post(`/api/webhook/hikvision/${webhookToken}/${direction}`)
     .set("Content-Type", contentType)
     .send(rawBody);
@@ -79,6 +75,9 @@ async function activeSessionCount(): Promise<number> {
 
 beforeAll(async () => {
   await assertTestDatabase();
+  const app = express();
+  app.use("/api/webhook", webhookRouter);
+  server = http.createServer(app);
 });
 
 beforeEach(async () => {
@@ -95,6 +94,7 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
+  server?.close();
   await closeDb();
 });
 
@@ -249,7 +249,7 @@ describe("Idempotentlik", () => {
 
 describe("Webhook parse xatosi", () => {
   it("notanish format kelganda — webhook_parse_failed eventi org va public xonalariga yuboriladi", async () => {
-    const res = await request(buildApp())
+    const res = await request(server)
       .post(`/api/webhook/hikvision/${webhookToken}/entry`)
       .set("Content-Type", "text/plain")
       .send(Buffer.from("bu hikvision formatida emas"));
