@@ -280,8 +280,8 @@ export async function relayTestHandler(req: Request, res: Response) {
     return;
   }
 
-  const success = await openBarrier(id, direction);
-  res.json({ success });
+  const result = await openBarrier(id, direction);
+  res.json(result);
 }
 
 export async function printerTestHandler(req: Request, res: Response) {

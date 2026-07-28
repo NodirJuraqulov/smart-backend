@@ -103,6 +103,10 @@ if (env.nodeEnv !== "production") {
   });
 }
 
+app.use("/uploads/parking", (_req, res) => {
+  res.status(404).json({ message: "Rasm topilmadi" });
+});
+
 app.use(
   "/uploads",
   (req, res, next) => {

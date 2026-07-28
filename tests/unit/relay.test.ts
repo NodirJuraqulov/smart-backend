@@ -13,7 +13,7 @@ describe("triggerRelay", () => {
 
     const result = await triggerRelay(null, 5);
 
-    expect(result).toBe(false);
+    expect(result).toEqual({ status: "not_configured", success: false });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -23,7 +23,7 @@ describe("triggerRelay", () => {
 
     const result = await triggerRelay("192.168.1.50", 5);
 
-    expect(result).toBe(true);
+    expect(result).toEqual({ status: "opened", success: true });
     expect(fetchMock).toHaveBeenCalledWith(
       "http://192.168.1.50/relay/0?turn=on&timer=5",
       expect.objectContaining({ signal: expect.anything() })
@@ -36,13 +36,13 @@ describe("triggerRelay", () => {
 
     const result = await triggerRelay("192.168.1.50", 5);
 
-    expect(result).toBe(false);
+    expect(result).toEqual({ status: "failed", success: false });
   });
 
   it("timeout/tarmoq xatosida exception tashlamasdan false qaytaradi", async () => {
     const fetchMock = vi.fn().mockRejectedValue(new Error("network error"));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(triggerRelay("192.168.1.50", 5)).resolves.toBe(false);
+    await expect(triggerRelay("192.168.1.50", 5)).resolves.toEqual({ status: "failed", success: false });
   });
 });

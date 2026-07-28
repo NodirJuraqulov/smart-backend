@@ -15,6 +15,7 @@ import {
   openBarrierHandler,
   printReceiptHandler,
   sessionDetailHandler,
+  sessionImageHandler,
   sessionsHandler,
   updatePaymentMethodHandler,
 } from "./parking.controller";
@@ -30,6 +31,7 @@ router.get("/active", asyncHandler(activeHandler));
 router.get("/sessions", asyncHandler(sessionsHandler));
 router.get("/sessions/awaiting-payment", isOperatorOrOwner, asyncHandler(awaitingPaymentHandler));
 router.get("/sessions/:id", asyncHandler(sessionDetailHandler));
+router.get("/sessions/:id/images/:kind", asyncHandler(sessionImageHandler));
 router.post("/sessions/:id/force-close", asyncHandler(forceCloseHandler));
 router.post("/sessions/:id/open-barrier", isOperatorOrOwner, asyncHandler(openBarrierHandler));
 router.post("/sessions/:id/print-receipt", isOperatorOrOwner, asyncHandler(printReceiptHandler));

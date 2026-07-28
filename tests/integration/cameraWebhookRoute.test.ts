@@ -26,7 +26,7 @@ vi.mock("@/websocket/socketServer", () => ({
 }));
 
 vi.mock("@/modules/relay/relay.service", () => ({
-  openBarrier: vi.fn().mockResolvedValue(true),
+  openBarrier: vi.fn().mockResolvedValue({ status: "opened", success: true }),
 }));
 
 let orgId: number;
@@ -64,6 +64,13 @@ async function activeSessionCount(): Promise<number> {
     .where({ org_id: orgId, status: "active" })
     .count<{ count: string }[]>("id as count");
   return Number(count);
+}
+
+async function postDahua(direction: "entry" | "exit", body: unknown) {
+  return request(server)
+    .post(`/api/webhook/camera/${webhookToken}/${direction}`)
+    .set("Content-Type", "application/json")
+    .send(body);
 }
 
 beforeAll(async () => {
@@ -141,6 +148,36 @@ describe("POST /api/webhook/camera/:token/:direction — organization.camera_bra
 
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ ok: true, parsed: true, plate_number: "01C555AA" });
+  });
+});
+
+describe("Dahua xizmat signallari", () => {
+  beforeEach(async () => {
+    await db("tb_organizations").where({ id: orgId }).update({ camera_brand: "dahua" });
+  });
+
+  it.each([
+    { Active: "keepAlive", DeviceID: "dev-1" },
+    { body: { Active: "keepAlive", DeviceID: "dev-1" } },
+    { DeviceID: "dev-1", DeviceModel: "ITC413", DeviceType: "Tollgate", Manufacturer: "Dahua" },
+    { Plate: { IsExist: false }, DeviceID: "dev-1" },
+  ])("200 ignored qaytaradi, sessiya va warning yaratmaydi", async (payload) => {
+    const res = await postDahua("entry", payload);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, parsed: false, ignored: true });
+    expect(await activeSessionCount()).toBe(0);
+    expect(emitWebhookParseFailed).not.toHaveBeenCalled();
+    const [{ count }] = await db("tb_webhook_debug_logs")
+      .where({ org_id: orgId })
+      .count<{ count: string }[]>("id as count");
+    expect(Number(count)).toBe(0);
+  });
+
+  it("noma'lum payload eski parse-failure oqimida qoladi", async () => {
+    const res = await postDahua("entry", { foo: "bar" });
+    expect(res.body).toMatchObject({ ok: true, parsed: false });
+    expect(res.body.ignored).toBeUndefined();
+    expect(emitWebhookParseFailed).toHaveBeenCalledOnce();
   });
 });
 

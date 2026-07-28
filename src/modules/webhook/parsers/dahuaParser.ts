@@ -1,6 +1,6 @@
 import { CameraParser, CameraParserInput } from "./cameraParser.interface";
 import { NormalizedCameraEvent } from "./normalizedCameraEvent";
-import { UnsupportedCameraPayloadError } from "../webhookErrors";
+import { IgnoredCameraSignalError, UnsupportedCameraPayloadError } from "../webhookErrors";
 
 export interface DahuaParseResult {
   plateNumber: string;
@@ -13,6 +13,8 @@ export interface DahuaParseResult {
   plateRegion: string | null;
   vehicleBoundingBox: unknown;
   plateBoundingBox: unknown;
+  vehicleImageFileName: string | null;
+  plateImageFileName: string | null;
 }
 
 const EXPLICIT_PLATE_KEYS = [
@@ -155,6 +157,29 @@ function resolveRoot(rawBody: Buffer, parsedBody?: unknown): unknown {
   }
 }
 
+function isIgnoredServiceSignal(root: unknown): boolean {
+  if (!isPlainObject(root)) return false;
+
+  const active = findByKey(root, "Active");
+  if (typeof active === "string" && active.toLowerCase() === "keepalive") return true;
+
+  const plate = findByKey(root, "Plate");
+  if (isPlainObject(plate) && plate.IsExist === false) return true;
+
+  const hasDeviceId = typeof findByKey(root, "DeviceID") === "string";
+  const serviceKeys = ["DeviceModel", "DeviceName", "DeviceType", "IPAddress", "Manufacturer", "Status", "Heartbeat"];
+  return hasDeviceId &&
+    serviceKeys.some((key) => findByKey(root, key) !== undefined) &&
+    plate === undefined;
+}
+
+function parseDahuaDate(value: unknown): Date | undefined {
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  const normalized = value.trim().replace(" ", "T");
+  const date = new Date(normalized);
+  return Number.isNaN(date.getTime()) ? undefined : date;
+}
+
 export function parseDahuaPayload(rawBody: Buffer, parsedBody?: unknown): DahuaParseResult | null {
   const root = resolveRoot(rawBody, parsedBody);
   if (!isPlainObject(root)) {
@@ -162,11 +187,10 @@ export function parseDahuaPayload(rawBody: Buffer, parsedBody?: unknown): DahuaP
   }
 
   const plateObj = findByKey(root, "Plate");
-  if (isPlainObject(plateObj) && plateObj.IsExist === false) {
-    return null;
-  }
+  if (isPlainObject(plateObj) && plateObj.IsExist === false) return null;
 
   const normalPic = findByKey(root, "NormalPic");
+  const cutoutPic = findByKey(root, "CutoutPic");
   const platePic = findByKey(root, "PlatePic");
   const snapInfo = findByKey(root, "SnapInfo");
   const vehicleObj = findByKey(root, "Vehicle");
@@ -174,6 +198,8 @@ export function parseDahuaPayload(rawBody: Buffer, parsedBody?: unknown): DahuaP
   const platePicName = isPlainObject(platePic) && typeof platePic.PicName === "string" ? platePic.PicName : undefined;
   const normalPicName =
     isPlainObject(normalPic) && typeof normalPic.PicName === "string" ? normalPic.PicName : undefined;
+  const cutoutPicName =
+    isPlainObject(cutoutPic) && typeof cutoutPic.PicName === "string" ? cutoutPic.PicName : undefined;
 
   const explicitPlate = findFirstStringByKeys(root, EXPLICIT_PLATE_KEYS);
 
@@ -184,6 +210,9 @@ export function parseDahuaPayload(rawBody: Buffer, parsedBody?: unknown): DahuaP
   if (!plateNumber && normalPicName) {
     plateNumber = extractPlateFromFilename(normalPicName);
   }
+  if (!plateNumber && cutoutPicName) {
+    plateNumber = extractPlateFromFilename(cutoutPicName);
+  }
 
   if (!plateNumber) {
     return null;
@@ -191,13 +220,18 @@ export function parseDahuaPayload(rawBody: Buffer, parsedBody?: unknown): DahuaP
 
   const eventTime =
     extractExplicitEventTime(root) ??
+    parseDahuaDate(isPlainObject(snapInfo) ? snapInfo.AccurateTime : undefined) ??
+    parseDahuaDate(isPlainObject(snapInfo) ? snapInfo.SnapTime : undefined) ??
     (platePicName ? extractTimestampFromFilename(platePicName) : undefined) ??
     (normalPicName ? extractTimestampFromFilename(normalPicName) : undefined) ??
+    (cutoutPicName ? extractTimestampFromFilename(cutoutPicName) : undefined) ??
     new Date();
 
   const vehicleImageBase64 =
     isPlainObject(normalPic) && typeof normalPic.Content === "string"
       ? stripDataUrlPrefix(normalPic.Content)
+      : isPlainObject(cutoutPic) && typeof cutoutPic.Content === "string"
+        ? stripDataUrlPrefix(cutoutPic.Content)
       : null;
   const plateImageBase64 =
     isPlainObject(platePic) && typeof platePic.Content === "string" ? stripDataUrlPrefix(platePic.Content) : null;
@@ -216,11 +250,17 @@ export function parseDahuaPayload(rawBody: Buffer, parsedBody?: unknown): DahuaP
     plateRegion: isPlainObject(plateObj) && typeof plateObj.Region === "string" ? plateObj.Region : null,
     vehicleBoundingBox: isPlainObject(vehicleObj) ? (vehicleObj.VehicleBoundingBox ?? null) : null,
     plateBoundingBox: isPlainObject(plateObj) ? (plateObj.BoundingBox ?? null) : null,
+    vehicleImageFileName: normalPicName ?? cutoutPicName ?? null,
+    plateImageFileName: platePicName ?? null,
   };
 }
 
 export const dahuaParser: CameraParser = {
   async parse(input: CameraParserInput): Promise<NormalizedCameraEvent> {
+    const root = resolveRoot(input.rawBody, input.parsedBody);
+    if (isIgnoredServiceSignal(root)) {
+      throw new IgnoredCameraSignalError(undefined, { cameraBrand: "dahua" });
+    }
     const result = parseDahuaPayload(input.rawBody, input.parsedBody);
     if (!result) {
       throw new UnsupportedCameraPayloadError("Dahua payload tanilmadi yoki plate raqami aniqlanmadi", {
@@ -245,6 +285,8 @@ export const dahuaParser: CameraParser = {
         vehicleBoundingBox: result.vehicleBoundingBox,
         plateBoundingBox: result.plateBoundingBox,
       },
+      vehicleImageFileName: result.vehicleImageFileName,
+      plateImageFileName: result.plateImageFileName,
     };
   },
 };

@@ -9,58 +9,49 @@ const UPLOAD_ROOT = path.join(process.cwd(), "uploads", "parking");
 interface FileEntry {
   fullPath: string;
   relativePath: string;
-  dayFolder: string | null;
   size: number;
   mtimeMs: number;
 }
 
 async function collectFiles(): Promise<FileEntry[]> {
   const entries: FileEntry[] = [];
-
-  let rootEntries;
-  try {
-    rootEntries = await fs.readdir(UPLOAD_ROOT, { withFileTypes: true });
-  } catch {
-    return entries;
-  }
-
-  for (const entry of rootEntries) {
-    if (entry.isDirectory()) {
-      const dayFolder = entry.name;
-      const dayPath = path.join(UPLOAD_ROOT, dayFolder);
-      const dayFiles = await fs.readdir(dayPath, { withFileTypes: true });
-
-      for (const file of dayFiles) {
-        if (!file.isFile()) continue;
-        const fullPath = path.join(dayPath, file.name);
+  async function walk(directory: string): Promise<void> {
+    const children = await fs.readdir(directory, { withFileTypes: true });
+    for (const child of children) {
+      const fullPath = path.join(directory, child.name);
+      if (child.isDirectory()) {
+        await walk(fullPath);
+      } else if (child.isFile() && !child.name.endsWith(".tmp")) {
         const stats = await fs.stat(fullPath);
         entries.push({
           fullPath,
-          relativePath: path.join("uploads", "parking", dayFolder, file.name),
-          dayFolder,
+          relativePath: path.relative(process.cwd(), fullPath).split(path.sep).join("/"),
           size: stats.size,
           mtimeMs: stats.mtimeMs,
         });
       }
-    } else if (entry.isFile()) {
-      const fullPath = path.join(UPLOAD_ROOT, entry.name);
-      const stats = await fs.stat(fullPath);
-      entries.push({
-        fullPath,
-        relativePath: path.join("uploads", "parking", entry.name),
-        dayFolder: null,
-        size: stats.size,
-        mtimeMs: stats.mtimeMs,
-      });
     }
   }
-
+  try {
+    await walk(UPLOAD_ROOT);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
   return entries;
 }
 
 async function clearImageReference(relativePath: string): Promise<void> {
-  await db("tb_parking_sessions").where({ image_entry: relativePath }).update({ image_entry: null });
-  await db("tb_parking_sessions").where({ image_exit: relativePath }).update({ image_exit: null });
+  const columns = [
+    "image_entry",
+    "image_exit",
+    "entry_vehicle_image_path",
+    "entry_plate_image_path",
+    "exit_vehicle_image_path",
+    "exit_plate_image_path",
+  ];
+  for (const column of columns) {
+    await db("tb_parking_sessions").where({ [column]: relativePath }).update({ [column]: null });
+  }
 }
 
 export async function runStorageCleanup(): Promise<void> {
@@ -78,28 +69,32 @@ export async function runStorageCleanup(): Promise<void> {
   }
 
   files.sort((a, b) => a.mtimeMs - b.mtimeMs);
+  const activeRows = await db("tb_parking_sessions")
+    .whereIn("status", ["active", "awaiting_payment"])
+    .select(
+      "image_entry",
+      "image_exit",
+      "entry_vehicle_image_path",
+      "entry_plate_image_path",
+      "exit_vehicle_image_path",
+      "exit_plate_image_path"
+    );
+  const protectedPaths = new Set(
+    activeRows.flatMap((row) => Object.values(row).filter((value): value is string => typeof value === "string"))
+  );
 
   let runningSize = totalSize;
   let deletedCount = 0;
-  const touchedDayFolders = new Set<string>();
 
   for (const file of files) {
     if (runningSize <= limitBytes) break;
+    if (protectedPaths.has(file.relativePath)) continue;
 
     await fs.unlink(file.fullPath);
     await clearImageReference(file.relativePath);
 
     runningSize -= file.size;
     deletedCount++;
-    if (file.dayFolder) touchedDayFolders.add(file.dayFolder);
-  }
-
-  for (const dayFolder of touchedDayFolders) {
-    const dayPath = path.join(UPLOAD_ROOT, dayFolder);
-    const remaining = await fs.readdir(dayPath);
-    if (remaining.length === 0) {
-      await fs.rmdir(dayPath);
-    }
   }
 
   console.log(

@@ -16,7 +16,7 @@ import {
 } from "./helpers";
 
 vi.mock("@/modules/relay/relay.service", () => ({
-  openBarrier: vi.fn().mockResolvedValue(true),
+  openBarrier: vi.fn().mockResolvedValue({ status: "opened", success: true }),
 }));
 
 let orgId: number;
@@ -70,7 +70,7 @@ describe("POST /api/parking/sessions/:id/open-barrier", () => {
       .send({ direction: "entry" });
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ success: true });
+    expect(res.body).toEqual({ status: "opened", success: true });
     expect(openBarrier).toHaveBeenCalledWith(orgId, "entry");
   });
 
@@ -106,7 +106,7 @@ describe("POST /api/admin/organizations/:id/relay/test", () => {
       .send({ direction: "exit" });
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ success: true });
+    expect(res.body).toEqual({ status: "opened", success: true });
     expect(openBarrier).toHaveBeenCalledWith(orgId, "exit");
   });
 

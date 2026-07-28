@@ -93,6 +93,20 @@ describe("parseDahuaPayload", () => {
     expect(result?.plateImageBase64).toBe("BBBB");
   });
 
+  it("Picture ichidagi CutoutPic rasmiga fallback qiladi", () => {
+    const fixture = {
+      Picture: {
+        CutoutPic: { Content: "data:image/jpeg;base64,CCCC", PicName: NORMAL_PIC_NAME },
+        PlatePic: { Content: "DDDD", PicName: PLATE_PIC_NAME },
+      },
+      Plate: { IsExist: true, PlateNumber: "10R726ZA" },
+    };
+    const result = parseDahuaPayload(Buffer.from(JSON.stringify(fixture)), fixture);
+    expect(result?.vehicleImageBase64).toBe("CCCC");
+    expect(result?.plateImageBase64).toBe("DDDD");
+    expect(result?.vehicleImageFileName).toBe(NORMAL_PIC_NAME);
+  });
+
   it("body ichiga o'ralgan payloadni qo'llab-quvvatlaydi", () => {
     const fixture = { body: buildFixture() };
     const result = parseDahuaPayload(Buffer.from(JSON.stringify(fixture)), fixture);
@@ -134,5 +148,17 @@ describe("dahuaParser (CameraParser)", () => {
     await expect(
       dahuaParser.parse(buildInput({ foo: "bar" }, { rawBody: Buffer.from("bu dahua emas") }))
     ).rejects.toMatchObject({ code: "unsupported_camera_payload" });
+  });
+
+  it.each([
+    { Active: "keepAlive", DeviceID: "dev-1" },
+    { body: { Active: "keepAlive", DeviceID: "dev-1" } },
+    { payload: { Active: "keepAlive", DeviceID: "dev-1" } },
+    { DeviceID: "dev-1", DeviceModel: "ITC413", DeviceType: "Tollgate", Manufacturer: "Dahua" },
+    { Plate: { IsExist: false }, DeviceID: "dev-1" },
+  ])("kutilgan xizmat signalini ignored xatosi bilan ajratadi", async (fixture) => {
+    await expect(dahuaParser.parse(buildInput(fixture))).rejects.toMatchObject({
+      name: "IgnoredCameraSignalError",
+    });
   });
 });

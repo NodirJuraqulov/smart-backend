@@ -46,6 +46,8 @@ interface TestSettingsOverrides {
   work_hours_enabled?: boolean;
   work_start?: string;
   work_end?: string;
+  barrier_enabled?: boolean;
+  barrier_open_seconds?: number;
 }
 
 export async function createTestSettings(orgId: number, overrides: TestSettingsOverrides = {}): Promise<void> {
@@ -54,6 +56,8 @@ export async function createTestSettings(orgId: number, overrides: TestSettingsO
     work_hours_enabled: overrides.work_hours_enabled ?? false,
     work_start: overrides.work_start ?? null,
     work_end: overrides.work_end ?? null,
+    barrier_enabled: overrides.barrier_enabled ?? false,
+    barrier_open_seconds: overrides.barrier_open_seconds ?? 3,
   });
 }
 

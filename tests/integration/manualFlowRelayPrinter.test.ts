@@ -20,10 +20,10 @@ import {
 } from "./helpers";
 
 vi.mock("@/modules/relay/relay.service", () => ({
-  openBarrier: vi.fn().mockResolvedValue(true),
+  openBarrier: vi.fn().mockResolvedValue({ status: "opened", success: true }),
 }));
 vi.mock("@/modules/printer/printer.service", () => ({
-  printReceipt: vi.fn().mockResolvedValue(true),
+  printReceipt: vi.fn().mockResolvedValue({ status: "opened", success: true }),
 }));
 vi.mock("@/websocket/socketServer", () => ({
   emitEntryDetected: vi.fn(),
@@ -84,7 +84,7 @@ describe("POST /api/parking/entry/manual", () => {
   });
 
   it("rele xato bersa ham — sessiya baribir yaratiladi, relay_failed eventi yuboriladi", async () => {
-    vi.mocked(openBarrier).mockResolvedValueOnce(false);
+    vi.mocked(openBarrier).mockResolvedValueOnce({ status: "failed", success: false });
 
     const res = await request(buildApp())
       .post("/api/parking/entry/manual")
@@ -120,8 +120,8 @@ describe("POST /api/parking/exit/manual", () => {
   });
 
   it("rele va printer xato bersa ham — sessiya baribir yopiladi", async () => {
-    vi.mocked(openBarrier).mockResolvedValueOnce(false);
-    vi.mocked(printReceipt).mockResolvedValueOnce(false);
+    vi.mocked(openBarrier).mockResolvedValueOnce({ status: "failed", success: false });
+    vi.mocked(printReceipt).mockResolvedValueOnce({ status: "failed", success: false });
     await createTestActiveSession(orgId, "01H444AA");
 
     const res = await request(buildApp())
@@ -157,8 +157,8 @@ describe("POST /api/parking/sessions/:id/force-close", () => {
   });
 
   it("rele va printer xato bersa ham — sessiya baribir yopiladi", async () => {
-    vi.mocked(openBarrier).mockResolvedValueOnce(false);
-    vi.mocked(printReceipt).mockResolvedValueOnce(false);
+    vi.mocked(openBarrier).mockResolvedValueOnce({ status: "failed", success: false });
+    vi.mocked(printReceipt).mockResolvedValueOnce({ status: "failed", success: false });
     const sessionId = await createTestActiveSession(orgId, "01H666AA");
 
     const res = await request(buildApp())

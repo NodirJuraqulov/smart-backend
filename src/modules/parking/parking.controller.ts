@@ -121,6 +121,24 @@ export async function sessionDetailHandler(req: Request, res: Response) {
   res.json({ session });
 }
 
+export async function sessionImageHandler(req: Request, res: Response) {
+  const id = parseId(req, res);
+  if (id === null) return;
+  const kind = req.params.kind;
+  if (
+    kind !== "entry-vehicle" &&
+    kind !== "entry-plate" &&
+    kind !== "exit-vehicle" &&
+    kind !== "exit-plate"
+  ) {
+    res.status(404).json({ message: "Rasm turi topilmadi" });
+    return;
+  }
+  const absolutePath = await parkingService.getSessionImage(req.user!, id, kind);
+  res.setHeader("Cache-Control", "private, max-age=86400");
+  res.sendFile(absolutePath);
+}
+
 export async function updatePaymentMethodHandler(req: Request, res: Response) {
   const id = parseId(req, res);
   if (id === null) return;

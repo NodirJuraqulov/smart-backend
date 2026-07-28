@@ -3,7 +3,7 @@ import { db } from "@/config/db";
 import { cameraParserFactory } from "./parsers/cameraParserFactory";
 import { CameraParserInput } from "./parsers/cameraParser.interface";
 import { NormalizedCameraEvent } from "./parsers/normalizedCameraEvent";
-import { UnsupportedCameraBrandError, WebhookError } from "./webhookErrors";
+import { IgnoredCameraSignalError, UnsupportedCameraBrandError, WebhookError } from "./webhookErrors";
 import { logWebhookDebug } from "./webhookDebugLog.service";
 import { isDuplicateWebhookEvent } from "./webhookIdempotency";
 import { createEntryFromWebhook, createExitFromWebhook } from "@/modules/parking/parking.service";
@@ -68,6 +68,10 @@ async function processCameraWebhook(
   try {
     event = await parser.parse(input);
   } catch (err) {
+    if (err instanceof IgnoredCameraSignalError) {
+      res.status(200).json({ ok: true, parsed: false, ignored: true });
+      return;
+    }
     if (err instanceof WebhookError) {
       try {
         await logWebhookDebug(orgId, direction, req);
@@ -93,9 +97,9 @@ async function processCameraWebhook(
   }
 
   if (direction === "entry") {
-    await createEntryFromWebhook(orgId, event.plateNumber, event.confidence);
+    await createEntryFromWebhook({ orgId, event });
   } else {
-    await createExitFromWebhook(orgId, event.plateNumber, event.confidence);
+    await createExitFromWebhook({ orgId, event });
   }
 
   res.status(200).json({

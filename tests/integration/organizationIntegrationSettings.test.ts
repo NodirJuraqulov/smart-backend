@@ -24,7 +24,7 @@ vi.mock("@/websocket/socketServer", () => ({
   emitWebhookParseFailed: vi.fn(),
 }));
 vi.mock("@/modules/relay/relay.service", () => ({
-  openBarrier: vi.fn().mockResolvedValue(true),
+  openBarrier: vi.fn().mockResolvedValue({ status: "opened", success: true }),
 }));
 
 let orgId: number;

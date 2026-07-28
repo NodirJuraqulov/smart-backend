@@ -10,4 +10,6 @@ export interface NormalizedCameraEvent {
   overviewImage?: Buffer | null;
   metadata?: Record<string, unknown>;
   rawPayload?: unknown;
+  vehicleImageFileName?: string | null;
+  plateImageFileName?: string | null;
 }

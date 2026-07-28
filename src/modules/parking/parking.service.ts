@@ -16,6 +16,9 @@ import {
 import { openBarrier } from "@/modules/relay/relay.service";
 import { printReceipt } from "@/modules/printer/printer.service";
 import { logActivity } from "@/utils/activityLog";
+import { env } from "@/config/env";
+import { NormalizedCameraEvent } from "@/modules/webhook/parsers/normalizedCameraEvent";
+import { resolveParkingImageAbsolutePath, saveParkingImages } from "./parkingImage.service";
 
 type SessionSource = "regular" | "subscription" | "vip";
 
@@ -38,6 +41,10 @@ interface SessionRecord {
   exit_method: "auto" | "manual" | "forced" | null;
   image_entry: string | null;
   image_exit: string | null;
+  entry_vehicle_image_path: string | null;
+  entry_plate_image_path: string | null;
+  exit_vehicle_image_path: string | null;
+  exit_plate_image_path: string | null;
   operator_id: number | null;
   session_source: SessionSource;
   tariff_price_per_hour: string | null;
@@ -52,6 +59,7 @@ interface TariffRecord {
   org_id: number;
   price_per_hour: string;
   grace_period_minutes: number;
+  is_active: boolean;
 }
 
 function activePlateKey(orgId: number, plateNumber: string): string {
@@ -72,6 +80,10 @@ function sessionsBaseQuery(executor: Knex) {
     "exit_method",
     "image_entry",
     "image_exit",
+    "entry_vehicle_image_path",
+    "entry_plate_image_path",
+    "exit_vehicle_image_path",
+    "exit_plate_image_path",
     "operator_id",
     "session_source",
     "tariff_price_per_hour",
@@ -138,12 +150,102 @@ export function calculateAmount(
   intervals?: TariffIntervalSnapshot[] | null
 ): number {
   if (intervals && intervals.length > 0) {
-    return calculateIntervalAmount(durationMinutes, intervals);
+    const intervalAmount = calculateIntervalAmount(durationMinutes, intervals);
+    return Number.isFinite(intervalAmount) && intervalAmount >= 0 ? Math.round(intervalAmount * 100) / 100 : 0;
   }
   if (durationMinutes <= gracePeriodMinutes) {
     return 0;
   }
-  return Math.ceil(durationMinutes / 60) * pricePerHour;
+  const amount = Math.ceil(durationMinutes / 60) * pricePerHour;
+  return Number.isFinite(amount) && amount >= 0 ? Math.round(amount * 100) / 100 : 0;
+}
+
+function imageUrl(sessionId: number, kind: string, imagePath: string | null): string | null {
+  return imagePath ? `${env.publicBaseUrl}/api/parking/sessions/${sessionId}/images/${kind}` : null;
+}
+
+function withImageUrls(session: SessionRecord) {
+  const {
+    entry_vehicle_image_path: _entryVehiclePath,
+    entry_plate_image_path: _entryPlatePath,
+    exit_vehicle_image_path: _exitVehiclePath,
+    exit_plate_image_path: _exitPlatePath,
+    ...publicSession
+  } = session;
+  return {
+    ...publicSession,
+    entryVehicleImageUrl: imageUrl(session.id, "entry-vehicle", session.entry_vehicle_image_path),
+    entryPlateImageUrl: imageUrl(session.id, "entry-plate", session.entry_plate_image_path),
+    exitVehicleImageUrl: imageUrl(session.id, "exit-vehicle", session.exit_vehicle_image_path),
+    exitPlateImageUrl: imageUrl(session.id, "exit-plate", session.exit_plate_image_path),
+  };
+}
+
+async function withCurrentEstimate(session: SessionRecord, now = new Date()) {
+  if (session.status !== "active") return withImageUrls(session);
+  const durationMinutes = calculateDurationMinutes(new Date(session.entered_at), now);
+  try {
+    let intervals = parseIntervalsSnapshot(session.tariff_intervals_snapshot);
+    let pricePerHour = session.tariff_price_per_hour === null ? null : Number(session.tariff_price_per_hour);
+    let gracePeriodMinutes = session.tariff_grace_period_minutes ?? 0;
+    if (session.session_source === "regular" && !intervals && pricePerHour === null) {
+      const organization = await db("tb_organizations").select("pricing_mode").where({ id: session.org_id }).first();
+      if (organization?.pricing_mode === "interval") {
+        intervals = await findTariffIntervals(db, session.org_id);
+      } else {
+        const tariff = await findTariff(db, session.org_id);
+        pricePerHour = Number(tariff.price_per_hour);
+        gracePeriodMinutes = tariff.grace_period_minutes;
+      }
+    }
+    const estimatedAmount =
+      session.session_source !== "regular"
+        ? 0
+        : calculateAmount(durationMinutes, pricePerHour ?? 0, gracePeriodMinutes, intervals);
+    return {
+      ...withImageUrls(session),
+      current_duration_minutes: durationMinutes,
+      estimated_amount: estimatedAmount,
+      fee_calculation_status: "calculated" as const,
+    };
+  } catch (err) {
+    if (!(err instanceof ApiError)) throw err;
+    return {
+      ...withImageUrls(session),
+      current_duration_minutes: durationMinutes,
+      estimated_amount: null,
+      fee_calculation_status: "tariff_not_configured" as const,
+    };
+  }
+}
+
+async function attachCameraImages(
+  session: SessionRecord,
+  direction: "entry" | "exit",
+  event: NormalizedCameraEvent
+): Promise<SessionRecord> {
+  try {
+    const paths = await saveParkingImages(
+      session.org_id,
+      session.id,
+      direction,
+      { buffer: event.vehicleImage, originalFileName: event.vehicleImageFileName },
+      { buffer: event.plateImage, originalFileName: event.plateImageFileName }
+    );
+    const updates: Record<string, string> = {};
+    if (paths.vehiclePath) updates[`${direction}_vehicle_image_path`] = paths.vehiclePath;
+    if (paths.platePath) updates[`${direction}_plate_image_path`] = paths.platePath;
+    if (Object.keys(updates).length > 0) {
+      await db("tb_parking_sessions").where({ id: session.id, org_id: session.org_id }).update(updates);
+    }
+    return { ...session, ...updates };
+  } catch (err) {
+    console.warn(
+      `ANPR rasmlarini sessiyaga biriktirib bo'lmadi (org=${session.org_id}, session=${session.id}, direction=${direction}):`,
+      err instanceof Error ? err.message : err
+    );
+    return session;
+  }
 }
 
 async function assertWithinWorkHours(orgId: number): Promise<void> {
@@ -231,7 +333,7 @@ async function insertActiveSession(input: {
 }
 
 async function findTariff(executor: Knex, orgId: number) {
-  const tariff = await executor<TariffRecord>("tb_tariffs").where({ org_id: orgId }).first();
+  const tariff = await executor<TariffRecord>("tb_tariffs").where({ org_id: orgId, is_active: true }).first();
   if (!tariff) {
     throw new ApiError("Bu stoyanka uchun tarif topilmadi", 400);
   }
@@ -487,8 +589,8 @@ async function openBarrierOrWarn(
   direction: "entry" | "exit",
   plateNumber: string
 ): Promise<void> {
-  const success = await openBarrier(orgId, direction);
-  if (!success) {
+  const result = await openBarrier(orgId, direction);
+  if (result.status === "failed") {
     emitRelayFailed(orgId, {
       direction,
       plateNumber,
@@ -534,6 +636,8 @@ async function moveSessionToAwaitingPayment(
       exited_at: exitedAt,
       duration_minutes: durationMinutes,
       amount,
+      exit_method: "auto",
+      active_plate_key: null,
     });
 
     return {
@@ -542,11 +646,19 @@ async function moveSessionToAwaitingPayment(
       exited_at: exitedAt,
       duration_minutes: durationMinutes,
       amount: String(amount),
+      exit_method: "auto",
     };
   });
 }
 
-export async function createEntryFromWebhook(orgId: number, plateNumber: string, confidence: number | null) {
+interface CameraParkingInput {
+  orgId: number;
+  event: NormalizedCameraEvent;
+}
+
+export async function createEntryFromWebhook(input: CameraParkingInput) {
+  const { orgId, event } = input;
+  const plateNumber = event.plateNumber;
   try {
     await assertWithinWorkHours(orgId);
     await assertCapacityAvailable(orgId);
@@ -555,7 +667,7 @@ export async function createEntryFromWebhook(orgId: number, plateNumber: string,
     const sessionSource = await resolveSessionSource(orgId, plateNumber);
     const pricing = await resolveEntryPricing(orgId, sessionSource);
 
-    const session = await insertActiveSession({
+    let session = await insertActiveSession({
       org_id: orgId,
       plate_number: plateNumber,
       entry_method: "auto",
@@ -567,12 +679,13 @@ export async function createEntryFromWebhook(orgId: number, plateNumber: string,
       tariff_grace_period_minutes: pricing.tariff_grace_period_minutes,
       tariff_intervals_snapshot: pricing.tariff_intervals_snapshot,
     });
+    session = await attachCameraImages(session!, "entry", event);
 
     await openBarrierOrWarn(orgId, "entry", plateNumber);
     emitEntryDetected(orgId, { plateNumber, enteredAt: session!.entered_at });
     await logActivity(null, "parking.entry_webhook", "session", session!.id, { plateNumber, orgId });
 
-    return { created: true as const, session, confidence };
+    return { created: true as const, session: withImageUrls(session), confidence: event.confidence };
   } catch (err) {
     if (err instanceof ApiError && err.details?.reason === "parking_full") {
       emitParkingFull(orgId, { plateNumber });
@@ -590,7 +703,9 @@ export async function createEntryFromWebhook(orgId: number, plateNumber: string,
   }
 }
 
-export async function createExitFromWebhook(orgId: number, plateNumber: string, confidence: number | null) {
+export async function createExitFromWebhook(input: CameraParkingInput) {
+  const { orgId, event } = input;
+  const plateNumber = event.plateNumber;
   try {
     const activeSession = await sessionsBaseQuery(db)
       .where({ org_id: orgId, plate_number: plateNumber, status: "active" })
@@ -610,12 +725,14 @@ export async function createExitFromWebhook(orgId: number, plateNumber: string, 
 
     if (activeSession.session_source !== "regular") {
       const result = await completeSession(orgId, plateNumber, null, "auto", null, exitedAt);
+      const sessionWithImages = await attachCameraImages(result.session, "exit", event);
       await openBarrierOrWarn(orgId, "exit", plateNumber);
       emitExitCompleted(orgId, { plateNumber, amount: 0 });
-      return { updated: true as const, status: "completed" as const, session: result.session, confidence };
+      return { updated: true as const, status: "completed" as const, session: withImageUrls(sessionWithImages), confidence: event.confidence };
     }
 
-    const session = await moveSessionToAwaitingPayment(orgId, plateNumber, exitedAt);
+    let session = await moveSessionToAwaitingPayment(orgId, plateNumber, exitedAt);
+    session = await attachCameraImages(session, "exit", event);
     emitExitAwaitingPayment(orgId, {
       plateNumber,
       amount: Number(session.amount),
@@ -627,7 +744,7 @@ export async function createExitFromWebhook(orgId: number, plateNumber: string, 
       amount: Number(session.amount),
     });
 
-    return { updated: true as const, status: "awaiting_payment" as const, session, confidence };
+    return { updated: true as const, status: "awaiting_payment" as const, session: withImageUrls(session), confidence: event.confidence };
   } catch (err) {
     if (err instanceof ApiError) {
       console.warn(`Webhook chiqish rad etildi (org_id: ${orgId}, plate: ${plateNumber}): ${err.message}`);
@@ -645,7 +762,9 @@ export async function listActive(actor: AuthTokenPayload, requestedOrgId?: numbe
   if (orgId !== undefined) {
     query.andWhere({ org_id: orgId });
   }
-  return query;
+  const sessions = await query;
+  const now = new Date();
+  return Promise.all(sessions.map((session) => withCurrentEstimate(session, now)));
 }
 
 interface ListSessionsFilters {
@@ -688,8 +807,9 @@ export async function listSessions(actor: AuthTokenPayload, filters: ListSession
     .limit(filters.limit)
     .offset((filters.page - 1) * filters.limit);
 
+  const now = new Date();
   return {
-    sessions,
+    sessions: await Promise.all(sessions.map((session) => withCurrentEstimate(session, now))),
     pagination: {
       page: filters.page,
       limit: filters.limit,
@@ -702,7 +822,26 @@ export async function listSessions(actor: AuthTokenPayload, filters: ListSession
 export async function getSessionById(actor: AuthTokenPayload, id: number) {
   const session = await findSessionOrFail(id);
   assertInScope(actor, session);
-  return session;
+  return withCurrentEstimate(session);
+}
+
+export async function getSessionImage(
+  actor: AuthTokenPayload,
+  id: number,
+  kind: "entry-vehicle" | "entry-plate" | "exit-vehicle" | "exit-plate"
+) {
+  const session = await findSessionOrFail(id);
+  assertInScope(actor, session);
+  const columns = {
+    "entry-vehicle": session.entry_vehicle_image_path,
+    "entry-plate": session.entry_plate_image_path,
+    "exit-vehicle": session.exit_vehicle_image_path,
+    "exit-plate": session.exit_plate_image_path,
+  };
+  const relativePath = columns[kind];
+  const absolutePath = relativePath ? resolveParkingImageAbsolutePath(relativePath) : null;
+  if (!absolutePath) throw new ApiError("Rasm topilmadi", 404);
+  return absolutePath;
 }
 
 export async function openBarrierForSession(
@@ -713,8 +852,7 @@ export async function openBarrierForSession(
   const session = await findSessionOrFail(id);
   assertInScope(actor, session);
 
-  const success = await openBarrier(session.org_id, direction);
-  return { success };
+  return openBarrier(session.org_id, direction);
 }
 
 export async function printReceiptForSession(actor: AuthTokenPayload, id: number) {
@@ -762,7 +900,7 @@ export async function listAwaitingPayment(actor: AuthTokenPayload, requestedOrgI
   return sessions.map((session) => {
     const exitedAt = session.exited_at ? new Date(session.exited_at).getTime() : now;
     const overdueMinutes = (now - exitedAt) / 60000;
-    return { ...session, is_overdue: overdueMinutes > AWAITING_PAYMENT_OVERDUE_MINUTES };
+    return { ...withImageUrls(session), is_overdue: overdueMinutes > AWAITING_PAYMENT_OVERDUE_MINUTES };
   });
 }
 

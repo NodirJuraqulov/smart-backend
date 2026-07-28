@@ -34,3 +34,10 @@ export class PlateNotFoundError extends WebhookError {
     super("plate_not_found", message, details);
   }
 }
+
+export class IgnoredCameraSignalError extends WebhookError {
+  constructor(message?: string, details?: Record<string, unknown>) {
+    super("unsupported_camera_payload", message ?? "Kamera xizmat signali e'tiborsiz qoldirildi", details);
+    this.name = "IgnoredCameraSignalError";
+  }
+}

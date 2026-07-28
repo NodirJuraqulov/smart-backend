@@ -37,7 +37,7 @@ vi.mock("@/websocket/socketServer", () => ({
 }));
 
 vi.mock("@/modules/relay/relay.service", () => ({
-  openBarrier: vi.fn().mockResolvedValue(true),
+  openBarrier: vi.fn().mockResolvedValue({ status: "opened", success: true }),
 }));
 
 let orgId: number;
@@ -117,7 +117,7 @@ describe("Kirish webhook", () => {
   });
 
   it("rele xato qaytarsa — sessiya baribir yaratiladi, relay_failed eventi yuboriladi", async () => {
-    vi.mocked(openBarrier).mockResolvedValueOnce(false);
+    vi.mocked(openBarrier).mockResolvedValueOnce({ status: "failed", success: false });
 
     const res = await postWebhook("entry", "01A112AA");
 
