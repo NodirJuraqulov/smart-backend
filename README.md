@@ -53,6 +53,7 @@ To'liq production deploy qo'llanmasi uchun `DEPLOYMENT.md`ga qarang.
 | `CORS_ORIGIN` | Frontend manzili |
 | `UPLOADS_MAX_SIZE_MB` | Yuklangan fayllar uchun umumiy hajm chegarasi |
 | `PLATFORM_DEFAULT_TIMEZONE` | Ko'p tashkilotli hisobotlar uchun standart vaqt zonasi |
+| `PUBLIC_BASE_URL` | Serverning tashqi (public) manzili — webhook URL generatsiyasi uchun ishlatiladi (masalan `http://195.158.9.168:84`). Production'da MAJBURIY, aks holda server ishga tushmaydi |
 | `PAYME_ENABLED` | Payme onlayn to'lov integratsiyasi yoqilganmi (`true`/`false`) — hozircha faqat skelet, `false` qoldiring |
 | `CLICK_ENABLED` | Click onlayn to'lov integratsiyasi yoqilganmi (`true`/`false`) — hozircha faqat skelet, `false` qoldiring |
 

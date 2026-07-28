@@ -2,7 +2,7 @@ import express, { Router } from "express";
 import { asyncHandler } from "@/middleware/asyncHandler";
 import { resolveOrgByWebhookToken } from "@/middleware/webhookAuth";
 import { webhookRateLimit } from "@/middleware/webhookRateLimit";
-import { debugHandler, hikvisionHandler } from "./webhook.controller";
+import { cameraHandler, debugHandler, hikvisionHandler } from "./webhook.controller";
 
 const router = Router();
 
@@ -19,6 +19,12 @@ router.post(
   webhookRateLimit,
   resolveOrgByWebhookToken,
   asyncHandler(hikvisionHandler)
+);
+router.post(
+  "/camera/:token/:direction(entry|exit)",
+  webhookRateLimit,
+  resolveOrgByWebhookToken,
+  asyncHandler(cameraHandler)
 );
 
 export default router;

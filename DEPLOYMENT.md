@@ -32,6 +32,7 @@ Har birini `.env`dagi mos o'zgaruvchiga qo'ying:
 | `DB_PASSWORD` | Yuqoridagi generatsiya qilingan parol |
 | `JWT_SECRET` | Yuqoridagi generatsiya qilingan hex string |
 | `CORS_ORIGIN` | Frontend production domeni, masalan `https://app.stoyanka.uz` |
+| `PUBLIC_BASE_URL` | Serverning tashqi manzili — protokol + host + (agar standart bo'lmasa) port, oxirida `/` BO'LMASIN. Nginx orqasida bo'lsangiz ham HAQIQIY tashqi manzilni yozing (masalan `http://195.158.9.168:84`), Nginx qanday port ochganidan qat'iy nazar — bu qiymat kameraga/Payme/Click'ga ko'rsatiladigan webhook URL'larini generatsiya qilish uchun ishlatiladi va hech qachon so'rov sarlavhalaridan (Host) avtomatik aniqlanmaydi |
 | `PAYME_ENABLED`/`CLICK_ENABLED` | Haqiqiy Payme/Click integratsiyasi ulanmaguncha `false` qoldiring |
 
 Rele, printer, kamera IP manzillari va webhook tokeni `.env`da EMAS — har bir
@@ -48,6 +49,7 @@ avtomatik tekshiradi va MOS KELMASA serverni **ishga tushirishdan oldin**
 - `CORS_ORIGIN` `localhost` ga ishora qilsa yoki umuman belgilanmagan (`*`)
 - `DB_PASSWORD` bo'sh, 8 belgidan qisqa, yoki oddiy parollar ro'yxatida
   (`password`, `123456`, `admin` va h.k.)
+- `PUBLIC_BASE_URL` belgilanmagan yoki noto'g'ri URL formatida
 
 Bu — birov tasodifan dev `.env`ni production serverga ko'chirib qo'ymasligi
 uchun so'nggi xavfsizlik to'sig'i. Agar server shu sabab bilan to'xtasa,

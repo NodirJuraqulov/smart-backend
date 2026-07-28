@@ -1,10 +1,15 @@
 import { Request, Response } from "express";
 import { db } from "@/config/db";
-import { parseHikvisionPayload } from "./hikvisionParser";
+import { cameraParserFactory } from "./parsers/cameraParserFactory";
+import { CameraParserInput } from "./parsers/cameraParser.interface";
+import { NormalizedCameraEvent } from "./parsers/normalizedCameraEvent";
+import { UnsupportedCameraBrandError, WebhookError } from "./webhookErrors";
 import { logWebhookDebug } from "./webhookDebugLog.service";
 import { isDuplicateWebhookEvent } from "./webhookIdempotency";
 import { createEntryFromWebhook, createExitFromWebhook } from "@/modules/parking/parking.service";
 import { emitWebhookParseFailed } from "@/websocket/socketServer";
+
+const DEFAULT_CAMERA_BRAND = "hikvision";
 
 async function touchLastWebhookAt(orgId: number, direction: "entry" | "exit"): Promise<void> {
   const column = direction === "entry" ? "last_webhook_entry_at" : "last_webhook_exit_at";
@@ -19,45 +24,93 @@ export async function debugHandler(req: Request, res: Response) {
   res.status(200).json({ ok: true });
 }
 
-export async function hikvisionHandler(req: Request, res: Response) {
+function buildParserInput(
+  req: Request,
+  direction: "entry" | "exit",
+  organization: { id: number; cameraBrand: string | null }
+): CameraParserInput {
+  return {
+    rawBody: Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0),
+    headers: req.headers,
+    query: req.query,
+    contentType: (req.headers["content-type"] as string | undefined) ?? "",
+    direction,
+    organization,
+  };
+}
+
+async function processCameraWebhook(
+  req: Request,
+  res: Response,
+  cameraBrand: string,
+  organizationCameraBrand: string | null
+) {
   const direction = req.params.direction as "entry" | "exit";
-  const contentType = (req.headers["content-type"] as string | undefined) ?? "";
-  const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
   const orgId = req.webhookOrgId!;
 
   await touchLastWebhookAt(orgId, direction);
 
-  const parsed = parseHikvisionPayload(contentType, rawBody);
-
-  if (!parsed) {
-    await logWebhookDebug(orgId, direction, req);
-    emitWebhookParseFailed(orgId, {
-      direction,
-      message: "Kamera signal yubordi, lekin format tanilmadi",
-    });
-    res.status(200).json({ ok: true, parsed: false });
-    return;
+  let parser;
+  try {
+    parser = cameraParserFactory.getParser(cameraBrand);
+  } catch (err) {
+    if (err instanceof UnsupportedCameraBrandError) {
+      console.warn(`Webhook: ${err.message} (org_id: ${orgId})`);
+      res.status(400).json({ ok: false, message: err.message, code: err.code });
+      return;
+    }
+    throw err;
   }
 
-  if (await isDuplicateWebhookEvent(orgId, parsed.plateNumber, direction)) {
+  const input = buildParserInput(req, direction, { id: orgId, cameraBrand: organizationCameraBrand });
+
+  let event: NormalizedCameraEvent;
+  try {
+    event = await parser.parse(input);
+  } catch (err) {
+    if (err instanceof WebhookError) {
+      await logWebhookDebug(orgId, direction, req);
+      emitWebhookParseFailed(orgId, {
+        direction,
+        message: "Kamera signal yubordi, lekin format tanilmadi",
+      });
+      res.status(200).json({ ok: true, parsed: false });
+      return;
+    }
+    throw err;
+  }
+
+  if (await isDuplicateWebhookEvent(orgId, event.plateNumber, direction)) {
     console.log(
-      `Webhook: takroriy hodisa, e'tiborsiz qoldirildi (org_id: ${orgId}, plate: ${parsed.plateNumber}, ${direction})`
+      `Webhook: takroriy hodisa, e'tiborsiz qoldirildi (org_id: ${orgId}, plate: ${event.plateNumber}, ${direction})`
     );
     res.status(200).json({ ok: true, parsed: true, duplicate: true });
     return;
   }
 
   if (direction === "entry") {
-    await createEntryFromWebhook(orgId, parsed.plateNumber, parsed.confidence);
+    await createEntryFromWebhook(orgId, event.plateNumber, event.confidence);
   } else {
-    await createExitFromWebhook(orgId, parsed.plateNumber, parsed.confidence);
+    await createExitFromWebhook(orgId, event.plateNumber, event.confidence);
   }
 
   res.status(200).json({
     ok: true,
     parsed: true,
-    plate_number: parsed.plateNumber,
-    confidence: parsed.confidence,
-    timestamp: parsed.timestamp,
+    plate_number: event.plateNumber,
+    confidence: event.confidence,
+    timestamp: event.timestamp,
   });
+}
+
+export async function hikvisionHandler(req: Request, res: Response) {
+  await processCameraWebhook(req, res, DEFAULT_CAMERA_BRAND, null);
+}
+
+export async function cameraHandler(req: Request, res: Response) {
+  const orgId = req.webhookOrgId!;
+  const organization = await db("tb_organizations").select("camera_brand").where({ id: orgId }).first();
+  const cameraBrand = organization?.camera_brand || DEFAULT_CAMERA_BRAND;
+
+  await processCameraWebhook(req, res, cameraBrand, organization?.camera_brand ?? null);
 }

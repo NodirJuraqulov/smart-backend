@@ -10,6 +10,18 @@ function required(name: string): string {
   return value;
 }
 
+export function stripTrailingSlashes(url: string): string {
+  return url.replace(/\/+$/, "");
+}
+
+function resolvePublicBaseUrl(): string {
+  const raw = process.env.PUBLIC_BASE_URL;
+  if (!raw) {
+    return `http://localhost:${Number(process.env.PORT) || 5000}`;
+  }
+  return stripTrailingSlashes(raw);
+}
+
 export const env = {
   nodeEnv: process.env.NODE_ENV || "development",
   port: Number(process.env.PORT) || 5000,
@@ -41,6 +53,8 @@ export const env = {
 
   platformDefaultTimezone: process.env.PLATFORM_DEFAULT_TIMEZONE || "Asia/Tashkent",
 
+  publicBaseUrl: resolvePublicBaseUrl(),
+
   payments: {
     paymeEnabled: process.env.PAYME_ENABLED === "true",
     clickEnabled: process.env.CLICK_ENABLED === "true",
@@ -49,23 +63,53 @@ export const env = {
 
 const WEAK_DB_PASSWORDS = ["password", "123456", "12345678", "admin", "root", "qwerty", "changeme"];
 
-function validateProductionSafety(): void {
-  if (env.nodeEnv !== "production") return;
+export interface ProductionSafetyConfig {
+  jwtSecret: string;
+  corsOrigin: string;
+  dbPassword: string;
+  publicBaseUrl: string | undefined;
+}
 
+export function collectProductionSafetyErrors(config: ProductionSafetyConfig): string[] {
   const errors: string[] = [];
 
-  if (env.jwt.secret === "dev_secret_change_me" || env.jwt.secret.length < 32) {
+  if (config.jwtSecret === "dev_secret_change_me" || config.jwtSecret.length < 32) {
     errors.push("JWT_SECRET dev qiymatida qolgan yoki juda qisqa (kamida 32 belgi kerak)");
   }
 
-  if (env.corsOrigin === "*" || env.corsOrigin.includes("localhost")) {
+  if (config.corsOrigin === "*" || config.corsOrigin.includes("localhost")) {
     errors.push("CORS_ORIGIN localhost'ga ishora qilmoqda yoki belgilanmagan — production domenini ko'rsating");
   }
 
-  const dbPassword = env.db.password.toLowerCase();
+  const dbPassword = config.dbPassword.toLowerCase();
   if (!dbPassword || dbPassword.length < 8 || WEAK_DB_PASSWORDS.includes(dbPassword)) {
     errors.push("DB_PASSWORD bo'sh, juda qisqa yoki juda oddiy — kuchli, tasodifiy parol o'rnating");
   }
+
+  if (!config.publicBaseUrl) {
+    errors.push(
+      "PUBLIC_BASE_URL belgilanmagan — webhook URL generatsiyasi uchun majburiy (masalan http://195.158.9.168:84)"
+    );
+  } else {
+    try {
+      new URL(config.publicBaseUrl);
+    } catch {
+      errors.push(`PUBLIC_BASE_URL noto'g'ri URL formatida: "${config.publicBaseUrl}"`);
+    }
+  }
+
+  return errors;
+}
+
+function validateProductionSafety(): void {
+  if (env.nodeEnv !== "production") return;
+
+  const errors = collectProductionSafetyErrors({
+    jwtSecret: env.jwt.secret,
+    corsOrigin: env.corsOrigin,
+    dbPassword: env.db.password,
+    publicBaseUrl: process.env.PUBLIC_BASE_URL,
+  });
 
   if (errors.length > 0) {
     console.error("XAVFSIZLIK XATOSI — production rejimida ishga tushirib bo'lmaydi:");

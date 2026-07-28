@@ -1,5 +1,6 @@
 import { isIP } from "net";
 import { Request, Response } from "express";
+import { env } from "@/config/env";
 import { openBarrier } from "@/modules/relay/relay.service";
 import { printReceipt } from "@/modules/printer/printer.service";
 import { logActivity } from "@/utils/activityLog";
@@ -8,20 +9,20 @@ import { assertValidLogin, assertValidPassword } from "@/utils/validation";
 import * as organizationsService from "./organizations.service";
 
 const DEFAULT_CAMERA_BRAND = "hikvision";
+const DEBUG_CAMERA_BRAND = "debug";
 
 function isValidOptionalIp(value: unknown): boolean {
   return value === undefined || value === null || value === "" || (typeof value === "string" && isIP(value) !== 0);
 }
 
 function buildWebhookUrl(
-  baseUrl: string,
   cameraBrand: string | null,
   webhookToken: string | null,
   direction: "entry" | "exit"
 ): string | null {
   if (!webhookToken) return null;
   const brand = cameraBrand || DEFAULT_CAMERA_BRAND;
-  return `${baseUrl}/api/webhook/${brand}/${webhookToken}/${direction}`;
+  return `${env.publicBaseUrl}/api/webhook/${brand}/${webhookToken}/${direction}`;
 }
 
 export async function listHandler(req: Request, res: Response) {
@@ -185,7 +186,6 @@ export async function getIntegrationSettingsHandler(req: Request, res: Response)
   if (id === null) return;
 
   const settings = await organizationsService.getIntegrationSettings(id);
-  const baseUrl = `${req.protocol}://${req.get("host")}`;
 
   res.json({
     relayEntryIp: settings.relay_entry_ip,
@@ -193,8 +193,10 @@ export async function getIntegrationSettingsHandler(req: Request, res: Response)
     printerIp: settings.printer_ip,
     cameraBrand: settings.camera_brand,
     webhookToken: settings.webhook_token,
-    webhookEntryUrl: buildWebhookUrl(baseUrl, settings.camera_brand, settings.webhook_token, "entry"),
-    webhookExitUrl: buildWebhookUrl(baseUrl, settings.camera_brand, settings.webhook_token, "exit"),
+    webhookEntryUrl: buildWebhookUrl(settings.camera_brand, settings.webhook_token, "entry"),
+    webhookExitUrl: buildWebhookUrl(settings.camera_brand, settings.webhook_token, "exit"),
+    webhookDebugEntryUrl: buildWebhookUrl(DEBUG_CAMERA_BRAND, settings.webhook_token, "entry"),
+    webhookDebugExitUrl: buildWebhookUrl(DEBUG_CAMERA_BRAND, settings.webhook_token, "exit"),
     lastWebhookEntryAt: settings.last_webhook_entry_at,
     lastWebhookExitAt: settings.last_webhook_exit_at,
   });
@@ -237,15 +239,16 @@ export async function updateIntegrationSettingsHandler(req: Request, res: Respon
     camera_brand: settings.camera_brand,
   });
 
-  const baseUrl = `${req.protocol}://${req.get("host")}`;
   res.json({
     relayEntryIp: settings.relay_entry_ip,
     relayExitIp: settings.relay_exit_ip,
     printerIp: settings.printer_ip,
     cameraBrand: settings.camera_brand,
     webhookToken: settings.webhook_token,
-    webhookEntryUrl: buildWebhookUrl(baseUrl, settings.camera_brand, settings.webhook_token, "entry"),
-    webhookExitUrl: buildWebhookUrl(baseUrl, settings.camera_brand, settings.webhook_token, "exit"),
+    webhookEntryUrl: buildWebhookUrl(settings.camera_brand, settings.webhook_token, "entry"),
+    webhookExitUrl: buildWebhookUrl(settings.camera_brand, settings.webhook_token, "exit"),
+    webhookDebugEntryUrl: buildWebhookUrl(DEBUG_CAMERA_BRAND, settings.webhook_token, "entry"),
+    webhookDebugExitUrl: buildWebhookUrl(DEBUG_CAMERA_BRAND, settings.webhook_token, "exit"),
   });
 }
 
@@ -254,10 +257,17 @@ export async function regenerateWebhookTokenHandler(req: Request, res: Response)
   if (id === null) return;
 
   const webhookToken = await organizationsService.regenerateWebhookToken(id);
+  const settings = await organizationsService.getIntegrationSettings(id);
 
   await logActivity(req.user!.id, "organization.webhook_token_regenerated", "organization", id);
 
-  res.json({ webhookToken });
+  res.json({
+    webhookToken,
+    webhookEntryUrl: buildWebhookUrl(settings.camera_brand, webhookToken, "entry"),
+    webhookExitUrl: buildWebhookUrl(settings.camera_brand, webhookToken, "exit"),
+    webhookDebugEntryUrl: buildWebhookUrl(DEBUG_CAMERA_BRAND, webhookToken, "entry"),
+    webhookDebugExitUrl: buildWebhookUrl(DEBUG_CAMERA_BRAND, webhookToken, "exit"),
+  });
 }
 
 export async function relayTestHandler(req: Request, res: Response) {
