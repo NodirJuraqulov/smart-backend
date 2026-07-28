@@ -69,7 +69,11 @@ async function processCameraWebhook(
     event = await parser.parse(input);
   } catch (err) {
     if (err instanceof WebhookError) {
-      await logWebhookDebug(orgId, direction, req);
+      try {
+        await logWebhookDebug(orgId, direction, req);
+      } catch (debugLogErr) {
+        console.error("Webhook debug logini yozib bo'lmadi:", debugLogErr);
+      }
       emitWebhookParseFailed(orgId, {
         direction,
         message: "Kamera signal yubordi, lekin format tanilmadi",
