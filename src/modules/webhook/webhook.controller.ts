@@ -5,7 +5,7 @@ import { CameraParserInput } from "./parsers/cameraParser.interface";
 import { NormalizedCameraEvent } from "./parsers/normalizedCameraEvent";
 import { IgnoredCameraSignalError, UnsupportedCameraBrandError, WebhookError } from "./webhookErrors";
 import { logWebhookDebug } from "./webhookDebugLog.service";
-import { isDuplicateWebhookEvent } from "./webhookIdempotency";
+import { markWebhookEventProcessed, registerWebhookEvent } from "./webhookIdempotency";
 import { createEntryFromWebhook, createExitFromWebhook } from "@/modules/parking/parking.service";
 import { emitWebhookParseFailed } from "@/websocket/socketServer";
 
@@ -88,18 +88,41 @@ async function processCameraWebhook(
     throw err;
   }
 
-  if (await isDuplicateWebhookEvent(orgId, event.plateNumber, direction)) {
+  const plateNumber = event.plateNumber.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  event = { ...event, plateNumber };
+
+  const registration = await registerWebhookEvent(orgId, plateNumber, direction);
+  if (registration.status === "same_direction_duplicate") {
     console.log(
-      `Webhook: takroriy hodisa, e'tiborsiz qoldirildi (org_id: ${orgId}, plate: ${event.plateNumber}, ${direction})`
+      `Webhook: takroriy hodisa, e'tiborsiz qoldirildi (org_id: ${orgId}, plate: ${plateNumber}, ${direction})`
     );
     res.status(200).json({ ok: true, parsed: true, duplicate: true });
     return;
   }
+  if (registration.status === "opposite_camera_echo") {
+    console.log(
+      `Opposite camera echo ignored: org_id=${orgId} plate=${plateNumber} ` +
+        `first=${registration.firstDirection} ignored=${direction} delta_seconds=${registration.deltaSeconds}`
+    );
+    res.status(200).json({
+      ok: true,
+      parsed: true,
+      ignored: true,
+      reason: "opposite_camera_echo",
+    });
+    return;
+  }
 
+  let processed: boolean;
   if (direction === "entry") {
-    await createEntryFromWebhook({ orgId, event });
+    const result = await createEntryFromWebhook({ orgId, event });
+    processed = result.created;
   } else {
-    await createExitFromWebhook({ orgId, event });
+    const result = await createExitFromWebhook({ orgId, event });
+    processed = result.updated;
+  }
+  if (processed) {
+    await markWebhookEventProcessed(registration.eventId);
   }
 
   res.status(200).json({

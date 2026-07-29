@@ -178,6 +178,8 @@ describe("PUT /api/admin/organizations/:id/integration-settings", () => {
         relay_exit_ip: "192.168.1.21",
         printer_ip: "192.168.1.22",
         camera_brand: "hikvision",
+        gate_layout: "shared",
+        cross_camera_guard_seconds: 90,
       });
 
     expect(res.status).toBe(200);
@@ -186,11 +188,44 @@ describe("PUT /api/admin/organizations/:id/integration-settings", () => {
       relayExitIp: "192.168.1.21",
       printerIp: "192.168.1.22",
       cameraBrand: "hikvision",
+      gateLayout: "shared",
+      crossCameraGuardSeconds: 90,
     });
 
     const organization = await db("tb_organizations").where({ id: orgId }).first();
     expect(organization.relay_entry_ip).toBe("192.168.1.20");
     expect(organization.printer_ip).toBe("192.168.1.22");
+    expect(organization.gate_layout).toBe("shared");
+    expect(organization.cross_camera_guard_seconds).toBe(90);
+    const audit = await db("tb_activity_logs")
+      .where({
+        actor_id: superAdmin.id,
+        action: "organization.gate_layout_updated",
+        target_type: "organization",
+        target_id: orgId,
+      })
+      .first();
+    expect(audit).toBeTruthy();
+    const details = typeof audit.details === "string" ? JSON.parse(audit.details) : audit.details;
+    expect(details).toMatchObject({
+      organization_id: orgId,
+      changed_by_user_id: superAdmin.id,
+      previous: { gate_layout: "separate", cross_camera_guard_seconds: 90 },
+      next: { gate_layout: "shared", cross_camera_guard_seconds: 90 },
+    });
+  });
+
+  it.each([
+    { gate_layout: "invalid" },
+    { cross_camera_guard_seconds: 4 },
+    { cross_camera_guard_seconds: 301 },
+    { cross_camera_guard_seconds: 10.5 },
+  ])("gate layout/guard noto'g'ri qiymatini 400 bilan rad etadi", async (body) => {
+    const res = await request(buildApp())
+      .put(`/api/admin/organizations/${orgId}/integration-settings`)
+      .set("Authorization", authHeader(superAdmin))
+      .send(body);
+    expect(res.status).toBe(400);
   });
 
   it("noto'g'ri IP format bilan 400 qaytaradi", async () => {

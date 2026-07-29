@@ -199,6 +199,8 @@ export async function getIntegrationSettingsHandler(req: Request, res: Response)
     webhookDebugExitUrl: buildWebhookUrl(DEBUG_CAMERA_BRAND, settings.webhook_token, "exit"),
     lastWebhookEntryAt: settings.last_webhook_entry_at,
     lastWebhookExitAt: settings.last_webhook_exit_at,
+    gateLayout: settings.gate_layout,
+    crossCameraGuardSeconds: settings.cross_camera_guard_seconds,
   });
 }
 
@@ -206,7 +208,14 @@ export async function updateIntegrationSettingsHandler(req: Request, res: Respon
   const id = parseId(req, res);
   if (id === null) return;
 
-  const { relay_entry_ip, relay_exit_ip, printer_ip, camera_brand } = req.body ?? {};
+  const {
+    relay_entry_ip,
+    relay_exit_ip,
+    printer_ip,
+    camera_brand,
+    gate_layout,
+    cross_camera_guard_seconds,
+  } = req.body ?? {};
 
   if (!isValidOptionalIp(relay_entry_ip)) {
     res.status(400).json({ message: "relay_entry_ip to'g'ri IP manzil formatida yoki bo'sh bo'lishi kerak" });
@@ -224,12 +233,28 @@ export async function updateIntegrationSettingsHandler(req: Request, res: Respon
     res.status(400).json({ message: "camera_brand satr bo'lishi kerak" });
     return;
   }
+  if (gate_layout !== undefined && gate_layout !== "shared" && gate_layout !== "separate") {
+    res.status(400).json({ message: "gate_layout 'shared' yoki 'separate' bo'lishi kerak" });
+    return;
+  }
+  if (
+    cross_camera_guard_seconds !== undefined &&
+    (!Number.isInteger(cross_camera_guard_seconds) ||
+      cross_camera_guard_seconds < 5 ||
+      cross_camera_guard_seconds > 300)
+  ) {
+    res.status(400).json({ message: "cross_camera_guard_seconds 5-300 oralig'ida bo'lishi kerak" });
+    return;
+  }
 
+  const previousSettings = await organizationsService.getIntegrationSettings(id);
   const settings = await organizationsService.updateIntegrationSettings(id, {
     relay_entry_ip: relay_entry_ip === "" ? null : relay_entry_ip,
     relay_exit_ip: relay_exit_ip === "" ? null : relay_exit_ip,
     printer_ip: printer_ip === "" ? null : printer_ip,
     camera_brand: camera_brand === "" ? null : camera_brand,
+    gate_layout,
+    cross_camera_guard_seconds,
   });
 
   await logActivity(req.user!.id, "organization.integration_settings_updated", "organization", id, {
@@ -237,7 +262,27 @@ export async function updateIntegrationSettingsHandler(req: Request, res: Respon
     relay_exit_ip: settings.relay_exit_ip,
     printer_ip: settings.printer_ip,
     camera_brand: settings.camera_brand,
+    gate_layout: settings.gate_layout,
+    cross_camera_guard_seconds: settings.cross_camera_guard_seconds,
   });
+  if (
+    previousSettings.gate_layout !== settings.gate_layout ||
+    previousSettings.cross_camera_guard_seconds !== settings.cross_camera_guard_seconds
+  ) {
+    await logActivity(req.user!.id, "organization.gate_layout_updated", "organization", id, {
+      organization_id: id,
+      changed_by_user_id: req.user!.id,
+      previous: {
+        gate_layout: previousSettings.gate_layout,
+        cross_camera_guard_seconds: previousSettings.cross_camera_guard_seconds,
+      },
+      next: {
+        gate_layout: settings.gate_layout,
+        cross_camera_guard_seconds: settings.cross_camera_guard_seconds,
+      },
+      changed_at: new Date().toISOString(),
+    });
+  }
 
   res.json({
     relayEntryIp: settings.relay_entry_ip,
@@ -249,6 +294,8 @@ export async function updateIntegrationSettingsHandler(req: Request, res: Respon
     webhookExitUrl: buildWebhookUrl(settings.camera_brand, settings.webhook_token, "exit"),
     webhookDebugEntryUrl: buildWebhookUrl(DEBUG_CAMERA_BRAND, settings.webhook_token, "entry"),
     webhookDebugExitUrl: buildWebhookUrl(DEBUG_CAMERA_BRAND, settings.webhook_token, "exit"),
+    gateLayout: settings.gate_layout,
+    crossCameraGuardSeconds: settings.cross_camera_guard_seconds,
   });
 }
 

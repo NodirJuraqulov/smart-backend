@@ -284,6 +284,8 @@ interface IntegrationSettings {
   webhook_token: string | null;
   last_webhook_entry_at: Date | null;
   last_webhook_exit_at: Date | null;
+  gate_layout: "shared" | "separate";
+  cross_camera_guard_seconds: number;
 }
 
 async function findIntegrationSettingsOrFail(id: number): Promise<IntegrationSettings> {
@@ -296,7 +298,9 @@ async function findIntegrationSettingsOrFail(id: number): Promise<IntegrationSet
       "camera_brand",
       "webhook_token",
       "last_webhook_entry_at",
-      "last_webhook_exit_at"
+      "last_webhook_exit_at",
+      "gate_layout",
+      "cross_camera_guard_seconds"
     )
     .where({ id })
     .first();
@@ -315,6 +319,8 @@ interface UpdateIntegrationSettingsInput {
   relay_exit_ip?: string | null;
   printer_ip?: string | null;
   camera_brand?: string | null;
+  gate_layout?: "shared" | "separate";
+  cross_camera_guard_seconds?: number;
 }
 
 export async function updateIntegrationSettings(
@@ -328,6 +334,10 @@ export async function updateIntegrationSettings(
   if (input.relay_exit_ip !== undefined) updates.relay_exit_ip = input.relay_exit_ip;
   if (input.printer_ip !== undefined) updates.printer_ip = input.printer_ip;
   if (input.camera_brand !== undefined) updates.camera_brand = input.camera_brand;
+  if (input.gate_layout !== undefined) updates.gate_layout = input.gate_layout;
+  if (input.cross_camera_guard_seconds !== undefined) {
+    updates.cross_camera_guard_seconds = input.cross_camera_guard_seconds;
+  }
 
   if (Object.keys(updates).length > 0) {
     await db("tb_organizations").where({ id }).update(updates);
