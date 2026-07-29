@@ -343,3 +343,267 @@ export async function getYearlyReport(
     monthly_breakdown: monthlyBreakdown,
   };
 }
+
+type RangeGranularity = "daily" | "monthly" | "yearly";
+
+interface GroupedCountRow {
+  bucket: string;
+  count: string;
+}
+
+interface GroupedPaymentRow {
+  bucket: string;
+  payment_method: "cash" | "online";
+  total: string | null;
+}
+
+interface SubscriptionRangeRow {
+  org_id: number;
+  created_at: Date;
+  last_renewed_at: string | null;
+  price_snapshot: string;
+}
+
+function requireCompleteRange(from: string | undefined, to: string | undefined, label: string): [string, string] {
+  if (!from || !to) {
+    throw new ApiError(`${label} uchun boshlanish va tugash qiymatlari birga yuborilishi kerak`, 400);
+  }
+  return [from, to];
+}
+
+function buildBuckets(start: DateTime, end: DateTime, granularity: RangeGranularity): string[] {
+  const buckets: string[] = [];
+  let cursor = start;
+  while (cursor.toMillis() <= end.toMillis()) {
+    buckets.push(
+      granularity === "daily"
+        ? cursor.toFormat("yyyy-MM-dd")
+        : granularity === "monthly"
+          ? cursor.toFormat("yyyy-MM")
+          : cursor.toFormat("yyyy")
+    );
+    cursor =
+      granularity === "daily"
+        ? cursor.plus({ days: 1 })
+        : granularity === "monthly"
+          ? cursor.plus({ months: 1 })
+          : cursor.plus({ years: 1 });
+  }
+  return buckets;
+}
+
+async function getRangeReport(
+  actor: AuthTokenPayload,
+  requestedOrgId: number | undefined,
+  granularity: RangeGranularity,
+  start: DateTime,
+  end: DateTime
+) {
+  const orgId = resolveOrgIdRequired(actor, requestedOrgId);
+  await assertOrganizationExists(orgId);
+  const timezone = await getOrgTimezone(orgId);
+  const zonedStart = start.setZone(timezone, { keepLocalTime: true }).startOf(
+    granularity === "daily" ? "day" : granularity === "monthly" ? "month" : "year"
+  );
+  const zonedEnd = end.setZone(timezone, { keepLocalTime: true }).endOf(
+    granularity === "daily" ? "day" : granularity === "monthly" ? "month" : "year"
+  );
+  const startDate = zonedStart.toJSDate();
+  const endDate = zonedEnd.toJSDate();
+  const format = granularity === "daily" ? "%Y-%m-%d" : granularity === "monthly" ? "%Y-%m" : "%Y";
+
+  const [entries, exits, payments, subscriptions] = await Promise.all([
+    db("tb_parking_sessions")
+      .where({ org_id: orgId })
+      .whereBetween("entered_at", [startDate, endDate])
+      .select(db.raw("DATE_FORMAT(entered_at, ?) as bucket", [format]))
+      .count<GroupedCountRow[]>("id as count")
+      .groupBy("bucket"),
+    db("tb_parking_sessions")
+      .where({ org_id: orgId })
+      .whereNotNull("exited_at")
+      .whereBetween("exited_at", [startDate, endDate])
+      .select(db.raw("DATE_FORMAT(exited_at, ?) as bucket", [format]))
+      .count<GroupedCountRow[]>("id as count")
+      .groupBy("bucket"),
+    db("tb_payments")
+      .join("tb_parking_sessions", "tb_parking_sessions.id", "tb_payments.session_id")
+      .where("tb_payments.org_id", orgId)
+      .andWhere("tb_parking_sessions.session_source", "regular")
+      .whereBetween("tb_payments.paid_at", [startDate, endDate])
+      .select(
+        db.raw("DATE_FORMAT(tb_payments.paid_at, ?) as bucket", [format]),
+        "tb_parking_sessions.payment_method"
+      )
+      .sum<GroupedPaymentRow[]>("tb_payments.amount as total")
+      .groupBy("bucket", "tb_parking_sessions.payment_method"),
+    db<SubscriptionRangeRow>("tb_subscriptions")
+      .where({ org_id: orgId })
+      .andWhere((builder) => {
+        builder
+          .whereBetween("created_at", [startDate, endDate])
+          .orWhereBetween("last_renewed_at", [
+            zonedStart.toFormat("yyyy-MM-dd"),
+            zonedEnd.toFormat("yyyy-MM-dd"),
+          ]);
+      })
+      .select("created_at", "last_renewed_at", "price_snapshot"),
+  ]);
+
+  const entryMap = new Map(entries.map((row) => [row.bucket, Number(row.count)]));
+  const exitMap = new Map(exits.map((row) => [row.bucket, Number(row.count)]));
+  const cashMap = new Map<string, number>();
+  const onlineMap = new Map<string, number>();
+  for (const row of payments) {
+    const map = row.payment_method === "online" ? onlineMap : cashMap;
+    map.set(row.bucket, (map.get(row.bucket) ?? 0) + Number(row.total ?? 0));
+  }
+
+  const subscriptionMap = new Map<string, number>();
+  for (const row of subscriptions) {
+    const created = DateTime.fromJSDate(new Date(row.created_at)).setZone(timezone);
+    const renewed = row.last_renewed_at
+      ? DateTime.fromISO(row.last_renewed_at, { zone: timezone })
+      : null;
+    const occurrence =
+      created.toMillis() >= zonedStart.toMillis() && created.toMillis() <= zonedEnd.toMillis()
+        ? created
+        : renewed;
+    if (!occurrence) continue;
+    const bucket =
+      granularity === "daily"
+        ? occurrence.toFormat("yyyy-MM-dd")
+        : granularity === "monthly"
+          ? occurrence.toFormat("yyyy-MM")
+          : occurrence.toFormat("yyyy");
+    subscriptionMap.set(bucket, (subscriptionMap.get(bucket) ?? 0) + Number(row.price_snapshot));
+  }
+
+  const items = buildBuckets(zonedStart, zonedEnd, granularity).map((bucket) => {
+    const cashRevenue = cashMap.get(bucket) ?? 0;
+    const onlineRevenue = onlineMap.get(bucket) ?? 0;
+    const subscriptionRevenue = subscriptionMap.get(bucket) ?? 0;
+    return {
+      [granularity === "daily" ? "date" : granularity === "monthly" ? "month" : "year"]:
+        granularity === "yearly" ? Number(bucket) : bucket,
+      entries: entryMap.get(bucket) ?? 0,
+      exits: exitMap.get(bucket) ?? 0,
+      cash_revenue: cashRevenue,
+      online_revenue: onlineRevenue,
+      regular_revenue: cashRevenue + onlineRevenue,
+      subscription_revenue: subscriptionRevenue,
+      revenue: cashRevenue + onlineRevenue + subscriptionRevenue,
+    };
+  });
+
+  const totals = items.reduce(
+    (sum, item) => ({
+      total_entries: sum.total_entries + item.entries,
+      total_exits: sum.total_exits + item.exits,
+      cash_revenue: sum.cash_revenue + item.cash_revenue,
+      online_revenue: sum.online_revenue + item.online_revenue,
+      regular_revenue: sum.regular_revenue + item.regular_revenue,
+      subscription_revenue: sum.subscription_revenue + item.subscription_revenue,
+      total_revenue: sum.total_revenue + item.revenue,
+    }),
+    {
+      total_entries: 0,
+      total_exits: 0,
+      cash_revenue: 0,
+      online_revenue: 0,
+      regular_revenue: 0,
+      subscription_revenue: 0,
+      total_revenue: 0,
+    }
+  );
+
+  return {
+    org_id: orgId,
+    ...totals,
+    period: {
+      type: granularity,
+      from: items.length
+        ? String(items[0][granularity === "daily" ? "date" : granularity === "monthly" ? "month" : "year"])
+        : "",
+      to: items.length
+        ? String(items[items.length - 1][granularity === "daily" ? "date" : granularity === "monthly" ? "month" : "year"])
+        : "",
+    },
+    totals,
+    items,
+  };
+}
+
+export async function getDailyRangeReport(
+  actor: AuthTokenPayload,
+  requestedOrgId: number | undefined,
+  fromParam: string | undefined,
+  toParam: string | undefined
+) {
+  const [from, to] = requireCompleteRange(fromParam, toParam, "Kunlik diapazon");
+  const orgId = resolveOrgIdRequired(actor, requestedOrgId);
+  const timezone = await getOrgTimezone(orgId);
+  if (!isValidDateString(from, timezone) || !isValidDateString(to, timezone)) {
+    throw new ApiError("from_date va to_date formati noto'g'ri (YYYY-MM-DD)", 400);
+  }
+  const start = DateTime.fromISO(from, { zone: timezone });
+  const end = DateTime.fromISO(to, { zone: timezone });
+  const days = Math.floor(end.startOf("day").diff(start.startOf("day"), "days").days) + 1;
+  if (days < 1) throw new ApiError("from_date to_date dan keyin bo'lishi mumkin emas", 400);
+  if (days > 366) throw new ApiError("Kunlik diapazon 366 kundan oshmasligi kerak", 400);
+  if (isFutureDate(to, timezone)) throw new ApiError("Kelajakdagi sana uchun hisobot bo'lishi mumkin emas", 400);
+  return getRangeReport(actor, requestedOrgId, "daily", start, end);
+}
+
+export async function getMonthlyRangeReport(
+  actor: AuthTokenPayload,
+  requestedOrgId: number | undefined,
+  fromParam: string | undefined,
+  toParam: string | undefined
+) {
+  const [from, to] = requireCompleteRange(fromParam, toParam, "Oylik diapazon");
+  if (!/^\d{4}-\d{2}$/.test(from) || !/^\d{4}-\d{2}$/.test(to)) {
+    throw new ApiError("from_month va to_month formati noto'g'ri (YYYY-MM)", 400);
+  }
+  const start = DateTime.fromFormat(from, "yyyy-MM");
+  const end = DateTime.fromFormat(to, "yyyy-MM");
+  if (!start.isValid || !end.isValid || start.toFormat("yyyy-MM") !== from || end.toFormat("yyyy-MM") !== to) {
+    throw new ApiError("from_month yoki to_month noto'g'ri", 400);
+  }
+  const months = Math.floor(end.startOf("month").diff(start.startOf("month"), "months").months) + 1;
+  if (months < 1) throw new ApiError("from_month to_month dan keyin bo'lishi mumkin emas", 400);
+  if (months > 120) throw new ApiError("Oylik diapazon 120 oydan oshmasligi kerak", 400);
+  const orgId = resolveOrgIdRequired(actor, requestedOrgId);
+  const timezone = await getOrgTimezone(orgId);
+  if (isFutureMonth(end.year, end.month, timezone)) {
+    throw new ApiError("Kelajakdagi oy uchun hisobot bo'lishi mumkin emas", 400);
+  }
+  return getRangeReport(actor, requestedOrgId, "monthly", start, end);
+}
+
+export async function getYearlyRangeReport(
+  actor: AuthTokenPayload,
+  requestedOrgId: number | undefined,
+  fromParam: string | undefined,
+  toParam: string | undefined
+) {
+  const [from, to] = requireCompleteRange(fromParam, toParam, "Yillik diapazon");
+  if (!/^\d{4}$/.test(from) || !/^\d{4}$/.test(to)) {
+    throw new ApiError("from_year va to_year to'rt xonali yil bo'lishi kerak", 400);
+  }
+  const fromYear = Number(from);
+  const toYear = Number(to);
+  if (fromYear < 2000 || toYear > 2100) throw new ApiError("Yil 2000-2100 oralig'ida bo'lishi kerak", 400);
+  if (fromYear > toYear) throw new ApiError("from_year to_year dan keyin bo'lishi mumkin emas", 400);
+  if (toYear - fromYear + 1 > 20) throw new ApiError("Yillik diapazon 20 yildan oshmasligi kerak", 400);
+  const orgId = resolveOrgIdRequired(actor, requestedOrgId);
+  const timezone = await getOrgTimezone(orgId);
+  if (isFutureYear(toYear, timezone)) throw new ApiError("Kelajakdagi yil uchun hisobot bo'lishi mumkin emas", 400);
+  return getRangeReport(
+    actor,
+    requestedOrgId,
+    "yearly",
+    DateTime.fromObject({ year: fromYear, month: 1, day: 1 }),
+    DateTime.fromObject({ year: toYear, month: 1, day: 1 })
+  );
+}
