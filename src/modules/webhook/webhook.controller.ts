@@ -138,6 +138,20 @@ async function processCameraWebhook(
     });
     return;
   }
+  if (registration.status === "shared_lane_conflict") {
+    console.warn(
+      `Shared lane conflict ignored: org_id=${orgId} first_plate=${registration.firstPlateNumber} ` +
+        `plate=${plateNumber} first=${registration.firstDirection} ignored=${direction} ` +
+        `delta_seconds=${registration.deltaSeconds}`
+    );
+    res.status(200).json({
+      ok: true,
+      parsed: true,
+      ignored: true,
+      reason: "shared_lane_conflict",
+    });
+    return;
+  }
 
   if (direction === "entry") {
     const result = await createEntryFromWebhook({ orgId, event });

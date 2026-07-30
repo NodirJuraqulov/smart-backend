@@ -6,6 +6,7 @@ import { db } from "@/config/db";
 import webhookRouter from "@/modules/webhook/webhook.routes";
 import { clearWebhookDedupeCache } from "@/modules/webhook/webhookIdempotency";
 import { getWebhookEventDiagnostics } from "@/modules/webhook/webhookDiagnostics.service";
+import { openBarrier } from "@/modules/relay/relay.service";
 import {
   assertTestDatabase,
   cleanupOrganization,
@@ -171,6 +172,42 @@ describe("tb_webhook_events camera audit", () => {
       .first();
     expect(session.status).toBe("active");
     expect(session.exited_at).toBeNull();
+  });
+
+  it("production-style missing prefix shared_lane_conflict bo'ladi va hech qanday side-effect qilmaydi", async () => {
+    await db("tb_organizations").where({ id: orgId }).update({ gate_layout: "shared" });
+    await postDahua("entry", "01C914AD", 91);
+    const sessionBefore = await db("tb_parking_sessions")
+      .where({ org_id: orgId, plate_number: "01C914AD" })
+      .first();
+    vi.clearAllMocks();
+
+    const conflict = await postDahua("exit", "C914AD", 50);
+
+    expect(conflict.body).toMatchObject({
+      ok: true,
+      parsed: true,
+      ignored: true,
+      reason: "shared_lane_conflict",
+    });
+    const sessionAfter = await db("tb_parking_sessions").where({ id: sessionBefore.id }).first();
+    expect(sessionAfter.status).toBe("active");
+    expect(sessionAfter.exited_at).toBeNull();
+    expect(sessionAfter.amount).toBeNull();
+    expect(openBarrier).not.toHaveBeenCalled();
+    const [{ paymentCount }] = await db("tb_payments")
+      .where({ org_id: orgId })
+      .count<{ paymentCount: string }[]>("id as paymentCount");
+    expect(Number(paymentCount)).toBe(0);
+    const audit = await db("tb_webhook_events")
+      .where({ org_id: orgId, plate_number: "C914AD" })
+      .first();
+    expect(audit).toMatchObject({
+      processing_result: "shared_lane_conflict",
+      processing_reason: "near_plate_cross_camera_guard",
+      session_id: null,
+      processed_at: null,
+    });
   });
 
   it("null confidence qabul qilinadi va boshqa tashkilot auditiga aralashmaydi", async () => {

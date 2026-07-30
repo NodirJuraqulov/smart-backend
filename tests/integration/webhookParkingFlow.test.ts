@@ -263,7 +263,11 @@ describe("Shared gate cross-camera guard", () => {
     await postWebhook("entry", "01A124BC");
     await db("tb_webhook_events")
       .where({ org_id: orgId, plate_number: "01A124BC", direction: "entry" })
-      .update({ processed_at: new Date(Date.now() - 92_000) });
+      .update({
+        camera_event_at: null,
+        created_at: new Date(Date.now() - 92_000),
+        processed_at: new Date(Date.now() - 92_000),
+      });
 
     const exit = await postWebhook("exit", "01A124BC");
     expect(exit.body.ignored).toBeUndefined();
