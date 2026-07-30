@@ -4,6 +4,7 @@ import { IgnoredCameraSignalError, UnsupportedCameraPayloadError } from "../webh
 
 export interface DahuaParseResult {
   plateNumber: string;
+  confidence: number | null;
   deviceId: string | null;
   laneNumber: number | string | null;
   eventTime: Date;
@@ -180,6 +181,61 @@ function parseDahuaDate(value: unknown): Date | undefined {
   return Number.isNaN(date.getTime()) ? undefined : date;
 }
 
+function normalizeConfidence(value: unknown): number | null {
+  if (
+    (typeof value !== "number" && typeof value !== "string") ||
+    (typeof value === "string" && value.trim() === "")
+  ) {
+    return null;
+  }
+  const confidence = typeof value === "number" ? value : Number(value.trim());
+  return Number.isFinite(confidence) && confidence >= 0 && confidence <= 100 ? confidence : null;
+}
+
+function directConfidence(
+  node: unknown,
+  keys: string[]
+): { found: boolean; value: number | null } {
+  if (!isPlainObject(node)) return { found: false, value: null };
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(node, key)) {
+      return { found: true, value: normalizeConfidence(node[key]) };
+    }
+  }
+  return { found: false, value: null };
+}
+
+function extractConfidence(root: Record<string, unknown>): number | null {
+  const plate = findByKey(root, "Plate");
+  const plateConfidence = directConfidence(plate, [
+    "Confidence",
+    "PlateConfidence",
+    "RecognitionConfidence",
+  ]);
+  if (plateConfidence.found) return plateConfidence.value;
+
+  const plateInfoConfidence = directConfidence(findByKey(root, "PlateInfo"), ["Confidence"]);
+  if (plateInfoConfidence.found) return plateInfoConfidence.value;
+
+  const resultConfidence = directConfidence(findByKey(root, "Result"), ["Confidence"]);
+  if (resultConfidence.found) return resultConfidence.value;
+
+  const eventConfidence = directConfidence(findByKey(root, "Event"), ["Confidence"]);
+  if (eventConfidence.found) return eventConfidence.value;
+
+  const wrapperCandidates: unknown[] = [root];
+  for (let index = 0; index < wrapperCandidates.length; index += 1) {
+    const candidate = wrapperCandidates[index];
+    if (!isPlainObject(candidate)) continue;
+    const confidence = directConfidence(candidate, ["Confidence"]);
+    if (confidence.found) return confidence.value;
+    for (const key of ["body", "data", "result"]) {
+      if (isPlainObject(candidate[key])) wrapperCandidates.push(candidate[key]);
+    }
+  }
+  return null;
+}
+
 export function parseDahuaPayload(rawBody: Buffer, parsedBody?: unknown): DahuaParseResult | null {
   const root = resolveRoot(rawBody, parsedBody);
   if (!isPlainObject(root)) {
@@ -238,7 +294,11 @@ export function parseDahuaPayload(rawBody: Buffer, parsedBody?: unknown): DahuaP
 
   return {
     plateNumber,
-    deviceId: isPlainObject(snapInfo) && typeof snapInfo.DeviceID === "string" ? snapInfo.DeviceID : null,
+    confidence: extractConfidence(root),
+    deviceId:
+      isPlainObject(snapInfo) && typeof snapInfo.DeviceID === "string"
+        ? snapInfo.DeviceID
+        : findStringByKey(root, "DeviceID") ?? null,
     laneNumber:
       isPlainObject(snapInfo) && (typeof snapInfo.LanNo === "number" || typeof snapInfo.LanNo === "string")
         ? snapInfo.LanNo
@@ -271,7 +331,7 @@ export const dahuaParser: CameraParser = {
 
     return {
       plateNumber: result.plateNumber,
-      confidence: null,
+      confidence: result.confidence,
       timestamp: result.eventTime,
       direction: input.direction,
       cameraBrand: "dahua",

@@ -67,6 +67,7 @@ describe("isDuplicateWebhookEvent", () => {
     expect(results.filter((r) => r === true)).toHaveLength(1);
 
     const events = await db("tb_webhook_events").where({ org_id: orgId, plate_number: "01A555AA" });
-    expect(events).toHaveLength(1);
+    expect(events).toHaveLength(2);
+    expect(events.filter((event) => event.processing_result === "duplicate_same_direction")).toHaveLength(1);
   });
 });

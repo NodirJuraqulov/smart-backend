@@ -171,6 +171,10 @@ describe("Dahua xizmat signallari", () => {
       .where({ org_id: orgId })
       .count<{ count: string }[]>("id as count");
     expect(Number(count)).toBe(0);
+    const [{ eventCount }] = await db("tb_webhook_events")
+      .where({ org_id: orgId })
+      .count<{ eventCount: string }[]>("id as eventCount");
+    expect(Number(eventCount)).toBe(0);
   });
 
   it("noma'lum payload eski parse-failure oqimida qoladi", async () => {
@@ -178,6 +182,12 @@ describe("Dahua xizmat signallari", () => {
     expect(res.body).toMatchObject({ ok: true, parsed: false });
     expect(res.body.ignored).toBeUndefined();
     expect(emitWebhookParseFailed).toHaveBeenCalledOnce();
+    const audit = await db("tb_webhook_events").where({ org_id: orgId }).first();
+    expect(audit).toMatchObject({
+      plate_number: null,
+      processing_result: "parse_failed",
+      processing_reason: "unsupported_camera_payload",
+    });
   });
 });
 

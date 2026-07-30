@@ -48,6 +48,76 @@ function buildInput(body: unknown, overrides: Record<string, unknown> = {}) {
 }
 
 describe("parseDahuaPayload", () => {
+  it.each([
+    [95, 95],
+    ["95", 95],
+    [95.5, 95.5],
+    ["95.5", 95.5],
+  ])("Plate.Confidence %p qiymatini ajratadi", (confidence, expected) => {
+    const fixture = buildFixture({
+      Plate: { IsExist: true, PlateNumber: "10R726ZA", Confidence: confidence },
+    });
+    const result = parseDahuaPayload(Buffer.from(JSON.stringify(fixture)), fixture);
+    expect(result?.confidence).toBe(expected);
+  });
+
+  it("Plate.PlateConfidence va Plate.RecognitionConfidence ni qo'llab-quvvatlaydi", () => {
+    const plateConfidenceFixture = buildFixture({
+      Plate: { IsExist: true, PlateNumber: "10R726ZA", PlateConfidence: "91.25" },
+    });
+    const recognitionFixture = buildFixture({
+      Plate: { IsExist: true, PlateNumber: "10R726ZA", RecognitionConfidence: 89 },
+    });
+    expect(
+      parseDahuaPayload(Buffer.from(JSON.stringify(plateConfidenceFixture)), plateConfidenceFixture)?.confidence
+    ).toBe(91.25);
+    expect(
+      parseDahuaPayload(Buffer.from(JSON.stringify(recognitionFixture)), recognitionFixture)?.confidence
+    ).toBe(89);
+  });
+
+  it("Plate confidence generic va vehicle confidence'dan ustun turadi", () => {
+    const fixture = buildFixture({
+      Confidence: 12,
+      Result: { Confidence: 22 },
+      Vehicle: { Confidence: 99 },
+      Plate: { IsExist: true, PlateNumber: "10R726ZA", Confidence: 94 },
+    });
+    const result = parseDahuaPayload(Buffer.from(JSON.stringify(fixture)), fixture);
+    expect(result?.confidence).toBe(94);
+  });
+
+  it.each([-1, 101, "NaN", "Infinity", "", null])(
+    "yaroqsiz Plate.Confidence %p qiymatini null qiladi",
+    (confidence) => {
+      const fixture = buildFixture({
+        Result: { Confidence: 88 },
+        Plate: { IsExist: true, PlateNumber: "10R726ZA", Confidence: confidence },
+      });
+      const result = parseDahuaPayload(Buffer.from(JSON.stringify(fixture)), fixture);
+      expect(result?.confidence).toBeNull();
+    }
+  );
+
+  it.each([
+    [{ PlateInfo: { Confidence: "87" } }, 87],
+    [{ Result: { Confidence: 86 } }, 86],
+    [{ Event: { Confidence: "85.5" } }, 85.5],
+    [{ Confidence: 84 }, 84],
+    [{ body: { Confidence: "83" } }, 83],
+    [{ data: { result: { Confidence: 82 } } }, 82],
+  ])("Dahua confidence konteksti %p ni qo'llab-quvvatlaydi", (extra, expected) => {
+    const fixture = buildFixture(extra);
+    const result = parseDahuaPayload(Buffer.from(JSON.stringify(fixture)), fixture);
+    expect(result?.confidence).toBe(expected);
+  });
+
+  it("confidence yo'q bo'lsa null saqlanadi", () => {
+    const fixture = buildFixture();
+    const result = parseDahuaPayload(Buffer.from(JSON.stringify(fixture)), fixture);
+    expect(result?.confidence).toBeNull();
+  });
+
   it("NormalPic.PicName dan 10R726ZA ni ajratadi", () => {
     const fixture = buildFixture({ PlatePic: undefined });
     const result = parseDahuaPayload(Buffer.from(JSON.stringify(fixture)), fixture);
@@ -142,6 +212,15 @@ describe("dahuaParser (CameraParser)", () => {
     expect(event.plateNumber).toBe("10R726ZA");
     expect(event.cameraBrand).toBe("dahua");
     expect(event.deviceId).toBe("device-001");
+    expect(event.confidence).toBeNull();
+  });
+
+  it("Dahua confidence NormalizedCameraEvent'ga uzatiladi", async () => {
+    const fixture = buildFixture({
+      Plate: { IsExist: true, PlateNumber: "10R726ZA", Confidence: "94.5" },
+    });
+    const event = await dahuaParser.parse(buildInput(fixture));
+    expect(event.confidence).toBe(94.5);
   });
 
   it("tanilmagan payload uchun UnsupportedCameraPayloadError tashlaydi", async () => {

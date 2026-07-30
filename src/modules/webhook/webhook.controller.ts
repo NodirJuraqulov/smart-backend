@@ -5,7 +5,11 @@ import { CameraParserInput } from "./parsers/cameraParser.interface";
 import { NormalizedCameraEvent } from "./parsers/normalizedCameraEvent";
 import { IgnoredCameraSignalError, UnsupportedCameraBrandError, WebhookError } from "./webhookErrors";
 import { logWebhookDebug } from "./webhookDebugLog.service";
-import { markWebhookEventProcessed, registerWebhookEvent } from "./webhookIdempotency";
+import {
+  recordWebhookAuditEvent,
+  registerWebhookEvent,
+  updateWebhookEventOutcome,
+} from "./webhookIdempotency";
 import { createEntryFromWebhook, createExitFromWebhook } from "@/modules/parking/parking.service";
 import { emitWebhookParseFailed } from "@/websocket/socketServer";
 
@@ -74,6 +78,19 @@ async function processCameraWebhook(
     }
     if (err instanceof WebhookError) {
       try {
+        await recordWebhookAuditEvent({
+          orgId,
+          direction,
+          processingResult: "parse_failed",
+          processingReason: err.code,
+        });
+      } catch (auditErr) {
+        console.error(
+          "Webhook parse auditini yozib bo'lmadi:",
+          auditErr instanceof Error ? auditErr.message : auditErr
+        );
+      }
+      try {
         await logWebhookDebug(orgId, direction, req);
       } catch (debugLogErr) {
         console.error("Webhook debug logini yozib bo'lmadi:", debugLogErr);
@@ -91,7 +108,16 @@ async function processCameraWebhook(
   const plateNumber = event.plateNumber.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
   event = { ...event, plateNumber };
 
-  const registration = await registerWebhookEvent(orgId, plateNumber, direction);
+  console.log(
+    `Camera event: brand=${cameraBrand} org_id=${orgId} direction=${direction} plate=${plateNumber} ` +
+      `confidence=${event.confidence ?? "null"} device_id=${event.deviceId ?? "unknown"}`
+  );
+
+  const registration = await registerWebhookEvent(orgId, plateNumber, direction, {
+    confidence: event.confidence,
+    deviceId: event.deviceId,
+    cameraEventAt: event.timestamp,
+  });
   if (registration.status === "same_direction_duplicate") {
     console.log(
       `Webhook: takroriy hodisa, e'tiborsiz qoldirildi (org_id: ${orgId}, plate: ${plateNumber}, ${direction})`
@@ -113,16 +139,41 @@ async function processCameraWebhook(
     return;
   }
 
-  let processed: boolean;
   if (direction === "entry") {
     const result = await createEntryFromWebhook({ orgId, event });
-    processed = result.created;
+    const processingResult = result.created
+      ? "entry_created"
+      : result.reason === "already_active"
+        ? "active_entry_already_exists"
+        : "entry_rejected";
+    await updateWebhookEventOutcome(registration.eventId, {
+      processingResult,
+      processingReason: result.created ? null : result.reason,
+      sessionId: result.created ? result.session.id : null,
+      processed: result.created,
+    });
   } else {
     const result = await createExitFromWebhook({ orgId, event });
-    processed = result.updated;
-  }
-  if (processed) {
-    await markWebhookEventProcessed(registration.eventId);
+    const processingResult = result.updated
+      ? result.status === "completed"
+        ? "exit_completed"
+        : "exit_awaiting_payment"
+      : result.reason === "not_found"
+        ? "unmatched_exit"
+        : "exit_rejected";
+    await updateWebhookEventOutcome(registration.eventId, {
+      processingResult,
+      processingReason:
+        result.updated ? null : result.reason === "not_found" ? "active_session_not_found" : result.reason,
+      sessionId: result.updated ? result.session.id : null,
+      processed: result.updated,
+    });
+    if (!result.updated && result.reason === "not_found") {
+      console.warn(
+        `Unmatched exit: org_id=${orgId} plate=${plateNumber} confidence=${event.confidence ?? "null"} ` +
+          "reason=active_session_not_found"
+      );
+    }
   }
 
   res.status(200).json({
