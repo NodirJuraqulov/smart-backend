@@ -41,8 +41,10 @@ interface SessionRecord {
   exit_method: "auto" | "manual" | "forced" | null;
   image_entry: string | null;
   image_exit: string | null;
+  entry_overview_image_path: string | null;
   entry_vehicle_image_path: string | null;
   entry_plate_image_path: string | null;
+  exit_overview_image_path: string | null;
   exit_vehicle_image_path: string | null;
   exit_plate_image_path: string | null;
   operator_id: number | null;
@@ -80,8 +82,10 @@ function sessionsBaseQuery(executor: Knex) {
     "exit_method",
     "image_entry",
     "image_exit",
+    "entry_overview_image_path",
     "entry_vehicle_image_path",
     "entry_plate_image_path",
+    "exit_overview_image_path",
     "exit_vehicle_image_path",
     "exit_plate_image_path",
     "operator_id",
@@ -166,16 +170,20 @@ function imageUrl(sessionId: number, kind: string, imagePath: string | null): st
 
 function withImageUrls(session: SessionRecord) {
   const {
+    entry_overview_image_path: _entryOverviewPath,
     entry_vehicle_image_path: _entryVehiclePath,
     entry_plate_image_path: _entryPlatePath,
+    exit_overview_image_path: _exitOverviewPath,
     exit_vehicle_image_path: _exitVehiclePath,
     exit_plate_image_path: _exitPlatePath,
     ...publicSession
   } = session;
   return {
     ...publicSession,
+    entryOverviewImageUrl: imageUrl(session.id, "entry-overview", session.entry_overview_image_path),
     entryVehicleImageUrl: imageUrl(session.id, "entry-vehicle", session.entry_vehicle_image_path),
     entryPlateImageUrl: imageUrl(session.id, "entry-plate", session.entry_plate_image_path),
+    exitOverviewImageUrl: imageUrl(session.id, "exit-overview", session.exit_overview_image_path),
     exitVehicleImageUrl: imageUrl(session.id, "exit-vehicle", session.exit_vehicle_image_path),
     exitPlateImageUrl: imageUrl(session.id, "exit-plate", session.exit_plate_image_path),
   };
@@ -229,10 +237,12 @@ async function attachCameraImages(
       session.org_id,
       session.id,
       direction,
+      { buffer: event.overviewImage, originalFileName: event.overviewImageFileName },
       { buffer: event.vehicleImage, originalFileName: event.vehicleImageFileName },
       { buffer: event.plateImage, originalFileName: event.plateImageFileName }
     );
     const updates: Record<string, string> = {};
+    if (paths.overviewPath) updates[`${direction}_overview_image_path`] = paths.overviewPath;
     if (paths.vehiclePath) updates[`${direction}_vehicle_image_path`] = paths.vehiclePath;
     if (paths.platePath) updates[`${direction}_plate_image_path`] = paths.platePath;
     if (Object.keys(updates).length > 0) {
@@ -828,13 +838,21 @@ export async function getSessionById(actor: AuthTokenPayload, id: number) {
 export async function getSessionImage(
   actor: AuthTokenPayload,
   id: number,
-  kind: "entry-vehicle" | "entry-plate" | "exit-vehicle" | "exit-plate"
+  kind:
+    | "entry-overview"
+    | "entry-vehicle"
+    | "entry-plate"
+    | "exit-overview"
+    | "exit-vehicle"
+    | "exit-plate"
 ) {
   const session = await findSessionOrFail(id);
   assertInScope(actor, session);
   const columns = {
+    "entry-overview": session.entry_overview_image_path,
     "entry-vehicle": session.entry_vehicle_image_path,
     "entry-plate": session.entry_plate_image_path,
+    "exit-overview": session.exit_overview_image_path,
     "exit-vehicle": session.exit_vehicle_image_path,
     "exit-plate": session.exit_plate_image_path,
   };

@@ -44,8 +44,10 @@ async function clearImageReference(relativePath: string): Promise<void> {
   const columns = [
     "image_entry",
     "image_exit",
+    "entry_overview_image_path",
     "entry_vehicle_image_path",
     "entry_plate_image_path",
+    "exit_overview_image_path",
     "exit_vehicle_image_path",
     "exit_plate_image_path",
   ];
@@ -74,8 +76,10 @@ export async function runStorageCleanup(): Promise<void> {
     .select(
       "image_entry",
       "image_exit",
+      "entry_overview_image_path",
       "entry_vehicle_image_path",
       "entry_plate_image_path",
+      "exit_overview_image_path",
       "exit_vehicle_image_path",
       "exit_plate_image_path"
     );

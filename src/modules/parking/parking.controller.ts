@@ -126,8 +126,10 @@ export async function sessionImageHandler(req: Request, res: Response) {
   if (id === null) return;
   const kind = req.params.kind;
   if (
+    kind !== "entry-overview" &&
     kind !== "entry-vehicle" &&
     kind !== "entry-plate" &&
+    kind !== "exit-overview" &&
     kind !== "exit-vehicle" &&
     kind !== "exit-plate"
   ) {

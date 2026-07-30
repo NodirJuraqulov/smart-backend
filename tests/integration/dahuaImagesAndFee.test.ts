@@ -132,9 +132,14 @@ describe("Dahua rasmlari va exit hisobi", () => {
     expect(response.body).toMatchObject({ ok: true, parsed: true, plate_number: "50M093BB" });
 
     const session = await db("tb_parking_sessions").where({ org_id: orgId, plate_number: "50M093BB" }).first();
+    expect(session.entry_overview_image_path).toContain(`uploads/parking/${orgId}/`);
     expect(session.entry_vehicle_image_path).toContain(`uploads/parking/${orgId}/`);
     expect(session.entry_plate_image_path).toContain(`uploads/parking/${orgId}/`);
+    expect(session.entry_overview_image_path).not.toBe(session.entry_vehicle_image_path);
+    expect(session.entry_overview_image_path).not.toBe(session.entry_plate_image_path);
+    expect(session.entry_vehicle_image_path).not.toBe(session.entry_plate_image_path);
     expect(session.entry_vehicle_image_path).not.toContain("..");
+    expect(await fs.readFile(path.resolve(session.entry_overview_image_path))).toEqual(OVERVIEW_JPEG);
     const { width, height } = await expectValidJpeg(path.resolve(session.entry_vehicle_image_path));
     expect(width).toBeLessThanOrEqual(400);
     expect(height).toBeLessThanOrEqual(300);
@@ -143,6 +148,9 @@ describe("Dahua rasmlari va exit hisobi", () => {
     const detail = await request(server)
       .get(`/api/parking/sessions/${session.id}`)
       .set("Authorization", authHeader());
+    expect(detail.body.session.entryOverviewImageUrl).toContain(
+      `/api/parking/sessions/${session.id}/images/entry-overview`
+    );
     expect(detail.body.session.entryVehicleImageUrl).toContain(
       `/api/parking/sessions/${session.id}/images/entry-vehicle`
     );
@@ -165,8 +173,10 @@ describe("Dahua rasmlari va exit hisobi", () => {
     expect(exited.status).toBe("awaiting_payment");
     expect(exited.duration_minutes).toBeGreaterThanOrEqual(61);
     expect(Number(exited.amount)).toBe(10000);
+    expect(exited.exit_overview_image_path).toContain(`uploads/parking/${orgId}/`);
     expect(exited.exit_vehicle_image_path).toContain(`uploads/parking/${orgId}/`);
     expect(exited.exit_plate_image_path).toContain(`uploads/parking/${orgId}/`);
+    expect(await fs.readFile(path.resolve(exited.exit_overview_image_path))).toEqual(OVERVIEW_JPEG);
 
     const awaiting = await request(server)
       .get("/api/parking/sessions/awaiting-payment")
@@ -174,6 +184,9 @@ describe("Dahua rasmlari va exit hisobi", () => {
     expect(awaiting.body.sessions[0]).toMatchObject({
       id: session.id,
       status: "awaiting_payment",
+      exitOverviewImageUrl: expect.stringContaining(
+        `/api/parking/sessions/${session.id}/images/exit-overview`
+      ),
       exitVehicleImageUrl: expect.any(String),
       exitPlateImageUrl: expect.any(String),
     });
@@ -185,16 +198,58 @@ describe("Dahua rasmlari va exit hisobi", () => {
     const otherUser = await createTestUser(otherOrgId, { role: "operator" });
     const foreignActor: AuthTokenPayload = { id: otherUser.id, org_id: otherOrgId, role: "operator" };
 
+    const unauthenticated = await request(server)
+      .get(`/api/parking/sessions/${session.id}/images/entry-overview`);
+    expect(unauthenticated.status).toBe(401);
+
     const own = await request(server)
-      .get(`/api/parking/sessions/${session.id}/images/entry-vehicle`)
+      .get(`/api/parking/sessions/${session.id}/images/entry-overview`)
       .set("Authorization", authHeader());
     expect(own.status).toBe(200);
     expect(own.headers["content-type"]).toBe("image/jpeg");
 
     const foreign = await request(server)
-      .get(`/api/parking/sessions/${session.id}/images/entry-vehicle`)
+      .get(`/api/parking/sessions/${session.id}/images/entry-overview`)
       .set("Authorization", authHeader(foreignActor));
     expect(foreign.status).toBe(404);
+  });
+
+  it("eski sessiyada overview URL null, endpoint 404 bo'ladi", async () => {
+    await postCamera("entry", dahuaPayload("50M095BC"));
+    const session = await db("tb_parking_sessions")
+      .where({ org_id: orgId, plate_number: "50M095BC" })
+      .first();
+    await db("tb_parking_sessions")
+      .where({ id: session.id })
+      .update({ entry_overview_image_path: null });
+
+    const detail = await request(server)
+      .get(`/api/parking/sessions/${session.id}`)
+      .set("Authorization", authHeader());
+    expect(detail.status).toBe(200);
+    expect(detail.body.session.entryOverviewImageUrl).toBeNull();
+    expect(detail.body.session.exitOverviewImageUrl).toBeNull();
+    expect(detail.body.session.entryVehicleImageUrl).toBeTruthy();
+
+    const image = await request(server)
+      .get(`/api/parking/sessions/${session.id}/images/entry-overview`)
+      .set("Authorization", authHeader());
+    expect(image.status).toBe(404);
+  });
+
+  it("overview path traversal qiymatini rad etadi", async () => {
+    await postCamera("entry", dahuaPayload("50M095BD"));
+    const session = await db("tb_parking_sessions")
+      .where({ org_id: orgId, plate_number: "50M095BD" })
+      .first();
+    await db("tb_parking_sessions")
+      .where({ id: session.id })
+      .update({ entry_overview_image_path: "uploads/parking/../../package.json" });
+
+    const response = await request(server)
+      .get(`/api/parking/sessions/${session.id}/images/entry-overview`)
+      .set("Authorization", authHeader());
+    expect(response.status).toBe(404);
   });
 
   it("rasmsiz va yaroqsiz rasmli ANPR ham sessiya yaratadi", async () => {

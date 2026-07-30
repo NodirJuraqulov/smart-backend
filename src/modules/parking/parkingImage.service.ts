@@ -2,7 +2,7 @@ import { promises as fs } from "fs";
 import path from "path";
 
 export type ParkingImageDirection = "entry" | "exit";
-export type ParkingImageKind = "vehicle" | "plate";
+export type ParkingImageKind = "overview" | "vehicle" | "plate";
 
 export interface ParkingImageInput {
   buffer?: Buffer | null;
@@ -10,6 +10,7 @@ export interface ParkingImageInput {
 }
 
 export interface ParkingImagePaths {
+  overviewPath: string | null;
   vehiclePath: string | null;
   platePath: string | null;
 }
@@ -81,26 +82,30 @@ export async function saveParkingImages(
   orgId: number,
   sessionId: number,
   direction: ParkingImageDirection,
+  overview: ParkingImageInput | undefined,
   vehicle: ParkingImageInput | undefined,
   plate: ParkingImageInput | undefined
 ): Promise<ParkingImagePaths> {
   const results = await Promise.allSettled([
+    saveOne(orgId, sessionId, direction, "overview", overview),
     saveOne(orgId, sessionId, direction, "vehicle", vehicle),
     saveOne(orgId, sessionId, direction, "plate", plate),
   ]);
 
   for (const [index, result] of results.entries()) {
     if (result.status === "rejected") {
+      const kind: ParkingImageKind = index === 0 ? "overview" : index === 1 ? "vehicle" : "plate";
       console.warn(
-        `ANPR rasm saqlanmadi (org=${orgId}, session=${sessionId}, direction=${direction}, kind=${index === 0 ? "vehicle" : "plate"}):`,
+        `ANPR rasm saqlanmadi (org=${orgId}, session=${sessionId}, direction=${direction}, kind=${kind}):`,
         result.reason instanceof Error ? result.reason.message : result.reason
       );
     }
   }
 
   return {
-    vehiclePath: results[0].status === "fulfilled" ? results[0].value : null,
-    platePath: results[1].status === "fulfilled" ? results[1].value : null,
+    overviewPath: results[0].status === "fulfilled" ? results[0].value : null,
+    vehiclePath: results[1].status === "fulfilled" ? results[1].value : null,
+    platePath: results[2].status === "fulfilled" ? results[2].value : null,
   };
 }
 
