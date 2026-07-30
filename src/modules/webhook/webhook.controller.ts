@@ -11,7 +11,11 @@ import {
   updateWebhookEventOutcome,
 } from "./webhookIdempotency";
 import { createEntryFromWebhook, createExitFromWebhook } from "@/modules/parking/parking.service";
-import { emitWebhookParseFailed } from "@/websocket/socketServer";
+import { emitPlateNotRecognizedForExit, emitWebhookParseFailed } from "@/websocket/socketServer";
+import {
+  markDuplicateImagesSkipped,
+  saveWebhookEventImages,
+} from "./webhookEventImage.service";
 
 const DEFAULT_CAMERA_BRAND = "hikvision";
 
@@ -105,11 +109,12 @@ async function processCameraWebhook(
     throw err;
   }
 
-  const plateNumber = event.plateNumber.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const plateNumber =
+    event.plateNumber?.trim().toUpperCase().replace(/[^A-Z0-9]/g, "") || null;
   event = { ...event, plateNumber };
 
   console.log(
-    `Camera event: brand=${cameraBrand} org_id=${orgId} direction=${direction} plate=${plateNumber} ` +
+    `Camera event: brand=${cameraBrand} org_id=${orgId} direction=${direction} plate=${plateNumber ?? "null"} ` +
       `confidence=${event.confidence ?? "null"} device_id=${event.deviceId ?? "unknown"}`
   );
 
@@ -119,12 +124,31 @@ async function processCameraWebhook(
     cameraEventAt: event.timestamp,
   });
   if (registration.status === "same_direction_duplicate") {
+    await markDuplicateImagesSkipped(orgId, registration.eventId).catch((err) => {
+      console.warn(
+        `Duplicate image audit yozilmadi: org_id=${orgId} event_id=${registration.eventId} ` +
+          `error=${err instanceof Error ? err.message : String(err)}`
+      );
+    });
     console.log(
       `Webhook: takroriy hodisa, e'tiborsiz qoldirildi (org_id: ${orgId}, plate: ${plateNumber}, ${direction})`
     );
     res.status(200).json({ ok: true, parsed: true, duplicate: true });
     return;
   }
+
+  await saveWebhookEventImages({
+    orgId,
+    eventId: registration.eventId,
+    direction,
+    event,
+  }).catch((err) => {
+    console.warn(
+      `Webhook event rasmlari saqlanmadi: org_id=${orgId} event_id=${registration.eventId} ` +
+        `direction=${direction} error=${err instanceof Error ? err.message : String(err)}`
+    );
+  });
+
   if (registration.status === "opposite_camera_echo") {
     console.log(
       `Opposite camera echo ignored: org_id=${orgId} plate=${plateNumber} ` +
@@ -153,8 +177,35 @@ async function processCameraWebhook(
     return;
   }
 
+  if (!plateNumber) {
+    await updateWebhookEventOutcome(registration.eventId, {
+      processingResult: "plate_not_recognized",
+      processingReason: "camera_ocr_failed",
+      processed: false,
+    });
+    if (direction === "exit") {
+      emitPlateNotRecognizedForExit(orgId, {
+        plateNumber: null,
+        eventId: registration.eventId,
+        message: "Kamera davlat raqamini aniqlay olmadi — operator tekshiruvi kerak",
+      });
+    }
+    res.status(200).json({
+      ok: true,
+      parsed: true,
+      ignored: true,
+      reason: "plate_not_recognized",
+      event_id: registration.eventId,
+      plate_number: null,
+      confidence: event.confidence,
+      timestamp: event.timestamp,
+    });
+    return;
+  }
+
   if (direction === "entry") {
-    const result = await createEntryFromWebhook({ orgId, event });
+    const recognizedEvent = { ...event, plateNumber };
+    const result = await createEntryFromWebhook({ orgId, event: recognizedEvent });
     const processingResult = result.created
       ? "entry_created"
       : result.reason === "already_active"
@@ -167,7 +218,8 @@ async function processCameraWebhook(
       processed: result.created,
     });
   } else {
-    const result = await createExitFromWebhook({ orgId, event });
+    const recognizedEvent = { ...event, plateNumber };
+    const result = await createExitFromWebhook({ orgId, event: recognizedEvent });
     const processingResult = result.updated
       ? result.status === "completed"
         ? "exit_completed"

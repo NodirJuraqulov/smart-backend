@@ -115,7 +115,7 @@ function isNearPlateMatch(left: string, right: string): boolean {
 
 export async function registerWebhookEvent(
   orgId: number,
-  plateNumber: string,
+  plateNumber: string | null,
   direction: Direction,
   metadata: WebhookEventMetadata = {}
 ): Promise<WebhookEventRegistration> {
@@ -148,17 +148,19 @@ export async function registerWebhookEvent(
       .first();
     if (!currentEvent) throw new Error(`Webhook audit event #${eventId} topilmadi`);
 
-    const sameDirection = await trx("tb_webhook_events")
-      .where({ org_id: orgId, plate_number: plateNumber, direction })
-      .whereNot({ id: eventId })
-      .andWhere("created_at", ">=", trx.raw(`NOW() - INTERVAL ${DEDUPE_WINDOW_SECONDS} SECOND`))
-      .andWhere((builder) => {
-        builder
-          .whereNull("processing_result")
-          .orWhereNotIn("processing_result", [...SUPPRESSED_RESULTS]);
-      })
-      .orderBy("created_at", "desc")
-      .first();
+    const sameDirection = plateNumber
+      ? await trx("tb_webhook_events")
+          .where({ org_id: orgId, plate_number: plateNumber, direction })
+          .whereNot({ id: eventId })
+          .andWhere("created_at", ">=", trx.raw(`NOW() - INTERVAL ${DEDUPE_WINDOW_SECONDS} SECOND`))
+          .andWhere((builder) => {
+            builder
+              .whereNull("processing_result")
+              .orWhereNotIn("processing_result", [...SUPPRESSED_RESULTS]);
+          })
+          .orderBy("created_at", "desc")
+          .first()
+      : null;
     if (sameDirection) {
       await trx("tb_webhook_events").where({ id: eventId }).update({
         processing_result: "duplicate_same_direction",
@@ -172,7 +174,7 @@ export async function registerWebhookEvent(
       Number.isInteger(configuredGuard) && configuredGuard >= 5 && configuredGuard <= 300
         ? configuredGuard
         : DEFAULT_CROSS_CAMERA_GUARD_SECONDS;
-    if (organization?.gate_layout === "shared") {
+    if (organization?.gate_layout === "shared" && plateNumber) {
       const oppositeDirection: Direction = direction === "entry" ? "exit" : "entry";
       const candidateWindowSeconds = guardSeconds + MAX_CAMERA_CLOCK_SKEW_SECONDS * 2;
       const oppositeEvents = await trx<WebhookEventTimeRow>("tb_webhook_events")

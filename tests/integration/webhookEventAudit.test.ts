@@ -1,4 +1,6 @@
 import http from "http";
+import { promises as fs } from "fs";
+import path from "path";
 import express from "express";
 import request from "supertest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -81,6 +83,10 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await clearWebhookDedupeCache();
+  await fs.rm(path.join(process.cwd(), "uploads", "parking-events", String(orgId)), {
+    recursive: true,
+    force: true,
+  });
   await cleanupOrganization(orgId);
   await cleanupOrganization(otherOrgId);
   vi.clearAllMocks();
@@ -208,6 +214,7 @@ describe("tb_webhook_events camera audit", () => {
       session_id: null,
       processed_at: null,
     });
+    expect(audit.vehicle_image_path).toContain(`/${audit.id}/vehicle.jpg`);
   });
 
   it("null confidence qabul qilinadi va boshqa tashkilot auditiga aralashmaydi", async () => {

@@ -1,5 +1,5 @@
 export interface NormalizedCameraEvent {
-  plateNumber: string;
+  plateNumber: string | null;
   confidence: number | null;
   timestamp: Date | null;
   direction: "entry" | "exit";
@@ -10,6 +10,7 @@ export interface NormalizedCameraEvent {
   overviewImage?: Buffer | null;
   metadata?: Record<string, unknown>;
   rawPayload?: unknown;
+  overviewImageFileName?: string | null;
   vehicleImageFileName?: string | null;
   plateImageFileName?: string | null;
 }

@@ -653,7 +653,7 @@ async function moveSessionToAwaitingPayment(
 
 interface CameraParkingInput {
   orgId: number;
-  event: NormalizedCameraEvent;
+  event: NormalizedCameraEvent & { plateNumber: string };
 }
 
 export async function createEntryFromWebhook(input: CameraParkingInput) {

@@ -22,6 +22,7 @@ import activityLogsRouter from "./modules/activityLogs/activityLogs.routes";
 import webhookRouter from "./modules/webhook/webhook.routes";
 import publicDisplayRouter from "./modules/publicDisplay/publicDisplay.routes";
 import paymentRouter from "./modules/payment/payment.routes";
+import webhookEventsRouter from "./modules/webhook/webhookEvents.routes";
 
 const app = express();
 
@@ -106,6 +107,9 @@ if (env.nodeEnv !== "production") {
 app.use("/uploads/parking", (_req, res) => {
   res.status(404).json({ message: "Rasm topilmadi" });
 });
+app.use("/uploads/parking-events", (_req, res) => {
+  res.status(404).json({ message: "Rasm topilmadi" });
+});
 
 app.use(
   "/uploads",
@@ -128,6 +132,7 @@ app.use("/api/subscription-plans", subscriptionPlansRouter);
 app.use("/api/subscriptions", subscriptionsRouter);
 app.use("/api/vip-vehicles", vipVehiclesRouter);
 app.use("/api/settings", settingsRouter);
+app.use("/api/webhook-events", webhookEventsRouter);
 app.use("/api/parking", parkingRouter);
 app.use("/api/reports", reportsRouter);
 app.use("/api/admin/activity-logs", activityLogsRouter);

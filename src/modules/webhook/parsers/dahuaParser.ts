@@ -3,17 +3,19 @@ import { NormalizedCameraEvent } from "./normalizedCameraEvent";
 import { IgnoredCameraSignalError, UnsupportedCameraPayloadError } from "../webhookErrors";
 
 export interface DahuaParseResult {
-  plateNumber: string;
+  plateNumber: string | null;
   confidence: number | null;
   deviceId: string | null;
   laneNumber: number | string | null;
   eventTime: Date;
+  overviewImageBase64: string | null;
   vehicleImageBase64: string | null;
   plateImageBase64: string | null;
   plateColor: string | null;
   plateRegion: string | null;
   vehicleBoundingBox: unknown;
   plateBoundingBox: unknown;
+  overviewImageFileName: string | null;
   vehicleImageFileName: string | null;
   plateImageFileName: string | null;
 }
@@ -95,6 +97,27 @@ function findFirstStringByKeys(node: unknown, keys: string[]): string | undefine
   return undefined;
 }
 
+function hasExplicitPlateField(root: Record<string, unknown>, plate: unknown): boolean {
+  if (
+    isPlainObject(plate) &&
+    EXPLICIT_PLATE_KEYS.some((key) => Object.prototype.hasOwnProperty.call(plate, key))
+  ) {
+    return true;
+  }
+  const candidates: unknown[] = [root];
+  for (let index = 0; index < candidates.length; index += 1) {
+    const candidate = candidates[index];
+    if (!isPlainObject(candidate)) continue;
+    if (EXPLICIT_PLATE_KEYS.some((key) => Object.prototype.hasOwnProperty.call(candidate, key))) {
+      return true;
+    }
+    for (const key of ["body", "data", "result"]) {
+      if (isPlainObject(candidate[key])) candidates.push(candidate[key]);
+    }
+  }
+  return false;
+}
+
 function normalizePlateNumber(raw: string): string {
   return raw
     .trim()
@@ -165,13 +188,36 @@ function isIgnoredServiceSignal(root: unknown): boolean {
   if (typeof active === "string" && active.toLowerCase() === "keepalive") return true;
 
   const plate = findByKey(root, "Plate");
-  if (isPlainObject(plate) && plate.IsExist === false) return true;
+  const hasSnapshotImage = ["NormalPic", "CutoutPic", "PlatePic"].some((key) =>
+    isPlainObject(findByKey(root, key))
+  );
+  if (isPlainObject(plate) && plate.IsExist === false && !hasSnapshotImage) return true;
 
   const hasDeviceId = typeof findByKey(root, "DeviceID") === "string";
   const serviceKeys = ["DeviceModel", "DeviceName", "DeviceType", "IPAddress", "Manufacturer", "Status", "Heartbeat"];
   return hasDeviceId &&
     serviceKeys.some((key) => findByKey(root, key) !== undefined) &&
     plate === undefined;
+}
+
+function imageContent(image: unknown): string | null {
+  if (!isPlainObject(image) || typeof image.Content !== "string") return null;
+  const content = stripDataUrlPrefix(image.Content.trim()).trim();
+  return content || null;
+}
+
+function decodeImageBase64(value: string | null): Buffer | null {
+  if (!value || !/^[A-Za-z0-9+/]*={0,2}$/.test(value) || value.length % 4 !== 0) return null;
+  const buffer = Buffer.from(value, "base64");
+  if (!buffer.length) return null;
+  const isJpeg = buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+  const isPng =
+    buffer.length >= 8 &&
+    buffer[0] === 0x89 &&
+    buffer[1] === 0x50 &&
+    buffer[2] === 0x4e &&
+    buffer[3] === 0x47;
+  return isJpeg || isPng ? buffer : null;
 }
 
 function parseDahuaDate(value: unknown): Date | undefined {
@@ -243,7 +289,6 @@ export function parseDahuaPayload(rawBody: Buffer, parsedBody?: unknown): DahuaP
   }
 
   const plateObj = findByKey(root, "Plate");
-  if (isPlainObject(plateObj) && plateObj.IsExist === false) return null;
 
   const normalPic = findByKey(root, "NormalPic");
   const cutoutPic = findByKey(root, "CutoutPic");
@@ -258,19 +303,32 @@ export function parseDahuaPayload(rawBody: Buffer, parsedBody?: unknown): DahuaP
     isPlainObject(cutoutPic) && typeof cutoutPic.PicName === "string" ? cutoutPic.PicName : undefined;
 
   const explicitPlate = findFirstStringByKeys(root, EXPLICIT_PLATE_KEYS);
+  const normalizedExplicitPlate = explicitPlate
+    ? normalizePlateNumber(explicitPlate) || undefined
+    : undefined;
+  const plateHasExplicitKey = hasExplicitPlateField(root, plateObj);
+  const plateExplicitlyMissing =
+    (isPlainObject(plateObj) && plateObj.IsExist === false) ||
+    (plateHasExplicitKey && !normalizedExplicitPlate);
 
-  let plateNumber = explicitPlate ? normalizePlateNumber(explicitPlate) || undefined : undefined;
-  if (!plateNumber && platePicName) {
+  let plateNumber = normalizedExplicitPlate;
+  if (!plateNumber && !plateExplicitlyMissing && platePicName) {
     plateNumber = extractPlateFromFilename(platePicName);
   }
-  if (!plateNumber && normalPicName) {
+  if (!plateNumber && !plateExplicitlyMissing && normalPicName) {
     plateNumber = extractPlateFromFilename(normalPicName);
   }
-  if (!plateNumber && cutoutPicName) {
+  if (!plateNumber && !plateExplicitlyMissing && cutoutPicName) {
     plateNumber = extractPlateFromFilename(cutoutPicName);
   }
 
-  if (!plateNumber) {
+  const hasAnprStructure =
+    isPlainObject(plateObj) ||
+    isPlainObject(snapInfo) ||
+    isPlainObject(normalPic) ||
+    isPlainObject(cutoutPic) ||
+    isPlainObject(platePic);
+  if (!plateNumber && !hasAnprStructure) {
     return null;
   }
 
@@ -283,17 +341,13 @@ export function parseDahuaPayload(rawBody: Buffer, parsedBody?: unknown): DahuaP
     (cutoutPicName ? extractTimestampFromFilename(cutoutPicName) : undefined) ??
     new Date();
 
-  const vehicleImageBase64 =
-    isPlainObject(normalPic) && typeof normalPic.Content === "string"
-      ? stripDataUrlPrefix(normalPic.Content)
-      : isPlainObject(cutoutPic) && typeof cutoutPic.Content === "string"
-        ? stripDataUrlPrefix(cutoutPic.Content)
-      : null;
-  const plateImageBase64 =
-    isPlainObject(platePic) && typeof platePic.Content === "string" ? stripDataUrlPrefix(platePic.Content) : null;
+  const overviewImageBase64 = imageContent(normalPic);
+  const cutoutImageBase64 = imageContent(cutoutPic);
+  const vehicleImageBase64 = cutoutImageBase64 ?? overviewImageBase64;
+  const plateImageBase64 = imageContent(platePic);
 
   return {
-    plateNumber,
+    plateNumber: plateNumber ?? null,
     confidence: extractConfidence(root),
     deviceId:
       isPlainObject(snapInfo) && typeof snapInfo.DeviceID === "string"
@@ -304,13 +358,15 @@ export function parseDahuaPayload(rawBody: Buffer, parsedBody?: unknown): DahuaP
         ? snapInfo.LanNo
         : null,
     eventTime,
+    overviewImageBase64,
     vehicleImageBase64,
     plateImageBase64,
     plateColor: isPlainObject(plateObj) && typeof plateObj.PlateColor === "string" ? plateObj.PlateColor : null,
     plateRegion: isPlainObject(plateObj) && typeof plateObj.Region === "string" ? plateObj.Region : null,
     vehicleBoundingBox: isPlainObject(vehicleObj) ? (vehicleObj.VehicleBoundingBox ?? null) : null,
     plateBoundingBox: isPlainObject(plateObj) ? (plateObj.BoundingBox ?? null) : null,
-    vehicleImageFileName: normalPicName ?? cutoutPicName ?? null,
+    overviewImageFileName: normalPicName ?? null,
+    vehicleImageFileName: cutoutImageBase64 ? cutoutPicName ?? null : normalPicName ?? null,
     plateImageFileName: platePicName ?? null,
   };
 }
@@ -329,6 +385,11 @@ export const dahuaParser: CameraParser = {
       });
     }
 
+    const overviewImage = decodeImageBase64(result.overviewImageBase64);
+    const selectedVehicleImage = decodeImageBase64(result.vehicleImageBase64);
+    const vehicleImage = selectedVehicleImage ?? overviewImage;
+    const plateImage = decodeImageBase64(result.plateImageBase64);
+
     return {
       plateNumber: result.plateNumber,
       confidence: result.confidence,
@@ -336,16 +397,26 @@ export const dahuaParser: CameraParser = {
       direction: input.direction,
       cameraBrand: "dahua",
       deviceId: result.deviceId,
-      vehicleImage: result.vehicleImageBase64 ? Buffer.from(result.vehicleImageBase64, "base64") : null,
-      plateImage: result.plateImageBase64 ? Buffer.from(result.plateImageBase64, "base64") : null,
+      overviewImage,
+      vehicleImage,
+      plateImage,
       metadata: {
         laneNumber: result.laneNumber,
         plateColor: result.plateColor,
         plateRegion: result.plateRegion,
         vehicleBoundingBox: result.vehicleBoundingBox,
         plateBoundingBox: result.plateBoundingBox,
+        eventKind: result.plateNumber ? "anpr" : "plate_not_recognized",
+        vehicleImageSource:
+          selectedVehicleImage && result.vehicleImageFileName !== result.overviewImageFileName
+            ? "cutout"
+            : overviewImage
+              ? "normal_fallback"
+              : null,
       },
-      vehicleImageFileName: result.vehicleImageFileName,
+      overviewImageFileName: result.overviewImageFileName,
+      vehicleImageFileName:
+        selectedVehicleImage ? result.vehicleImageFileName : overviewImage ? result.overviewImageFileName : null,
       plateImageFileName: result.plateImageFileName,
     };
   },
