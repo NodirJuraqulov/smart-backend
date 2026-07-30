@@ -1,6 +1,7 @@
 import { CameraParser, CameraParserInput } from "./cameraParser.interface";
 import { NormalizedCameraEvent } from "./normalizedCameraEvent";
 import { IgnoredCameraSignalError, UnsupportedCameraPayloadError } from "../webhookErrors";
+import { buildDahuaEventImages } from "../dahuaImageCrop.service";
 
 export interface DahuaParseResult {
   plateNumber: string | null;
@@ -9,15 +10,15 @@ export interface DahuaParseResult {
   laneNumber: number | string | null;
   eventTime: Date;
   overviewImageBase64: string | null;
-  vehicleImageBase64: string | null;
-  plateImageBase64: string | null;
+  cutoutImageBase64: string | null;
+  platePicImageBase64: string | null;
   plateColor: string | null;
   plateRegion: string | null;
-  vehicleBoundingBox: unknown;
-  plateBoundingBox: unknown;
+  vehicleBoundingBoxRaw: unknown;
+  plateBoundingBoxRaw: unknown;
   overviewImageFileName: string | null;
-  vehicleImageFileName: string | null;
-  plateImageFileName: string | null;
+  cutoutImageFileName: string | null;
+  platePicFileName: string | null;
 }
 
 const EXPLICIT_PLATE_KEYS = [
@@ -343,8 +344,7 @@ export function parseDahuaPayload(rawBody: Buffer, parsedBody?: unknown): DahuaP
 
   const overviewImageBase64 = imageContent(normalPic);
   const cutoutImageBase64 = imageContent(cutoutPic);
-  const vehicleImageBase64 = cutoutImageBase64 ?? overviewImageBase64;
-  const plateImageBase64 = imageContent(platePic);
+  const platePicImageBase64 = imageContent(platePic);
 
   return {
     plateNumber: plateNumber ?? null,
@@ -359,15 +359,15 @@ export function parseDahuaPayload(rawBody: Buffer, parsedBody?: unknown): DahuaP
         : null,
     eventTime,
     overviewImageBase64,
-    vehicleImageBase64,
-    plateImageBase64,
+    cutoutImageBase64,
+    platePicImageBase64,
     plateColor: isPlainObject(plateObj) && typeof plateObj.PlateColor === "string" ? plateObj.PlateColor : null,
     plateRegion: isPlainObject(plateObj) && typeof plateObj.Region === "string" ? plateObj.Region : null,
-    vehicleBoundingBox: isPlainObject(vehicleObj) ? (vehicleObj.VehicleBoundingBox ?? null) : null,
-    plateBoundingBox: isPlainObject(plateObj) ? (plateObj.BoundingBox ?? null) : null,
+    vehicleBoundingBoxRaw: isPlainObject(vehicleObj) ? (vehicleObj.VehicleBoundingBox ?? null) : null,
+    plateBoundingBoxRaw: isPlainObject(plateObj) ? (plateObj.BoundingBox ?? null) : null,
     overviewImageFileName: normalPicName ?? null,
-    vehicleImageFileName: cutoutImageBase64 ? cutoutPicName ?? null : normalPicName ?? null,
-    plateImageFileName: platePicName ?? null,
+    cutoutImageFileName: cutoutPicName ?? null,
+    platePicFileName: platePicName ?? null,
   };
 }
 
@@ -386,9 +386,16 @@ export const dahuaParser: CameraParser = {
     }
 
     const overviewImage = decodeImageBase64(result.overviewImageBase64);
-    const selectedVehicleImage = decodeImageBase64(result.vehicleImageBase64);
-    const vehicleImage = selectedVehicleImage ?? overviewImage;
-    const plateImage = decodeImageBase64(result.plateImageBase64);
+    const cutoutImage = decodeImageBase64(result.cutoutImageBase64);
+    const platePicImage = decodeImageBase64(result.platePicImageBase64);
+
+    const images = await buildDahuaEventImages({
+      overviewImage,
+      platePicImage,
+      cutoutImage,
+      vehicleBoundingBoxRaw: result.vehicleBoundingBoxRaw,
+      plateBoundingBoxRaw: result.plateBoundingBoxRaw,
+    });
 
     return {
       plateNumber: result.plateNumber,
@@ -397,27 +404,35 @@ export const dahuaParser: CameraParser = {
       direction: input.direction,
       cameraBrand: "dahua",
       deviceId: result.deviceId,
-      overviewImage,
-      vehicleImage,
-      plateImage,
+      overviewImage: images.overviewImage,
+      vehicleImage: images.vehicleImage,
+      plateImage: images.plateImage,
       metadata: {
         laneNumber: result.laneNumber,
         plateColor: result.plateColor,
         plateRegion: result.plateRegion,
-        vehicleBoundingBox: result.vehicleBoundingBox,
-        plateBoundingBox: result.plateBoundingBox,
         eventKind: result.plateNumber ? "anpr" : "plate_not_recognized",
-        vehicleImageSource:
-          selectedVehicleImage && result.vehicleImageFileName !== result.overviewImageFileName
-            ? "cutout"
-            : overviewImage
-              ? "normal_fallback"
-              : null,
+        overviewImageSource: images.overviewImage ? "normal_pic" : "none",
+        vehicleImageSource: images.vehicleSource,
+        plateImageSource: images.plateSource,
+        normalizedVehicleBoundingBox: images.normalizedVehicleBoundingBox,
+        normalizedPlateBoundingBox: images.normalizedPlateBoundingBox,
+        overviewWidth: images.overviewWidth,
+        overviewHeight: images.overviewHeight,
+        vehicleImageWidth: images.vehicleWidth,
+        vehicleImageHeight: images.vehicleHeight,
+        plateImageWidth: images.plateWidth,
+        plateImageHeight: images.plateHeight,
+        vehicleFallbackReason: images.vehicleFallbackReason,
       },
       overviewImageFileName: result.overviewImageFileName,
-      vehicleImageFileName:
-        selectedVehicleImage ? result.vehicleImageFileName : overviewImage ? result.overviewImageFileName : null,
-      plateImageFileName: result.plateImageFileName,
+      vehicleImageFileName: images.vehicleSource === "normal_fallback" ? result.overviewImageFileName : null,
+      plateImageFileName:
+        images.plateSource === "plate_pic"
+          ? result.platePicFileName
+          : images.plateSource === "cutout_pic"
+            ? result.cutoutImageFileName
+            : null,
     };
   },
 };

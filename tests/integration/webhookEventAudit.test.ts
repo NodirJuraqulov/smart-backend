@@ -3,6 +3,7 @@ import { promises as fs } from "fs";
 import path from "path";
 import express from "express";
 import request from "supertest";
+import sharp from "sharp";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "@/config/db";
 import webhookRouter from "@/modules/webhook/webhook.routes";
@@ -35,12 +36,13 @@ let orgId: number;
 let otherOrgId: number;
 let webhookToken: string;
 let server: http.Server;
+let NORMAL_JPEG_BASE64: string;
 
 function dahuaPayload(plateNumber: string, confidence?: number | string) {
   return {
     Picture: {
       NormalPic: {
-        Content: "data:image/jpeg;base64,/9j/2Q==",
+        Content: `data:image/jpeg;base64,${NORMAL_JPEG_BASE64}`,
         PicName: `${plateNumber}-20260730120000.jpg`,
       },
     },
@@ -68,6 +70,10 @@ beforeAll(async () => {
   const app = express();
   app.use("/api/webhook", webhookRouter);
   server = http.createServer(app);
+  const overview = await sharp({ create: { width: 200, height: 150, channels: 3, background: "#444" } })
+    .jpeg()
+    .toBuffer();
+  NORMAL_JPEG_BASE64 = overview.toString("base64");
 });
 
 beforeEach(async () => {

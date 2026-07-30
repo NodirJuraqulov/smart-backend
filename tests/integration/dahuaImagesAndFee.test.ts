@@ -3,6 +3,7 @@ import http from "http";
 import path from "path";
 import express from "express";
 import request from "supertest";
+import sharp from "sharp";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "@/config/db";
 import { errorHandler } from "@/middleware/errorHandler";
@@ -35,10 +36,10 @@ vi.mock("@/websocket/socketServer", () => ({
   emitWebhookParseFailed: vi.fn(),
 }));
 
-const OVERVIEW_JPEG = Buffer.from([0xff, 0xd8, 0xff, 0x01, 0xd9]);
-const VEHICLE_JPEG = Buffer.from([0xff, 0xd8, 0xff, 0x02, 0xd9]);
-const PLATE_JPEG = Buffer.from([0xff, 0xd8, 0xff, 0x03, 0xd9]);
-const JPEG_BASE64 = OVERVIEW_JPEG.toString("base64");
+let OVERVIEW_JPEG: Buffer;
+let CUTOUT_JPEG: Buffer;
+let PLATE_JPEG: Buffer;
+let JPEG_BASE64: string;
 let orgId: number;
 let otherOrgId: number;
 let webhookToken: string;
@@ -49,14 +50,17 @@ function authHeader(value = actor): string {
   return `Bearer ${signAccessToken(value)}`;
 }
 
+const VEHICLE_BOUNDING_BOX = [40, 40, 360, 280];
+
 function dahuaPayload(plateNumber: string) {
   return {
     Picture: {
       NormalPic: { Content: `data:image/jpeg;base64,${JPEG_BASE64}`, PicName: "../../unsafe.jpg" },
-      CutoutPic: { Content: VEHICLE_JPEG.toString("base64"), PicName: "../../../cutout.jpg" },
+      CutoutPic: { Content: CUTOUT_JPEG.toString("base64"), PicName: "../../../cutout.jpg" },
       PlatePic: { Content: PLATE_JPEG.toString("base64"), PicName: "/tmp/plate.jpg" },
     },
     Plate: { IsExist: true, PlateNumber: plateNumber },
+    Vehicle: { VehicleBoundingBox: VEHICLE_BOUNDING_BOX },
     SnapInfo: { DeviceID: "dahua-1", SnapTime: "2026-07-28 17:56:00", LanNo: 1 },
   };
 }
@@ -68,6 +72,15 @@ async function postCamera(direction: "entry" | "exit", body: unknown) {
     .send(body);
 }
 
+async function expectValidJpeg(absolutePath: string): Promise<{ width: number; height: number }> {
+  const buffer = await fs.readFile(absolutePath);
+  const metadata = await sharp(buffer).metadata();
+  expect(metadata.format).toBe("jpeg");
+  expect(metadata.width).toBeGreaterThan(0);
+  expect(metadata.height).toBeGreaterThan(0);
+  return { width: metadata.width!, height: metadata.height! };
+}
+
 beforeAll(async () => {
   await assertTestDatabase();
   const app = express();
@@ -77,6 +90,17 @@ beforeAll(async () => {
   app.use("/api/parking", parkingRouter);
   app.use(errorHandler);
   server = http.createServer(app);
+
+  OVERVIEW_JPEG = await sharp({ create: { width: 400, height: 300, channels: 3, background: "#666" } })
+    .jpeg()
+    .toBuffer();
+  CUTOUT_JPEG = await sharp({ create: { width: 96, height: 32, channels: 3, background: "#333" } })
+    .jpeg()
+    .toBuffer();
+  PLATE_JPEG = await sharp({ create: { width: 60, height: 20, channels: 3, background: "#111" } })
+    .jpeg()
+    .toBuffer();
+  JPEG_BASE64 = OVERVIEW_JPEG.toString("base64");
 });
 
 beforeEach(async () => {
@@ -111,7 +135,10 @@ describe("Dahua rasmlari va exit hisobi", () => {
     expect(session.entry_vehicle_image_path).toContain(`uploads/parking/${orgId}/`);
     expect(session.entry_plate_image_path).toContain(`uploads/parking/${orgId}/`);
     expect(session.entry_vehicle_image_path).not.toContain("..");
-    expect(await fs.readFile(path.resolve(session.entry_vehicle_image_path))).toEqual(VEHICLE_JPEG);
+    const { width, height } = await expectValidJpeg(path.resolve(session.entry_vehicle_image_path));
+    expect(width).toBeLessThanOrEqual(400);
+    expect(height).toBeLessThanOrEqual(300);
+    expect(await fs.readFile(path.resolve(session.entry_plate_image_path))).toEqual(PLATE_JPEG);
 
     const detail = await request(server)
       .get(`/api/parking/sessions/${session.id}`)
@@ -197,7 +224,7 @@ describe("Dahua rasmlari va exit hisobi", () => {
     expect(event.vehicle_image_path).toContain(`/${event.id}/vehicle.jpg`);
     expect(event.plate_image_path).toContain(`/${event.id}/plate.jpg`);
     expect(await fs.readFile(path.resolve(event.overview_image_path))).toEqual(OVERVIEW_JPEG);
-    expect(await fs.readFile(path.resolve(event.vehicle_image_path))).toEqual(VEHICLE_JPEG);
+    await expectValidJpeg(path.resolve(event.vehicle_image_path));
     expect(await fs.readFile(path.resolve(event.plate_image_path))).toEqual(PLATE_JPEG);
     expect(event.image_processing_result).toBe("saved");
   });
@@ -275,7 +302,7 @@ describe("Dahua rasmlari va exit hisobi", () => {
     expect(events[0].vehicle_image_path).not.toBe(events[1].vehicle_image_path);
     expect(events[0].vehicle_image_path).toContain(`/${events[0].id}/`);
     expect(events[1].vehicle_image_path).toContain(`/${events[1].id}/`);
-    expect(await fs.readFile(path.resolve(events[0].vehicle_image_path))).toEqual(VEHICLE_JPEG);
+    await expectValidJpeg(path.resolve(events[0].vehicle_image_path));
   });
 
   it("event image endpoint auth va organization isolationni saqlaydi", async () => {

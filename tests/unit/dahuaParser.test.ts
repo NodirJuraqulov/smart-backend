@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import sharp from "sharp";
 import { dahuaParser, parseDahuaPayload } from "@/modules/webhook/parsers/dahuaParser";
 
 const NORMAL_PIC_NAME = "10R726ZA-20260728150625.jpg";
@@ -7,6 +8,12 @@ const PLATE_PIC_NAME = "10R726ZA-20260728150625-plate.jpg";
 const NORMAL_JPEG = Buffer.from([0xff, 0xd8, 0xff, 0x01, 0xd9]).toString("base64");
 const CUTOUT_JPEG = Buffer.from([0xff, 0xd8, 0xff, 0x02, 0xd9]).toString("base64");
 const PLATE_JPEG = Buffer.from([0xff, 0xd8, 0xff, 0x03, 0xd9]).toString("base64");
+
+async function makeJpeg(width: number, height: number): Promise<Buffer> {
+  return sharp({ create: { width, height, channels: 3, background: { r: 100, g: 100, b: 100 } } })
+    .jpeg()
+    .toBuffer();
+}
 
 function buildFixture(overrides: Record<string, unknown> = {}) {
   return {
@@ -157,7 +164,7 @@ describe("parseDahuaPayload", () => {
     expect(result?.deviceId).toBe("device-001");
   });
 
-  it("base64 rasmlarni ajratadi", () => {
+  it("base64 rasmlarni to'g'ri manbalarga ajratadi", () => {
     const fixture = buildFixture({
       NormalPic: { Content: `data:image/jpeg;base64,${NORMAL_JPEG}`, PicName: NORMAL_PIC_NAME },
       CutoutPic: { Content: CUTOUT_JPEG, PicName: CUTOUT_PIC_NAME },
@@ -165,25 +172,11 @@ describe("parseDahuaPayload", () => {
     });
     const result = parseDahuaPayload(Buffer.from(JSON.stringify(fixture)), fixture);
     expect(result?.overviewImageBase64).toBe(NORMAL_JPEG);
-    expect(result?.vehicleImageBase64).toBe(CUTOUT_JPEG);
-    expect(result?.plateImageBase64).toBe(PLATE_JPEG);
+    expect(result?.cutoutImageBase64).toBe(CUTOUT_JPEG);
+    expect(result?.platePicImageBase64).toBe(PLATE_JPEG);
     expect(result?.overviewImageFileName).toBe(NORMAL_PIC_NAME);
-    expect(result?.vehicleImageFileName).toBe(CUTOUT_PIC_NAME);
-    expect(result?.plateImageFileName).toBe(PLATE_PIC_NAME);
-  });
-
-  it("Picture ichidagi CutoutPic rasmiga fallback qiladi", () => {
-    const fixture = {
-      Picture: {
-        CutoutPic: { Content: "data:image/jpeg;base64,CCCC", PicName: NORMAL_PIC_NAME },
-        PlatePic: { Content: "DDDD", PicName: PLATE_PIC_NAME },
-      },
-      Plate: { IsExist: true, PlateNumber: "10R726ZA" },
-    };
-    const result = parseDahuaPayload(Buffer.from(JSON.stringify(fixture)), fixture);
-    expect(result?.vehicleImageBase64).toBe("CCCC");
-    expect(result?.plateImageBase64).toBe("DDDD");
-    expect(result?.vehicleImageFileName).toBe(NORMAL_PIC_NAME);
+    expect(result?.cutoutImageFileName).toBe(CUTOUT_PIC_NAME);
+    expect(result?.platePicFileName).toBe(PLATE_PIC_NAME);
   });
 
   it("body ichiga o'ralgan payloadni qo'llab-quvvatlaydi", () => {
@@ -223,7 +216,7 @@ describe("parseDahuaPayload", () => {
   });
 });
 
-describe("dahuaParser (CameraParser)", () => {
+describe("dahuaParser (CameraParser) — rasm semantikasi", () => {
   it("to'g'ri Dahua payloadidan NormalizedCameraEvent qaytaradi", async () => {
     const fixture = buildFixture();
     const event = await dahuaParser.parse(buildInput(fixture));
@@ -233,35 +226,129 @@ describe("dahuaParser (CameraParser)", () => {
     expect(event.confidence).toBeNull();
   });
 
-  it("NormalPic overview, CutoutPic vehicle va PlatePic plate bo'ladi", async () => {
+  it("NormalPic -> overviewImage bo'ladi", async () => {
+    const overview = await makeJpeg(200, 150);
     const fixture = buildFixture({
-      CutoutPic: { Content: CUTOUT_JPEG, PicName: CUTOUT_PIC_NAME },
+      NormalPic: { Content: overview.toString("base64"), PicName: NORMAL_PIC_NAME },
+      Vehicle: undefined,
+      PlatePic: undefined,
     });
     const event = await dahuaParser.parse(buildInput(fixture));
-    expect(event.overviewImage).toEqual(Buffer.from(NORMAL_JPEG, "base64"));
-    expect(event.vehicleImage).toEqual(Buffer.from(CUTOUT_JPEG, "base64"));
-    expect(event.plateImage).toEqual(Buffer.from(PLATE_JPEG, "base64"));
-    expect(event.overviewImageFileName).toBe(NORMAL_PIC_NAME);
-    expect(event.vehicleImageFileName).toBe(CUTOUT_PIC_NAME);
-    expect(event.plateImageFileName).toBe(PLATE_PIC_NAME);
-    expect(event.metadata?.vehicleImageSource).toBe("cutout");
+    expect(event.overviewImage).toEqual(overview);
+    expect(event.metadata?.overviewImageSource).toBe("normal_pic");
   });
 
-  it("CutoutPic yo'q yoki invalid bo'lsa NormalPic vehicle fallback bo'ladi", async () => {
-    const absent = await dahuaParser.parse(buildInput(buildFixture()));
-    expect(absent.vehicleImage).toEqual(absent.overviewImage);
-    expect(absent.vehicleImageFileName).toBe(NORMAL_PIC_NAME);
-    expect(absent.metadata?.vehicleImageSource).toBe("normal_fallback");
-
-    const invalidFixture = buildFixture({
-      CutoutPic: { Content: "not-base64", PicName: CUTOUT_PIC_NAME },
+  it("CutoutPic -> plateImage bo'ladi, vehicleImage BO'LMAYDI", async () => {
+    const overview = await makeJpeg(200, 150);
+    const fixture = buildFixture({
+      NormalPic: { Content: overview.toString("base64"), PicName: NORMAL_PIC_NAME },
+      CutoutPic: { Content: CUTOUT_JPEG, PicName: CUTOUT_PIC_NAME },
+      PlatePic: undefined,
+      Vehicle: undefined,
     });
-    const invalid = await dahuaParser.parse(buildInput(invalidFixture));
-    expect(invalid.vehicleImage).toEqual(invalid.overviewImage);
-    expect(invalid.vehicleImageFileName).toBe(NORMAL_PIC_NAME);
+    const event = await dahuaParser.parse(buildInput(fixture));
+    expect(event.plateImage).toEqual(Buffer.from(CUTOUT_JPEG, "base64"));
+    expect(event.plateImage).not.toEqual(event.vehicleImage);
+    expect(event.metadata?.plateImageSource).toBe("cutout_pic");
+    expect(event.metadata?.vehicleImageSource).not.toBe("cutout_pic");
   });
 
-  it("invalid va bo'sh rasmlar null bo'ladi", async () => {
+  it("PlatePic mavjud bo'lsa CutoutPic'dan ustun turadi", async () => {
+    const overview = await makeJpeg(200, 150);
+    const fixture = buildFixture({
+      NormalPic: { Content: overview.toString("base64"), PicName: NORMAL_PIC_NAME },
+      CutoutPic: { Content: CUTOUT_JPEG, PicName: CUTOUT_PIC_NAME },
+      PlatePic: { Content: PLATE_JPEG, PicName: PLATE_PIC_NAME },
+      Vehicle: undefined,
+    });
+    const event = await dahuaParser.parse(buildInput(fixture));
+    expect(event.plateImage).toEqual(Buffer.from(PLATE_JPEG, "base64"));
+    expect(event.metadata?.plateImageSource).toBe("plate_pic");
+  });
+
+  it("PlatePic yo'q bo'lsa CutoutPic plate fallback bo'ladi", async () => {
+    const overview = await makeJpeg(200, 150);
+    const fixture = buildFixture({
+      NormalPic: { Content: overview.toString("base64"), PicName: NORMAL_PIC_NAME },
+      CutoutPic: { Content: CUTOUT_JPEG, PicName: CUTOUT_PIC_NAME },
+      PlatePic: undefined,
+      Vehicle: undefined,
+    });
+    const event = await dahuaParser.parse(buildInput(fixture));
+    expect(event.plateImage).toEqual(Buffer.from(CUTOUT_JPEG, "base64"));
+    expect(event.metadata?.plateImageSource).toBe("cutout_pic");
+  });
+
+  it("PlatePic va CutoutPic yo'q bo'lsa Plate.BoundingBox orqali NormalPic'dan kesiladi", async () => {
+    const overview = await makeJpeg(400, 300);
+    const fixture = buildFixture({
+      NormalPic: { Content: overview.toString("base64"), PicName: NORMAL_PIC_NAME },
+      CutoutPic: undefined,
+      PlatePic: undefined,
+      Vehicle: undefined,
+      Plate: { IsExist: true, PlateNumber: "10R726ZA", BoundingBox: { Left: 50, Top: 50, Right: 150, Bottom: 100 } },
+    });
+    const event = await dahuaParser.parse(buildInput(fixture));
+    expect(event.plateImage).toBeTruthy();
+    expect(event.metadata?.plateImageSource).toBe("normal_plate_bbox_crop");
+  });
+
+  it("noto'g'ri Plate.BoundingBox bo'lsa plateImage null bo'ladi", async () => {
+    const overview = await makeJpeg(400, 300);
+    const fixture = buildFixture({
+      NormalPic: { Content: overview.toString("base64"), PicName: NORMAL_PIC_NAME },
+      CutoutPic: undefined,
+      PlatePic: undefined,
+      Vehicle: undefined,
+      Plate: { IsExist: true, PlateNumber: "10R726ZA", BoundingBox: { Left: 0, Top: 0, Right: 0, Bottom: 0 } },
+    });
+    const event = await dahuaParser.parse(buildInput(fixture));
+    expect(event.plateImage).toBeNull();
+    expect(event.metadata?.plateImageSource).toBe("none");
+  });
+
+  it("Vehicle.VehicleBoundingBox orqali NormalPic'dan vehicle crop yaratadi", async () => {
+    const overview = await makeJpeg(400, 300);
+    const fixture = buildFixture({
+      NormalPic: { Content: overview.toString("base64"), PicName: NORMAL_PIC_NAME },
+      Vehicle: { VehicleBoundingBox: { Left: 20, Top: 20, Right: 300, Bottom: 250 } },
+      CutoutPic: undefined,
+      PlatePic: undefined,
+    });
+    const event = await dahuaParser.parse(buildInput(fixture));
+    expect(event.vehicleImage).toBeTruthy();
+    expect(event.vehicleImage).not.toEqual(event.overviewImage);
+    expect(event.metadata?.vehicleImageSource).toBe("normal_vehicle_bbox_crop");
+    const meta = await sharp(event.vehicleImage!).metadata();
+    expect(meta.width).toBeGreaterThan(0);
+    expect(meta.height).toBeGreaterThan(0);
+  });
+
+  it("bbox yo'q yoki yaroqsiz bo'lsa vehicleImage NormalPic fallback bo'ladi", async () => {
+    const overview = await makeJpeg(200, 150);
+    const missingBbox = buildFixture({
+      NormalPic: { Content: overview.toString("base64"), PicName: NORMAL_PIC_NAME },
+      Vehicle: undefined,
+      CutoutPic: undefined,
+      PlatePic: undefined,
+    });
+    const missing = await dahuaParser.parse(buildInput(missingBbox));
+    expect(missing.vehicleImage).toEqual(missing.overviewImage);
+    expect(missing.metadata?.vehicleImageSource).toBe("normal_fallback");
+    expect(missing.metadata?.vehicleFallbackReason).toBe("missing_or_invalid_bbox");
+
+    const invalidBbox = buildFixture({
+      NormalPic: { Content: overview.toString("base64"), PicName: NORMAL_PIC_NAME },
+      Vehicle: { VehicleBoundingBox: { Left: 0, Top: 0, Right: 0, Bottom: 0 } },
+      CutoutPic: undefined,
+      PlatePic: undefined,
+    });
+    const invalid = await dahuaParser.parse(buildInput(invalidBbox));
+    expect(invalid.vehicleImage).toEqual(invalid.overviewImage);
+    expect(invalid.metadata?.vehicleImageSource).toBe("normal_fallback");
+  });
+
+  it("invalid va bo'sh rasmlar null bo'ladi, webhook qulamaydi", async () => {
     const fixture = buildFixture({
       NormalPic: { Content: "", PicName: NORMAL_PIC_NAME },
       CutoutPic: { Content: "AAAA", PicName: CUTOUT_PIC_NAME },
@@ -273,12 +360,46 @@ describe("dahuaParser (CameraParser)", () => {
     expect(event.plateImage).toBeNull();
   });
 
+  it("buzuq NormalPic webhookni qulatmaydi, overview/vehicle null bo'ladi", async () => {
+    const corruptJpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff]), Buffer.from("bu jpeg emas ichida")]);
+    const fixture = buildFixture({
+      NormalPic: { Content: corruptJpeg.toString("base64"), PicName: NORMAL_PIC_NAME },
+      Vehicle: { VehicleBoundingBox: { Left: 5, Top: 6, Right: 100, Bottom: 100 } },
+      CutoutPic: undefined,
+      PlatePic: undefined,
+    });
+    await expect(dahuaParser.parse(buildInput(fixture))).resolves.toMatchObject({
+      overviewImage: null,
+      vehicleImage: null,
+      plateImage: null,
+    });
+  });
+
   it("rasmli no-plate event unknown payload emas", async () => {
-    const fixture = buildFixture({ Plate: { IsExist: false } });
+    const overview = await makeJpeg(200, 150);
+    const fixture = buildFixture({
+      NormalPic: { Content: overview.toString("base64"), PicName: NORMAL_PIC_NAME },
+      Plate: { IsExist: false },
+    });
     const event = await dahuaParser.parse(buildInput(fixture, { direction: "exit" }));
     expect(event.plateNumber).toBeNull();
     expect(event.metadata?.eventKind).toBe("plate_not_recognized");
     expect(event.overviewImage).toBeTruthy();
+  });
+
+  it("no-plate eventda ham Vehicle bbox orqali vehicle crop yaratiladi", async () => {
+    const overview = await makeJpeg(400, 300);
+    const fixture = buildFixture({
+      NormalPic: { Content: overview.toString("base64"), PicName: NORMAL_PIC_NAME },
+      Vehicle: { VehicleBoundingBox: { Left: 20, Top: 20, Right: 300, Bottom: 250 } },
+      CutoutPic: { Content: CUTOUT_JPEG, PicName: "noplate-20260728150625-plate.jpg" },
+      PlatePic: undefined,
+      Plate: { IsExist: false },
+    });
+    const event = await dahuaParser.parse(buildInput(fixture));
+    expect(event.plateNumber).toBeNull();
+    expect(event.metadata?.vehicleImageSource).toBe("normal_vehicle_bbox_crop");
+    expect(event.plateImage).toEqual(Buffer.from(CUTOUT_JPEG, "base64"));
   });
 
   it("Dahua confidence NormalizedCameraEvent'ga uzatiladi", async () => {
@@ -305,5 +426,53 @@ describe("dahuaParser (CameraParser)", () => {
     await expect(dahuaParser.parse(buildInput(fixture))).rejects.toMatchObject({
       name: "IgnoredCameraSignalError",
     });
+  });
+});
+
+describe("dahuaParser — real production-style tasvirlar", () => {
+  it("2688x1584 NormalPic, [1409,69,2669,779] vehicle bbox, [1294,635,1546,769] plate bbox va 96x32 CutoutPic", async () => {
+    const overview = await makeJpeg(2688, 1584);
+    const cutout = await makeJpeg(96, 32);
+    const fixture = buildFixture({
+      NormalPic: { Content: overview.toString("base64"), PicName: "85J119PA-20260728175503.jpg" },
+      CutoutPic: { Content: cutout.toString("base64"), PicName: "85J119PA-20260728175503-plate.jpg" },
+      PlatePic: undefined,
+      Vehicle: { VehicleBoundingBox: [1409, 69, 2669, 779] },
+      Plate: {
+        IsExist: true,
+        PlateNumber: "85J119PA",
+        BoundingBox: [1294, 635, 1546, 769],
+      },
+    });
+    const event = await dahuaParser.parse(buildInput(fixture));
+
+    const overviewMeta = await sharp(event.overviewImage!).metadata();
+    expect(overviewMeta.width).toBe(2688);
+    expect(overviewMeta.height).toBe(1584);
+
+    const vehicleMeta = await sharp(event.vehicleImage!).metadata();
+    expect(vehicleMeta.width).toBeGreaterThan(90);
+    expect(vehicleMeta.height).toBeGreaterThan(90);
+    expect(event.vehicleImage).not.toEqual(Buffer.from(cutout));
+
+    const plateMeta = await sharp(event.plateImage!).metadata();
+    expect(plateMeta.width).toBe(96);
+    expect(plateMeta.height).toBe(32);
+    expect(event.plateImage).toEqual(cutout);
+
+    expect(event.metadata?.vehicleImageSource).toBe("normal_vehicle_bbox_crop");
+    expect(event.metadata?.plateImageSource).toBe("cutout_pic");
+  });
+
+  it("string koordinatali bbox qo'llab-quvvatlanadi", async () => {
+    const overview = await makeJpeg(2688, 1584);
+    const fixture = buildFixture({
+      NormalPic: { Content: overview.toString("base64"), PicName: NORMAL_PIC_NAME },
+      Vehicle: { VehicleBoundingBox: ["1409", "69", "2669", "779"] },
+      CutoutPic: undefined,
+      PlatePic: undefined,
+    });
+    const event = await dahuaParser.parse(buildInput(fixture));
+    expect(event.metadata?.vehicleImageSource).toBe("normal_vehicle_bbox_crop");
   });
 });
