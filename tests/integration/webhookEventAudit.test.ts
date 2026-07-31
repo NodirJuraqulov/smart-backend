@@ -23,6 +23,8 @@ vi.mock("@/websocket/socketServer", () => ({
   emitParkingFull: vi.fn(),
   emitExitAwaitingPayment: vi.fn(),
   emitExitCompleted: vi.fn(),
+  emitExitCandidateCreated: vi.fn(),
+  emitExitCandidateResolved: vi.fn(),
   emitPlateNotRecognizedForExit: vi.fn(),
   emitRelayFailed: vi.fn(),
   emitWebhookParseFailed: vi.fn(),
@@ -115,7 +117,7 @@ describe("tb_webhook_events camera audit", () => {
       .where({ org_id: orgId, plate_number: "01A123BC" })
       .orderBy("id");
 
-    expect(session.status).toBe("awaiting_payment");
+    expect(session.status).toBe("active");
     expect(events).toHaveLength(2);
     expect(events[0]).toMatchObject({
       direction: "entry",
@@ -127,7 +129,7 @@ describe("tb_webhook_events camera audit", () => {
     expect(events[0].camera_event_at).toBeTruthy();
     expect(events[1]).toMatchObject({
       direction: "exit",
-      processing_result: "exit_awaiting_payment",
+      processing_result: "exit_candidate_pending",
       session_id: session.id,
     });
     expect(Number(events[1].confidence)).toBe(96);
@@ -141,8 +143,8 @@ describe("tb_webhook_events camera audit", () => {
     const event = await db("tb_webhook_events").where({ org_id: orgId }).first();
     expect(event).toMatchObject({
       plate_number: "01A555BC",
-      processing_result: "unmatched_exit",
-      processing_reason: "active_session_not_found",
+      processing_result: "exit_candidate_pending",
+      processing_reason: "inside_session_not_found",
       session_id: null,
     });
     expect(Number(event.confidence)).toBe(42);
@@ -248,7 +250,7 @@ describe("tb_webhook_events camera audit", () => {
       to: new Date(Date.now() + 60_000),
     });
 
-    expect(diagnostics.unmatched_exit_count).toBe(1);
+    expect(diagnostics.unmatched_exit_count).toBe(0);
     expect(diagnostics.successful_exit_count).toBe(0);
     expect(diagnostics.null_confidence_count).toBe(0);
     expect(diagnostics.malformed_plate_count).toBe(0);

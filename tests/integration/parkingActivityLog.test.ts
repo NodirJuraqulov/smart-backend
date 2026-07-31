@@ -22,6 +22,8 @@ vi.mock("@/websocket/socketServer", () => ({
   emitParkingFull: vi.fn(),
   emitExitAwaitingPayment: vi.fn(),
   emitExitCompleted: vi.fn(),
+  emitExitCandidateCreated: vi.fn(),
+  emitExitCandidateResolved: vi.fn(),
   emitPlateNotRecognizedForExit: vi.fn(),
   emitRelayFailed: vi.fn(),
   emitWebhookParseFailed: vi.fn(),

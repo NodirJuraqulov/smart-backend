@@ -9,6 +9,7 @@ import {
   emitEntryDetected,
   emitExitAwaitingPayment,
   emitExitCompleted,
+  emitExitCandidateCreated,
   emitParkingFull,
   emitPlateNotRecognizedForExit,
   emitRelayFailed,
@@ -32,6 +33,8 @@ vi.mock("@/websocket/socketServer", () => ({
   emitParkingFull: vi.fn(),
   emitExitAwaitingPayment: vi.fn(),
   emitExitCompleted: vi.fn(),
+  emitExitCandidateCreated: vi.fn(),
+  emitExitCandidateResolved: vi.fn(),
   emitPlateNotRecognizedForExit: vi.fn(),
   emitRelayFailed: vi.fn(),
   emitWebhookParseFailed: vi.fn(),
@@ -157,7 +160,7 @@ describe("Kirish webhook", () => {
 });
 
 describe("Chiqish webhook", () => {
-  it("faol sessiya topilsa — status awaiting_payment ga o'tadi, summa hisoblanadi", async () => {
+  it("faol sessiya topilsa — pending candidate yaratadi va sessiyaga tegmaydi", async () => {
     await postWebhook("entry", "01A555AA");
     await clearWebhookDedupeCache();
 
@@ -166,33 +169,33 @@ describe("Chiqish webhook", () => {
     expect(res.status).toBe(200);
 
     const session = await db("tb_parking_sessions").where({ org_id: orgId, plate_number: "01A555AA" }).first();
-    expect(session.status).toBe("awaiting_payment");
-    expect(session.exited_at).toBeTruthy();
-    expect(Number(session.amount)).toBeGreaterThanOrEqual(0);
-
-    expect(emitExitAwaitingPayment).toHaveBeenCalledWith(
+    expect(session.status).toBe("active");
+    expect(session.exited_at).toBeNull();
+    expect(session.amount).toBeNull();
+    const candidate = await db("tb_exit_candidates").where({ org_id: orgId }).first();
+    expect(candidate).toMatchObject({ status: "pending", matched_session_id: session.id });
+    expect(emitExitCandidateCreated).toHaveBeenCalledWith(
       orgId,
-      expect.objectContaining({
-        plateNumber: "01A555AA",
-        enteredAt: session.entered_at,
-        durationMinutes: session.duration_minutes,
-      })
+      expect.objectContaining({ id: candidate.id, matched_session_id: session.id })
     );
+    expect(emitExitAwaitingPayment).not.toHaveBeenCalled();
     expect(emitExitCompleted).not.toHaveBeenCalled();
   });
 
-  it("faol sessiya topilmasa — hech narsa o'zgarmaydi, plate_not_recognized_for_exit eventi yuboriladi", async () => {
+  it("faol sessiya topilmasa — unmatched pending candidate yaratadi", async () => {
     const res = await postWebhook("exit", "01A666AA");
 
     expect(res.status).toBe(200);
     expect(await activeSessionCount()).toBe(0);
-    expect(emitPlateNotRecognizedForExit).toHaveBeenCalledWith(
-      orgId,
-      expect.objectContaining({ plateNumber: "01A666AA" })
-    );
+    expect(await db("tb_exit_candidates").where({ org_id: orgId }).first()).toMatchObject({
+      status: "pending",
+      detected_plate: "01A666AA",
+      matched_session_id: null,
+    });
+    expect(emitPlateNotRecognizedForExit).not.toHaveBeenCalled();
   });
 
-  it("VIP mashina uchun — darhol completed, to'lov kutilmaydi", async () => {
+  it("VIP mashina uchun — pending candidate yaratadi", async () => {
     await createTestVipVehicle(orgId, "01A777AA");
     await postWebhook("entry", "01A777AA");
     await clearWebhookDedupeCache();
@@ -202,15 +205,15 @@ describe("Chiqish webhook", () => {
     expect(res.status).toBe(200);
 
     const session = await db("tb_parking_sessions").where({ org_id: orgId, plate_number: "01A777AA" }).first();
-    expect(session.status).toBe("completed");
-    expect(Number(session.amount)).toBe(0);
-
-    expect(emitExitCompleted).toHaveBeenCalledWith(orgId, expect.objectContaining({ plateNumber: "01A777AA", amount: 0 }));
+    expect(session.status).toBe("active");
+    expect(session.exited_at).toBeNull();
+    expect(await db("tb_exit_candidates").where({ matched_session_id: session.id }).first()).toBeTruthy();
+    expect(emitExitCompleted).not.toHaveBeenCalled();
     expect(emitExitAwaitingPayment).not.toHaveBeenCalled();
-    expect(openBarrier).toHaveBeenCalledWith(orgId, "exit");
+    expect(openBarrier).not.toHaveBeenCalledWith(orgId, "exit");
   });
 
-  it("obuna mashina uchun — darhol completed, to'lov kutilmaydi", async () => {
+  it("obuna mashina uchun — pending candidate yaratadi", async () => {
     await createTestSubscription(orgId, "01A888AA");
     await postWebhook("entry", "01A888AA");
     await clearWebhookDedupeCache();
@@ -220,8 +223,9 @@ describe("Chiqish webhook", () => {
     expect(res.status).toBe(200);
 
     const session = await db("tb_parking_sessions").where({ org_id: orgId, plate_number: "01A888AA" }).first();
-    expect(session.status).toBe("completed");
-    expect(Number(session.amount)).toBe(0);
+    expect(session.status).toBe("active");
+    expect(session.exited_at).toBeNull();
+    expect(await db("tb_exit_candidates").where({ matched_session_id: session.id }).first()).toBeTruthy();
   });
 });
 
@@ -274,8 +278,9 @@ describe("Shared gate cross-camera guard", () => {
     const session = await db("tb_parking_sessions")
       .where({ org_id: orgId, plate_number: "01A124BC" })
       .first();
-    expect(session.status).toBe("awaiting_payment");
-    expect(session.exited_at).toBeTruthy();
+    expect(session.status).toBe("active");
+    expect(session.exited_at).toBeNull();
+    expect(await db("tb_exit_candidates").where({ matched_session_id: session.id }).first()).toBeTruthy();
   });
 
   it("exit dan keyingi entry echo ham simmetrik ignored bo'ladi", async () => {
@@ -304,7 +309,8 @@ describe("Shared gate cross-camera guard", () => {
     const session = await db("tb_parking_sessions")
       .where({ org_id: orgId, plate_number: "01A126BC" })
       .first();
-    expect(session.status).toBe("awaiting_payment");
+    expect(session.status).toBe("active");
+    expect(await db("tb_exit_candidates").where({ matched_session_id: session.id }).first()).toBeTruthy();
   });
 
   it("boshqa org va boshqa plate hodisalari guard bilan aralashmaydi", async () => {

@@ -31,6 +31,8 @@ vi.mock("@/websocket/socketServer", () => ({
   emitParkingFull: vi.fn(),
   emitExitAwaitingPayment: vi.fn(),
   emitExitCompleted: vi.fn(),
+  emitExitCandidateCreated: vi.fn(),
+  emitExitCandidateResolved: vi.fn(),
   emitPlateNotRecognizedForExit: vi.fn(),
   emitRelayFailed: vi.fn(),
   emitWebhookParseFailed: vi.fn(),
@@ -160,7 +162,7 @@ describe("Dahua rasmlari va exit hisobi", () => {
     expect(JSON.stringify(detail.body)).not.toContain(JPEG_BASE64);
   });
 
-  it("exit rasmlarini shu sessiyaga biriktiradi va 61 daqiqani 2 soat tarifida hisoblaydi", async () => {
+  it("exit rasmlarini eventda saqlaydi va sessiyaga operator tasdig'isiz tegmaydi", async () => {
     await postCamera("entry", dahuaPayload("50M094BB"));
     const session = await db("tb_parking_sessions").where({ org_id: orgId, plate_number: "50M094BB" }).first();
     await db("tb_parking_sessions")
@@ -170,25 +172,20 @@ describe("Dahua rasmlari va exit hisobi", () => {
 
     await postCamera("exit", dahuaPayload("50M094BB"));
     const exited = await db("tb_parking_sessions").where({ id: session.id }).first();
-    expect(exited.status).toBe("awaiting_payment");
-    expect(exited.duration_minutes).toBeGreaterThanOrEqual(61);
-    expect(Number(exited.amount)).toBe(10000);
-    expect(exited.exit_overview_image_path).toContain(`uploads/parking/${orgId}/`);
-    expect(exited.exit_vehicle_image_path).toContain(`uploads/parking/${orgId}/`);
-    expect(exited.exit_plate_image_path).toContain(`uploads/parking/${orgId}/`);
-    expect(await fs.readFile(path.resolve(exited.exit_overview_image_path))).toEqual(OVERVIEW_JPEG);
-
-    const awaiting = await request(server)
-      .get("/api/parking/sessions/awaiting-payment")
-      .set("Authorization", authHeader());
-    expect(awaiting.body.sessions[0]).toMatchObject({
-      id: session.id,
-      status: "awaiting_payment",
-      exitOverviewImageUrl: expect.stringContaining(
-        `/api/parking/sessions/${session.id}/images/exit-overview`
-      ),
-      exitVehicleImageUrl: expect.any(String),
-      exitPlateImageUrl: expect.any(String),
+    expect(exited.status).toBe("active");
+    expect(exited.exited_at).toBeNull();
+    expect(exited.amount).toBeNull();
+    expect(exited.exit_overview_image_path).toBeNull();
+    const event = await db("tb_webhook_events")
+      .where({ org_id: orgId, plate_number: "50M094BB", direction: "exit" })
+      .first();
+    expect(event.overview_image_path).toContain(`uploads/parking-events/${orgId}/`);
+    expect(event.vehicle_image_path).toContain(`/${event.id}/vehicle.jpg`);
+    expect(event.plate_image_path).toContain(`/${event.id}/plate.jpg`);
+    expect(await fs.readFile(path.resolve(event.overview_image_path))).toEqual(OVERVIEW_JPEG);
+    expect(await db("tb_exit_candidates").where({ webhook_event_id: event.id }).first()).toMatchObject({
+      status: "pending",
+      matched_session_id: session.id,
     });
   });
 
@@ -293,14 +290,13 @@ describe("Dahua rasmlari va exit hisobi", () => {
 
     expect(response.body).toMatchObject({
       parsed: true,
-      ignored: true,
-      reason: "plate_not_recognized",
+      candidate_created: true,
       plate_number: null,
     });
     const event = await db("tb_webhook_events").where({ org_id: orgId }).first();
     expect(event).toMatchObject({
       plate_number: null,
-      processing_result: "plate_not_recognized",
+      processing_result: "exit_candidate_pending",
       processing_reason: "camera_ocr_failed",
       image_processing_result: "saved",
       session_id: null,
@@ -326,9 +322,13 @@ describe("Dahua rasmlari va exit hisobi", () => {
     const event = await db("tb_webhook_events")
       .where({ org_id: orgId, plate_number: "50M099BB" })
       .first();
-    expect(event.processing_result).toBe("unmatched_exit");
+    expect(event.processing_result).toBe("exit_candidate_pending");
     expect(event.session_id).toBeNull();
     expect(event.vehicle_image_path).toContain(`/${event.id}/vehicle.jpg`);
+    expect(await db("tb_exit_candidates").where({ webhook_event_id: event.id }).first()).toMatchObject({
+      matched_session_id: null,
+      status: "pending",
+    });
   });
 
   it("duplicate event yangi rasm nusxalarini saqlamaydi", async () => {

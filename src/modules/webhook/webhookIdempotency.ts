@@ -50,12 +50,19 @@ function asValidDate(value: Date | string | null | undefined): Date | null {
   return Number.isFinite(date.getTime()) ? date : null;
 }
 
+export function resolveSafeCameraEventTime(
+  cameraEventAt: Date | string | null | undefined,
+  serverCreatedAt: Date | string
+): Date {
+  const createdAt = asValidDate(serverCreatedAt) ?? new Date();
+  const cameraAt = asValidDate(cameraEventAt);
+  if (!cameraAt) return createdAt;
+  const skewSeconds = Math.abs(cameraAt.getTime() - createdAt.getTime()) / 1000;
+  return skewSeconds <= MAX_CAMERA_CLOCK_SKEW_SECONDS ? cameraAt : createdAt;
+}
+
 function effectiveEventTime(row: WebhookEventTimeRow): Date {
-  const createdAt = asValidDate(row.created_at) ?? new Date();
-  const cameraEventAt = asValidDate(row.camera_event_at);
-  if (!cameraEventAt) return createdAt;
-  const skewSeconds = Math.abs(cameraEventAt.getTime() - createdAt.getTime()) / 1000;
-  return skewSeconds <= MAX_CAMERA_CLOCK_SKEW_SECONDS ? cameraEventAt : createdAt;
+  return resolveSafeCameraEventTime(row.camera_event_at, row.created_at);
 }
 
 function calculateDeltaSeconds(

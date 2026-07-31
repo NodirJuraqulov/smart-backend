@@ -109,6 +109,14 @@ export function emitExitCompleted(orgId: number, payload: unknown): void {
   getIO()?.to(`public:org:${orgId}`).emit("exit_completed", payload);
 }
 
+export function emitExitCandidateCreated(orgId: number, payload: unknown): void {
+  getIO()?.to(`org_${orgId}`).emit("exit_candidate_created", payload);
+}
+
+export function emitExitCandidateResolved(orgId: number, payload: unknown): void {
+  getIO()?.to(`org_${orgId}`).emit("exit_candidate_resolved", payload);
+}
+
 export function emitPlateNotRecognizedForExit(orgId: number, payload: unknown): void {
   getIO()?.to(`public:org:${orgId}`).emit("plate_not_recognized_for_exit", payload);
 }

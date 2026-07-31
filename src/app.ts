@@ -23,6 +23,7 @@ import webhookRouter from "./modules/webhook/webhook.routes";
 import publicDisplayRouter from "./modules/publicDisplay/publicDisplay.routes";
 import paymentRouter from "./modules/payment/payment.routes";
 import webhookEventsRouter from "./modules/webhook/webhookEvents.routes";
+import exitCandidatesRouter from "./modules/exitCandidates/exitCandidates.routes";
 
 const app = express();
 
@@ -133,6 +134,7 @@ app.use("/api/subscriptions", subscriptionsRouter);
 app.use("/api/vip-vehicles", vipVehiclesRouter);
 app.use("/api/settings", settingsRouter);
 app.use("/api/webhook-events", webhookEventsRouter);
+app.use("/api/exit-candidates", exitCandidatesRouter);
 app.use("/api/parking", parkingRouter);
 app.use("/api/reports", reportsRouter);
 app.use("/api/admin/activity-logs", activityLogsRouter);

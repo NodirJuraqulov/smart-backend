@@ -5,7 +5,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { db } from "@/config/db";
 import webhookRouter from "@/modules/webhook/webhook.routes";
 import { clearWebhookDedupeCache } from "@/modules/webhook/webhookIdempotency";
-import { emitEntryDetected, emitExitAwaitingPayment, emitWebhookParseFailed } from "@/websocket/socketServer";
+import { emitEntryDetected, emitExitAwaitingPayment, emitExitCandidateCreated, emitWebhookParseFailed } from "@/websocket/socketServer";
 import { cameraParserFactory } from "@/modules/webhook/parsers/cameraParserFactory";
 import {
   assertTestDatabase,
@@ -20,6 +20,8 @@ vi.mock("@/websocket/socketServer", () => ({
   emitParkingFull: vi.fn(),
   emitExitAwaitingPayment: vi.fn(),
   emitExitCompleted: vi.fn(),
+  emitExitCandidateCreated: vi.fn(),
+  emitExitCandidateResolved: vi.fn(),
   emitPlateNotRecognizedForExit: vi.fn(),
   emitRelayFailed: vi.fn(),
   emitWebhookParseFailed: vi.fn(),
@@ -216,8 +218,8 @@ describe("POST /api/webhook/debug/:token/:direction — parser factoryga kirmayd
   });
 });
 
-describe("Entry/exit biznes logikasi — normalized event orqali avvalgidek ishlaydi", () => {
-  it("exit — awaiting_payment holatiga to'g'ri o'tadi", async () => {
+describe("Entry/exit biznes logikasi — normalized event orqali ishlaydi", () => {
+  it("exit — sessiyaga tegmasdan pending candidate yaratadi", async () => {
     await db("tb_organizations").where({ id: orgId }).update({ camera_brand: "hikvision" });
 
     await postToRoute("camera", "entry", "01C888AA");
@@ -227,10 +229,10 @@ describe("Entry/exit biznes logikasi — normalized event orqali avvalgidek ishl
 
     expect(res.status).toBe(200);
     const session = await db("tb_parking_sessions").where({ org_id: orgId, plate_number: "01C888AA" }).first();
-    expect(session.status).toBe("awaiting_payment");
-    expect(emitExitAwaitingPayment).toHaveBeenCalledWith(
-      orgId,
-      expect.objectContaining({ plateNumber: "01C888AA" })
-    );
+    expect(session.status).toBe("active");
+    expect(session.exited_at).toBeNull();
+    expect(await db("tb_exit_candidates").where({ matched_session_id: session.id }).first()).toBeTruthy();
+    expect(emitExitCandidateCreated).toHaveBeenCalled();
+    expect(emitExitAwaitingPayment).not.toHaveBeenCalled();
   });
 });

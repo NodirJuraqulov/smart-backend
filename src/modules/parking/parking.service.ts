@@ -664,6 +664,85 @@ async function moveSessionToAwaitingPayment(
   });
 }
 
+export async function resolveExitCandidateSession(
+  trx: Knex.Transaction,
+  input: { orgId: number; sessionId: number; cameraEventAt: Date }
+) {
+  const session = await sessionsBaseQuery(trx)
+    .where({ id: input.sessionId, org_id: input.orgId, status: "active" })
+    .forUpdate()
+    .first();
+  if (!session) {
+    throw new ApiError("Tanlangan faol sessiya topilmadi", 409);
+  }
+
+  const enteredAt = new Date(session.entered_at);
+  const now = new Date();
+  const cameraEventAt = new Date(input.cameraEventAt);
+  const cameraTimeIsSafe =
+    Number.isFinite(cameraEventAt.getTime()) &&
+    cameraEventAt.getTime() >= enteredAt.getTime() &&
+    cameraEventAt.getTime() <= now.getTime() + 5 * 60 * 1000;
+  const exitedAt = cameraTimeIsSafe ? cameraEventAt : now.getTime() >= enteredAt.getTime() ? now : enteredAt;
+  const durationMinutes = calculateDurationMinutes(enteredAt, exitedAt);
+
+  if (session.session_source !== "regular") {
+    await trx("tb_parking_sessions").where({ id: session.id, org_id: input.orgId }).update({
+      status: "completed",
+      exited_at: exitedAt,
+      duration_minutes: durationMinutes,
+      amount: 0,
+      exit_method: "auto",
+      active_plate_key: null,
+    });
+    return {
+      status: "completed" as const,
+      session: {
+        ...session,
+        status: "completed" as const,
+        exited_at: exitedAt,
+        duration_minutes: durationMinutes,
+        amount: "0",
+        exit_method: "auto" as const,
+      },
+    };
+  }
+
+  const intervalsSnapshot = parseIntervalsSnapshot(session.tariff_intervals_snapshot);
+  let amount: number;
+  if (intervalsSnapshot) {
+    amount = calculateAmount(durationMinutes, 0, 0, intervalsSnapshot);
+  } else if (session.tariff_price_per_hour !== null) {
+    amount = calculateAmount(
+      durationMinutes,
+      Number(session.tariff_price_per_hour),
+      session.tariff_grace_period_minutes ?? 0
+    );
+  } else {
+    const tariff = await findTariff(trx, input.orgId);
+    amount = calculateAmount(durationMinutes, Number(tariff.price_per_hour), tariff.grace_period_minutes);
+  }
+
+  await trx("tb_parking_sessions").where({ id: session.id, org_id: input.orgId }).update({
+    status: "awaiting_payment",
+    exited_at: exitedAt,
+    duration_minutes: durationMinutes,
+    amount,
+    exit_method: "auto",
+  });
+  return {
+    status: "awaiting_payment" as const,
+    session: {
+      ...session,
+      status: "awaiting_payment" as const,
+      exited_at: exitedAt,
+      duration_minutes: durationMinutes,
+      amount: String(amount),
+      exit_method: "auto" as const,
+    },
+  };
+}
+
 interface CameraParkingInput {
   orgId: number;
   event: NormalizedCameraEvent & { plateNumber: string };

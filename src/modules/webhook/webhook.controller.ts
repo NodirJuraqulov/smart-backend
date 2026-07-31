@@ -10,8 +10,9 @@ import {
   registerWebhookEvent,
   updateWebhookEventOutcome,
 } from "./webhookIdempotency";
-import { createEntryFromWebhook, createExitFromWebhook } from "@/modules/parking/parking.service";
+import { createEntryFromWebhook } from "@/modules/parking/parking.service";
 import { emitPlateNotRecognizedForExit, emitWebhookParseFailed } from "@/websocket/socketServer";
+import { createExitCandidate } from "@/modules/exitCandidates/exitCandidates.service";
 import {
   markDuplicateImagesSkipped,
   saveWebhookEventImages,
@@ -177,19 +178,53 @@ async function processCameraWebhook(
     return;
   }
 
+  if (direction === "exit") {
+    const result = await createExitCandidate({
+      orgId,
+      webhookEventId: registration.eventId,
+      detectedPlate: plateNumber,
+      confidence: event.confidence,
+    });
+    if (result.skipped) {
+      res.status(200).json({
+        ok: true,
+        parsed: true,
+        ignored: true,
+        reason: result.reason,
+        session_id: result.sessionId,
+        plate_number: plateNumber,
+        confidence: event.confidence,
+        timestamp: event.timestamp,
+      });
+      return;
+    }
+    if (!plateNumber) {
+      emitPlateNotRecognizedForExit(orgId, {
+        plateNumber: null,
+        eventId: registration.eventId,
+        candidateId: result.candidate.id,
+        message: "Kamera davlat raqamini aniqlay olmadi — operator tekshiruvi kerak",
+      });
+    }
+    res.status(200).json({
+      ok: true,
+      parsed: true,
+      candidate_created: result.created,
+      candidate_coalesced: result.coalesced,
+      candidate_id: result.candidate.id,
+      plate_number: plateNumber,
+      confidence: event.confidence,
+      timestamp: event.timestamp,
+    });
+    return;
+  }
+
   if (!plateNumber) {
     await updateWebhookEventOutcome(registration.eventId, {
       processingResult: "plate_not_recognized",
       processingReason: "camera_ocr_failed",
       processed: false,
     });
-    if (direction === "exit") {
-      emitPlateNotRecognizedForExit(orgId, {
-        plateNumber: null,
-        eventId: registration.eventId,
-        message: "Kamera davlat raqamini aniqlay olmadi — operator tekshiruvi kerak",
-      });
-    }
     res.status(200).json({
       ok: true,
       parsed: true,
@@ -203,44 +238,19 @@ async function processCameraWebhook(
     return;
   }
 
-  if (direction === "entry") {
-    const recognizedEvent = { ...event, plateNumber };
-    const result = await createEntryFromWebhook({ orgId, event: recognizedEvent });
-    const processingResult = result.created
-      ? "entry_created"
-      : result.reason === "already_active"
-        ? "active_entry_already_exists"
-        : "entry_rejected";
-    await updateWebhookEventOutcome(registration.eventId, {
-      processingResult,
-      processingReason: result.created ? null : result.reason,
-      sessionId: result.created ? result.session.id : null,
-      processed: result.created,
-    });
-  } else {
-    const recognizedEvent = { ...event, plateNumber };
-    const result = await createExitFromWebhook({ orgId, event: recognizedEvent });
-    const processingResult = result.updated
-      ? result.status === "completed"
-        ? "exit_completed"
-        : "exit_awaiting_payment"
-      : result.reason === "not_found"
-        ? "unmatched_exit"
-        : "exit_rejected";
-    await updateWebhookEventOutcome(registration.eventId, {
-      processingResult,
-      processingReason:
-        result.updated ? null : result.reason === "not_found" ? "active_session_not_found" : result.reason,
-      sessionId: result.updated ? result.session.id : null,
-      processed: result.updated,
-    });
-    if (!result.updated && result.reason === "not_found") {
-      console.warn(
-        `Unmatched exit: org_id=${orgId} plate=${plateNumber} confidence=${event.confidence ?? "null"} ` +
-          "reason=active_session_not_found"
-      );
-    }
-  }
+  const recognizedEvent = { ...event, plateNumber };
+  const result = await createEntryFromWebhook({ orgId, event: recognizedEvent });
+  const processingResult = result.created
+    ? "entry_created"
+    : result.reason === "already_active"
+      ? "active_entry_already_exists"
+      : "entry_rejected";
+  await updateWebhookEventOutcome(registration.eventId, {
+    processingResult,
+    processingReason: result.created ? null : result.reason,
+    sessionId: result.created ? result.session.id : null,
+    processed: result.created,
+  });
 
   res.status(200).json({
     ok: true,
