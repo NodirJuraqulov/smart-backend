@@ -193,6 +193,20 @@ export async function createExitCandidate(input: {
           : "camera_ocr_failed",
       session_id: matchedSession?.id ?? null,
     });
+    await trx("tb_activity_logs").insert({
+      actor_id: null,
+      action: "parking.exit_candidate_created",
+      target_type: "exit_candidate",
+      target_id: candidateId,
+      details: JSON.stringify({
+        orgId: input.orgId,
+        candidateId,
+        detectedPlate: input.detectedPlate,
+        matchedSessionId: matchedSession?.id ?? null,
+        webhookEventId: input.webhookEventId,
+        confidence: input.confidence,
+      }),
+    });
     return { candidateId, created: true, coalesced: false, skipped: false as const };
   });
 

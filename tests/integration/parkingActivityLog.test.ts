@@ -6,6 +6,7 @@ import { errorHandler } from "@/middleware/errorHandler";
 import webhookRouter from "@/modules/webhook/webhook.routes";
 import parkingRouter from "@/modules/parking/parking.routes";
 import { AuthTokenPayload, signAccessToken } from "@/modules/auth/auth.service";
+import { openBarrier } from "@/modules/relay/relay.service";
 import {
   assertTestDatabase,
   cleanupOrganization,
@@ -113,17 +114,57 @@ describe("Activity log — parking.entry_webhook", () => {
   });
 });
 
-describe("Activity log — parking.exit_webhook", () => {
-  it("webhook chiqishda (awaiting_payment) actor_id null bilan yozuv yaratiladi", async () => {
+describe("Activity log — parking.exit_candidate_created", () => {
+  it("webhook chiqishda sessiyaga tegmaydi va system candidate auditini yozadi", async () => {
     await postWebhook("entry", "01K222AA");
+    const before = await db("tb_parking_sessions")
+      .where({ org_id: orgId, plate_number: "01K222AA" })
+      .first();
+    vi.clearAllMocks();
 
     const res = await postWebhook("exit", "01K222AA");
     expect(res.status).toBe(200);
 
-    const log = await lastLogFor("parking.exit_webhook");
+    const candidate = await db("tb_exit_candidates")
+      .where({ org_id: orgId, detected_plate: "01K222AA" })
+      .first();
+    expect(candidate).toMatchObject({ status: "pending", matched_session_id: before.id });
+
+    const session = await db("tb_parking_sessions").where({ id: before.id }).first();
+    expect(session).toMatchObject({
+      status: "active",
+      exited_at: before.exited_at,
+      duration_minutes: before.duration_minutes,
+      amount: before.amount,
+      active_plate_key: before.active_plate_key,
+    });
+    expect(await db("tb_payments").where({ session_id: before.id })).toHaveLength(0);
+    expect(openBarrier).not.toHaveBeenCalled();
+
+    const webhookEvent = await db("tb_webhook_events")
+      .where({ org_id: orgId, direction: "exit", plate_number: "01K222AA" })
+      .first();
+    expect(webhookEvent).toMatchObject({
+      processing_result: "exit_candidate_pending",
+      processing_reason: "exact_inside_session_found",
+      session_id: before.id,
+    });
+
+    const log = await lastLogFor("parking.exit_candidate_created");
     expect(log).toBeTruthy();
     expect(log.actor_id).toBeNull();
-    expect(log.details).toMatchObject({ plateNumber: "01K222AA" });
+    expect(log.target_type).toBe("exit_candidate");
+    expect(log.target_id).toBe(candidate.id);
+    expect(log.details).toMatchObject({
+      candidateId: candidate.id,
+      detectedPlate: "01K222AA",
+      matchedSessionId: before.id,
+      webhookEventId: webhookEvent.id,
+      confidence: 92,
+    });
+    expect(
+      await db("tb_activity_logs").where({ action: "parking.exit_webhook", target_id: before.id }).first()
+    ).toBeUndefined();
   });
 });
 
