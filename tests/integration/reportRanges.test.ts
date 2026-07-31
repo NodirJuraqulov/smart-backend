@@ -116,8 +116,9 @@ describe("daily report range", () => {
     expect(res.status).toBe(200);
     expect(res.body.period).toEqual({ type: "daily", from: "2026-07-01", to: "2026-07-03" });
     expect(res.body.items).toHaveLength(3);
-    expect(res.body.items[1]).toMatchObject({ date: "2026-07-02", entries: 1, exits: 1, revenue: 0 });
+    expect(res.body.items[1]).toMatchObject({ date: "2026-07-02", entries: 1, exits: 0, revenue: 0 });
     expect(res.body.total_entries).toBe(3);
+    expect(res.body.total_exits).toBe(2);
     expect(res.body.total_revenue).toBe(12000);
     expect(res.body.total_revenue).toBe(
       res.body.items.reduce((sum: number, item: { revenue: number }) => sum + item.revenue, 0)

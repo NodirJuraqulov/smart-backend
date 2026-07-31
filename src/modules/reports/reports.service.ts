@@ -4,6 +4,7 @@ import { AuthTokenPayload } from "@/modules/auth/auth.service";
 import { ApiError } from "@/utils/ApiError";
 import { assertOrganizationExists } from "@/utils/assertOrganizationExists";
 import { resolveOrgIdRequired } from "@/utils/orgScope";
+import { applyCompletedExitFilter, applyInsideSessionsFilter } from "@/modules/parking/sessionStatus";
 
 function pad(n: number): string {
   return String(n).padStart(2, "0");
@@ -37,7 +38,7 @@ function isFutureYear(year: number, timezone: string): boolean {
 
 interface SessionTimeRow {
   org_id: number;
-  status: "active" | "completed";
+  status: "active" | "awaiting_payment" | "completed";
   entered_at: Date;
   exited_at: Date | null;
 }
@@ -122,14 +123,15 @@ export async function getDailyReport(
         .where({ org_id: orgId })
         .whereBetween("entered_at", [dayStart, dayEnd])
         .select("entered_at"),
-      db<SessionTimeRow>("tb_parking_sessions")
-        .where({ org_id: orgId })
-        .whereNotNull("exited_at")
+      applyCompletedExitFilter(
+        db<SessionTimeRow>("tb_parking_sessions").where({ org_id: orgId })
+      )
         .whereBetween("exited_at", [dayStart, dayEnd])
         .select("exited_at"),
       regularPaymentsQuery(orgId, dayStart, dayEnd),
-      db("tb_parking_sessions")
-        .where({ org_id: orgId, status: "active" })
+      applyInsideSessionsFilter(
+        db("tb_parking_sessions").where({ org_id: orgId })
+      )
         .count<{ count: string }[]>("id as count"),
       getSubscriptionRevenue(orgId, dayStart, dayEnd, date, date),
     ]);
@@ -212,9 +214,9 @@ export async function getMonthlyReport(
       .where({ org_id: orgId })
       .whereBetween("entered_at", [monthStart, monthEnd])
       .select("entered_at"),
-    db<SessionTimeRow>("tb_parking_sessions")
-      .where({ org_id: orgId })
-      .whereNotNull("exited_at")
+    applyCompletedExitFilter(
+      db<SessionTimeRow>("tb_parking_sessions").where({ org_id: orgId })
+    )
       .whereBetween("exited_at", [monthStart, monthEnd])
       .select("exited_at"),
     regularPaymentsQuery(orgId, monthStart, monthEnd),
@@ -293,9 +295,9 @@ export async function getYearlyReport(
       .where({ org_id: orgId })
       .whereBetween("entered_at", [yearStart, yearEnd])
       .select("entered_at"),
-    db<SessionTimeRow>("tb_parking_sessions")
-      .where({ org_id: orgId })
-      .whereNotNull("exited_at")
+    applyCompletedExitFilter(
+      db<SessionTimeRow>("tb_parking_sessions").where({ org_id: orgId })
+    )
       .whereBetween("exited_at", [yearStart, yearEnd])
       .select("exited_at"),
     regularPaymentsQuery(orgId, yearStart, yearEnd),
@@ -419,9 +421,9 @@ async function getRangeReport(
       .select(db.raw("DATE_FORMAT(entered_at, ?) as bucket", [format]))
       .count<GroupedCountRow[]>("id as count")
       .groupBy("bucket"),
-    db("tb_parking_sessions")
-      .where({ org_id: orgId })
-      .whereNotNull("exited_at")
+    applyCompletedExitFilter(
+      db("tb_parking_sessions").where({ org_id: orgId })
+    )
       .whereBetween("exited_at", [startDate, endDate])
       .select(db.raw("DATE_FORMAT(exited_at, ?) as bucket", [format]))
       .count<GroupedCountRow[]>("id as count")

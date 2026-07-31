@@ -200,6 +200,8 @@ export async function printReceiptHandler(req: Request, res: Response) {
 }
 
 export async function clearTestSessionsHandler(req: Request, res: Response) {
-  const result = await parkingService.clearAllActiveSessions();
+  const orgId = parseOptionalOrgIdFromQuery(req, res);
+  if (orgId === null) return;
+  const result = await parkingService.clearAllActiveSessions(req.user!, orgId);
   res.json(result);
 }

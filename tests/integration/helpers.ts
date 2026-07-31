@@ -213,6 +213,7 @@ export async function createTestAwaitingPaymentSession(
     entry_method: "auto",
     exit_method: "auto",
     session_source: "regular",
+    active_plate_key: `${orgId}:${plateNumber}`,
   });
   return id;
 }

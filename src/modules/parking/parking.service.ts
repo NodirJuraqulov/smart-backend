@@ -19,6 +19,7 @@ import { logActivity } from "@/utils/activityLog";
 import { env } from "@/config/env";
 import { NormalizedCameraEvent } from "@/modules/webhook/parsers/normalizedCameraEvent";
 import { resolveParkingImageAbsolutePath, saveParkingImages } from "./parkingImage.service";
+import { applyInsideSessionsFilter, INSIDE_SESSION_STATUSES } from "./sessionStatus";
 
 type SessionSource = "regular" | "subscription" | "vip";
 
@@ -285,9 +286,9 @@ async function assertCapacityAvailable(orgId: number): Promise<void> {
     return;
   }
 
-  const [{ count }] = await db("tb_parking_sessions")
-    .where({ org_id: orgId, status: "active" })
-    .count<{ count: string }[]>("id as count");
+  const [{ count }] = await applyInsideSessionsFilter(
+    db("tb_parking_sessions").where({ org_id: orgId })
+  ).count<{ count: string }[]>("id as count");
 
   if (Number(count) >= organization.total_capacity) {
     throw new ApiError("Stoyanka to'liq, bo'sh joy yo'q", 400, { reason: "parking_full" });
@@ -296,7 +297,8 @@ async function assertCapacityAvailable(orgId: number): Promise<void> {
 
 async function assertNoActiveSessionForPlate(orgId: number, plateNumber: string) {
   const existing = await sessionsBaseQuery(db)
-    .where({ org_id: orgId, plate_number: plateNumber, status: "active" })
+    .where({ org_id: orgId, plate_number: plateNumber })
+    .whereIn("status", [...INSIDE_SESSION_STATUSES])
     .first();
   if (existing) {
     throw new ApiError("Bu mashina hali stoyankada!", 409, { existing_session: existing });
@@ -334,7 +336,8 @@ async function insertActiveSession(input: {
   } catch (err) {
     if (isDuplicateKeyError(err)) {
       const existing = await sessionsBaseQuery(db)
-        .where({ org_id: input.org_id, plate_number: input.plate_number, status: "active" })
+        .where({ org_id: input.org_id, plate_number: input.plate_number })
+        .whereIn("status", [...INSIDE_SESSION_STATUSES])
         .first();
       throw new ApiError("Bu mashina hali stoyankada!", 409, { existing_session: existing });
     }
@@ -647,7 +650,7 @@ async function moveSessionToAwaitingPayment(
       duration_minutes: durationMinutes,
       amount,
       exit_method: "auto",
-      active_plate_key: null,
+      active_plate_key: activePlateKey(orgId, plateNumber),
     });
 
     return {
@@ -945,6 +948,7 @@ export async function confirmCashPayment(actor: AuthTokenPayload, id: number) {
       status: "completed",
       payment_method: "cash",
       operator_id: operatorId,
+      active_plate_key: null,
     });
 
     const [paymentId] = await trx("tb_payments").insert({
@@ -1137,9 +1141,9 @@ export async function getCapacity(actor: AuthTokenPayload, requestedOrgId?: numb
   const orgId = resolveOrgIdRequired(actor, requestedOrgId);
 
   const organization = await db("tb_organizations").select("total_capacity").where({ id: orgId }).first();
-  const [{ count }] = await db("tb_parking_sessions")
-    .where({ org_id: orgId, status: "active" })
-    .count<{ count: string }[]>("id as count");
+  const [{ count }] = await applyInsideSessionsFilter(
+    db("tb_parking_sessions").where({ org_id: orgId })
+  ).count<{ count: string }[]>("id as count");
 
   const occupied = Number(count);
   const total: number | null = organization?.total_capacity ?? null;
@@ -1148,14 +1152,31 @@ export async function getCapacity(actor: AuthTokenPayload, requestedOrgId?: numb
   return { occupied, total, available };
 }
 
-export async function clearAllActiveSessions() {
-  const clearedCount = await db("tb_parking_sessions").where({ status: "active" }).update({
-    status: "completed",
-    exited_at: new Date(),
-    duration_minutes: 0,
-    amount: 0,
-    active_plate_key: null,
-  });
+export async function clearAllActiveSessions(actor: AuthTokenPayload, requestedOrgId?: number) {
+  const orgId = resolveOrgIdRequired(actor, requestedOrgId);
 
-  return { cleared: clearedCount };
+  return db.transaction(async (trx) => {
+    await trx("tb_organizations").where({ id: orgId }).forUpdate().first();
+    const now = new Date();
+    const clearedCount = await trx("tb_parking_sessions")
+      .where({ org_id: orgId })
+      .whereIn("status", [...INSIDE_SESSION_STATUSES])
+      .update({
+        status: "completed",
+        exited_at: trx.raw("COALESCE(exited_at, ?)", [now]),
+        duration_minutes: trx.raw("COALESCE(duration_minutes, 0)"),
+        amount: trx.raw("COALESCE(amount, 0)"),
+        active_plate_key: null,
+      });
+
+    await trx("tb_activity_logs").insert({
+      actor_id: actor.id,
+      action: "parking.test_sessions_cleared",
+      target_type: "organization",
+      target_id: orgId,
+      details: JSON.stringify({ orgId, cleared: clearedCount }),
+    });
+
+    return { cleared: clearedCount };
+  });
 }

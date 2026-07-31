@@ -37,7 +37,7 @@ describe("renewSubscription", () => {
     const expectedNewEndDate = DateTime.fromISO(subscription!.end_date)
       .plus({ days: 30 })
       .toFormat("yyyy-MM-dd");
-    const today = DateTime.now().toFormat("yyyy-MM-dd");
+    const today = DateTime.now().setZone("UTC").toFormat("yyyy-MM-dd");
 
     const renewed = await renewSubscription(operator, subscription!.id);
 

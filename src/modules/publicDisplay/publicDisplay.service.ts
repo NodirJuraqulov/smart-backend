@@ -1,5 +1,6 @@
 import { db } from "@/config/db";
 import { ApiError } from "@/utils/ApiError";
+import { applyInsideSessionsFilter } from "@/modules/parking/sessionStatus";
 
 export async function getDisplayStatus(orgId: number) {
   const organization = await db("tb_organizations")
@@ -11,16 +12,20 @@ export async function getDisplayStatus(orgId: number) {
     throw new ApiError("Stoyanka topilmadi", 404);
   }
 
-  const [{ count }] = await db("tb_parking_sessions")
-    .where({ org_id: orgId, status: "active" })
-    .count<{ count: string }[]>("id as count");
+  const [{ count }] = await applyInsideSessionsFilter(
+    db("tb_parking_sessions").where({ org_id: orgId })
+  ).count<{ count: string }[]>("id as count");
+
+  const occupied = Number(count);
+  const total: number | null = organization.total_capacity ?? null;
 
   const status: Record<string, unknown> = {
     orgName: organization.name,
     pricingMode: organization.pricing_mode,
     capacity: {
-      occupied: Number(count),
-      total: organization.total_capacity ?? null,
+      occupied,
+      total,
+      available: total === null ? null : Math.max(0, total - occupied),
     },
   };
 

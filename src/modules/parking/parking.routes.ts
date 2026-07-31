@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { asyncHandler } from "@/middleware/asyncHandler";
-import { isAuth, isOperatorOrOwner, isSuperAdmin } from "@/middleware/auth.middleware";
+import { isAuth, isOperatorOrOwner } from "@/middleware/auth.middleware";
 import { operatorParkingRateLimit } from "@/middleware/parkingRateLimit";
 import { env } from "@/config/env";
 import {
@@ -39,7 +39,7 @@ router.post("/sessions/:id/confirm-cash-payment", isOperatorOrOwner, asyncHandle
 router.post("/sessions/:id/payment-method", asyncHandler(updatePaymentMethodHandler));
 
 if (env.nodeEnv !== "production") {
-  router.delete("/sessions/clear-test", isSuperAdmin, asyncHandler(clearTestSessionsHandler));
+  router.delete("/sessions/clear-test", asyncHandler(clearTestSessionsHandler));
 }
 
 export default router;

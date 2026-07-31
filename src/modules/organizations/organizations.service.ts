@@ -6,6 +6,7 @@ import { env } from "@/config/env";
 import { seedDefaultPermissions } from "@/modules/operatorPermissions/operatorPermissions.service";
 import { ApiError } from "@/utils/ApiError";
 import { isDuplicateKeyError } from "@/utils/dbErrors";
+import { applyCompletedExitFilter, applyInsideSessionsFilter } from "@/modules/parking/sessionStatus";
 
 interface OrganizationRecord {
   id: number;
@@ -370,6 +371,7 @@ export async function getOrganizationStats(id: number) {
   const now = DateTime.now().setZone(organization.timezone);
   const todayStart = now.startOf("day").toJSDate();
   const todayEnd = now.endOf("day").toJSDate();
+  const today = now.toFormat("yyyy-MM-dd");
 
   const [
     [todayEntries],
@@ -378,34 +380,49 @@ export async function getOrganizationStats(id: number) {
     [currentlyParked],
     [totalSessions],
     [totalRevenue],
+    [todaySubscriptionRevenue],
+    [totalSubscriptionRevenue],
   ] = await Promise.all([
     db("tb_parking_sessions")
       .where({ org_id: id })
       .whereBetween("entered_at", [todayStart, todayEnd])
       .count<{ count: string }[]>("id as count"),
-    db("tb_parking_sessions")
-      .where({ org_id: id })
+    applyCompletedExitFilter(
+      db("tb_parking_sessions").where({ org_id: id })
+    )
       .whereBetween("exited_at", [todayStart, todayEnd])
       .count<{ count: string }[]>("id as count"),
     db("tb_payments")
       .where({ org_id: id })
       .whereBetween("paid_at", [todayStart, todayEnd])
       .sum<{ total: string | null }[]>("amount as total"),
-    db("tb_parking_sessions")
-      .where({ org_id: id, status: "active" })
+    applyInsideSessionsFilter(
+      db("tb_parking_sessions").where({ org_id: id })
+    )
       .count<{ count: string }[]>("id as count"),
     db("tb_parking_sessions").where({ org_id: id }).count<{ count: string }[]>("id as count"),
     db("tb_payments").where({ org_id: id }).sum<{ total: string | null }[]>("amount as total"),
+    db("tb_subscriptions")
+      .where({ org_id: id })
+      .andWhere((builder) => {
+        builder
+          .whereBetween("created_at", [todayStart, todayEnd])
+          .orWhereBetween("last_renewed_at", [today, today]);
+      })
+      .sum<{ total: string | null }[]>("price_snapshot as total"),
+    db("tb_subscriptions")
+      .where({ org_id: id })
+      .sum<{ total: string | null }[]>("price_snapshot as total"),
   ]);
 
   return {
     organization_id: id,
     today_entries: Number(todayEntries.count),
     today_exits: Number(todayExits.count),
-    today_revenue: Number(todayRevenue.total ?? 0),
+    today_revenue: Number(todayRevenue.total ?? 0) + Number(todaySubscriptionRevenue.total ?? 0),
     currently_parked: Number(currentlyParked.count),
     total_sessions: Number(totalSessions.count),
-    total_revenue: Number(totalRevenue.total ?? 0),
+    total_revenue: Number(totalRevenue.total ?? 0) + Number(totalSubscriptionRevenue.total ?? 0),
   };
 }
 
@@ -415,15 +432,21 @@ export async function getGlobalStats() {
   const todayEnd = now.endOf("day").toJSDate();
   const monthStart = now.startOf("month").toJSDate();
   const monthEnd = now.endOf("month").toJSDate();
+  const today = now.toFormat("yyyy-MM-dd");
+  const monthStartDate = now.startOf("month").toFormat("yyyy-MM-dd");
+  const monthEndDate = now.endOf("month").toFormat("yyyy-MM-dd");
 
   const [
     [{ count: totalOrganizations }],
     [{ count: activeOrganizations }],
     [{ total: totalRevenueToday }],
     [{ total: totalRevenueMonthly }],
+    [{ total: totalSubscriptionRevenueToday }],
+    [{ total: totalSubscriptionRevenueMonthly }],
     [{ count: totalCurrentlyParked }],
     organizations,
     revenueByOrgRows,
+    subscriptionRevenueByOrgRows,
     parkedByOrgRows,
   ] = await Promise.all([
     db("tb_organizations").count<{ count: string }[]>("id as count"),
@@ -434,21 +457,46 @@ export async function getGlobalStats() {
     db("tb_payments")
       .whereBetween("paid_at", [monthStart, monthEnd])
       .sum<{ total: string | null }[]>("amount as total"),
-    db("tb_parking_sessions").where({ status: "active" }).count<{ count: string }[]>("id as count"),
+    db("tb_subscriptions")
+      .andWhere((builder) => {
+        builder
+          .whereBetween("created_at", [todayStart, todayEnd])
+          .orWhereBetween("last_renewed_at", [today, today]);
+      })
+      .sum<{ total: string | null }[]>("price_snapshot as total"),
+    db("tb_subscriptions")
+      .andWhere((builder) => {
+        builder
+          .whereBetween("created_at", [monthStart, monthEnd])
+          .orWhereBetween("last_renewed_at", [monthStartDate, monthEndDate]);
+      })
+      .sum<{ total: string | null }[]>("price_snapshot as total"),
+    applyInsideSessionsFilter(db("tb_parking_sessions")).count<{ count: string }[]>("id as count"),
     db("tb_organizations").select("id", "name"),
     db("tb_payments")
       .whereBetween("paid_at", [todayStart, todayEnd])
       .groupBy("org_id")
       .select("org_id")
       .sum<{ org_id: number; total: string }[]>("amount as total"),
-    db("tb_parking_sessions")
-      .where({ status: "active" })
+    db("tb_subscriptions")
+      .andWhere((builder) => {
+        builder
+          .whereBetween("created_at", [todayStart, todayEnd])
+          .orWhereBetween("last_renewed_at", [today, today]);
+      })
+      .groupBy("org_id")
+      .select("org_id")
+      .sum<{ org_id: number; total: string }[]>("price_snapshot as total"),
+    applyInsideSessionsFilter(db("tb_parking_sessions"))
       .groupBy("org_id")
       .select("org_id")
       .count<{ org_id: number; count: string }[]>("id as count"),
   ]);
 
   const revenueMap = new Map(revenueByOrgRows.map((r) => [r.org_id, Number(r.total)]));
+  for (const row of subscriptionRevenueByOrgRows) {
+    revenueMap.set(row.org_id, (revenueMap.get(row.org_id) ?? 0) + Number(row.total));
+  }
   const parkedMap = new Map(parkedByOrgRows.map((r) => [r.org_id, Number(r.count)]));
 
   const topOrganizations = organizations
@@ -464,8 +512,8 @@ export async function getGlobalStats() {
   return {
     total_organizations: Number(totalOrganizations),
     active_organizations: Number(activeOrganizations),
-    total_revenue_today: Number(totalRevenueToday ?? 0),
-    total_revenue_monthly: Number(totalRevenueMonthly ?? 0),
+    total_revenue_today: Number(totalRevenueToday ?? 0) + Number(totalSubscriptionRevenueToday ?? 0),
+    total_revenue_monthly: Number(totalRevenueMonthly ?? 0) + Number(totalSubscriptionRevenueMonthly ?? 0),
     total_currently_parked: Number(totalCurrentlyParked),
     top_organizations: topOrganizations,
   };
