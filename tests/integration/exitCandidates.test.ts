@@ -1,23 +1,18 @@
+import { promises as fs } from "fs";
+import path from "path";
 import express from "express";
 import request from "supertest";
+import sharp from "sharp";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { DateTime } from "luxon";
-import sharp from "sharp";
 import { db } from "@/config/db";
 import { errorHandler } from "@/middleware/errorHandler";
 import { AuthTokenPayload, signAccessToken } from "@/modules/auth/auth.service";
 import exitCandidatesRouter from "@/modules/exitCandidates/exitCandidates.routes";
-import {
-  acceptExitCandidate,
-  createExitCandidate,
-  dismissExitCandidate,
-  reassignExitCandidate,
-} from "@/modules/exitCandidates/exitCandidates.service";
 import webhookRouter from "@/modules/webhook/webhook.routes";
 import { clearWebhookDedupeCache } from "@/modules/webhook/webhookIdempotency";
 import { openBarrier } from "@/modules/relay/relay.service";
 import {
-  emitExitAwaitingPayment,
   emitExitCandidateCreated,
   emitExitCandidateResolved,
   emitExitCompleted,
@@ -32,37 +27,52 @@ import {
   createTestUser,
 } from "./helpers";
 
-vi.mock("@/modules/relay/relay.service", () => ({
-  openBarrier: vi.fn().mockResolvedValue({ status: "opened", success: true }),
-}));
+vi.mock("@/modules/relay/relay.service", () => {
+  const createMock = vi.fn as unknown as () => ReturnType<typeof vi.fn>;
+  return { openBarrier: createMock() };
+});
 
-vi.mock("@/websocket/socketServer", () => ({
-  emitEntryDetected: vi.fn(),
-  emitParkingFull: vi.fn(),
-  emitExitAwaitingPayment: vi.fn(),
-  emitExitCompleted: vi.fn(),
-  emitExitCandidateCreated: vi.fn(),
-  emitExitCandidateResolved: vi.fn(),
-  emitPlateNotRecognizedForExit: vi.fn(),
-  emitRelayFailed: vi.fn(),
-  emitWebhookParseFailed: vi.fn(),
-}));
+vi.mock("@/websocket/socketServer", () => {
+  const createMock = vi.fn as unknown as () => ReturnType<typeof vi.fn>;
+  return {
+    emitEntryDetected: createMock(),
+    emitParkingFull: createMock(),
+    emitExitAwaitingPayment: createMock(),
+    emitExitCompleted: createMock(),
+    emitExitCandidateCreated: createMock(),
+    emitExitCandidateResolved: createMock(),
+    emitPlateNotRecognizedForExit: createMock(),
+    emitRelayFailed: createMock(),
+    emitWebhookParseFailed: createMock(),
+  };
+});
 
 let orgId: number;
 let otherOrgId: number;
 let webhookToken: string;
 let actor: AuthTokenPayload;
+let otherActor: AuthTokenPayload;
+let authorizationHeader: string;
+let otherAuthorizationHeader: string;
 let jpegBase64: string;
+
+interface TestCandidateRow {
+  id: number;
+  webhook_event_id: number;
+  detected_plate: string | null;
+  matched_session_id: number | null;
+  status: string;
+}
+
+interface ActivityLogRow {
+  details: Record<string, unknown>;
+}
 
 const app = express();
 app.use("/api/webhook", webhookRouter);
 app.use(express.json());
 app.use("/api/exit-candidates", exitCandidatesRouter);
 app.use(errorHandler);
-
-function authHeader(): string {
-  return `Bearer ${signAccessToken(actor)}`;
-}
 
 function dahuaPayload(plate: string) {
   return {
@@ -78,29 +88,77 @@ function dahuaPayload(plate: string) {
   };
 }
 
-async function postExit(plate: string) {
+async function postExit(plate: string): Promise<request.Response> {
   return request(app)
     .post(`/api/webhook/camera/${webhookToken}/exit`)
     .set("Content-Type", "application/json")
     .send(dahuaPayload(plate));
 }
 
-async function candidateForPlate(plate: string) {
-  return db("tb_exit_candidates").where({ org_id: orgId, detected_plate: plate }).orderBy("id", "desc").first();
+async function createSession(
+  plate: string,
+  source: "regular" | "vip" | "subscription" = "regular",
+  ownerOrgId = orgId,
+  pricePerHour = 5000
+): Promise<number> {
+  const id = await createTestActiveSession(ownerOrgId, plate, new Date(Date.now() - 61 * 60_000));
+  await db("tb_parking_sessions").where({ id }).update({
+    session_source: source,
+    tariff_price_per_hour: source === "regular" ? pricePerHour : null,
+    tariff_grace_period_minutes: source === "regular" ? 0 : null,
+    tariff_intervals_snapshot: null,
+  });
+  return id;
 }
+
+async function candidateForPlate(plate: string): Promise<TestCandidateRow> {
+  const candidate = await db<TestCandidateRow>("tb_exit_candidates")
+    .where({ org_id: orgId, detected_plate: plate })
+    .orderBy("id", "desc")
+    .first();
+  if (!candidate) throw new Error(`Candidate topilmadi: ${plate}`);
+  return candidate;
+}
+
+async function confirm(
+  candidateId: number,
+  body: Record<string, unknown>,
+  authorization = authorizationHeader
+): Promise<request.Response> {
+  return request(app)
+    .post(`/api/exit-candidates/${candidateId}/confirm`)
+    .set("Authorization", authorization)
+    .send(body);
+}
+
+async function createOwnerActor(ownerOrgId: number): Promise<AuthTokenPayload> {
+  const user = await createTestUser(ownerOrgId, { role: "owner" });
+  return { id: user.id, org_id: ownerOrgId, role: "owner" };
+}
+
+async function createJpegBase64(): Promise<string> {
+  const image = sharp({ create: { width: 100, height: 60, channels: 3, background: "#555" } });
+  const buffer: Buffer = await image.jpeg().toBuffer();
+  return buffer.toString("base64");
+}
+
+const createOrganizationForTest: typeof createTestOrganization = createTestOrganization;
+const postExitForTest: typeof postExit = postExit;
+const createSessionForTest: typeof createSession = createSession;
+const findCandidateForTest: typeof candidateForPlate = candidateForPlate;
+const confirmCandidateForTest: typeof confirm = confirm;
+const createOwnerActorForTest: typeof createOwnerActor = createOwnerActor;
+const createJpegBase64ForTest: typeof createJpegBase64 = createJpegBase64;
+const testDb: typeof db = db;
 
 beforeAll(async () => {
   await assertTestDatabase();
-  jpegBase64 = (
-    await sharp({ create: { width: 100, height: 60, channels: 3, background: "#555" } })
-      .jpeg()
-      .toBuffer()
-  ).toString("base64");
+  jpegBase64 = await createJpegBase64ForTest();
 });
 
 beforeEach(async () => {
-  orgId = await createTestOrganization({ timezone: "Asia/Tashkent" });
-  otherOrgId = await createTestOrganization({ timezone: "Asia/Tashkent" });
+  orgId = await createOrganizationForTest({ timezone: "Asia/Tashkent" });
+  otherOrgId = await createOrganizationForTest({ timezone: "Asia/Tashkent" });
   webhookToken = `candidate-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   await db("tb_organizations").where({ id: orgId }).update({
     webhook_token: webhookToken,
@@ -108,233 +166,384 @@ beforeEach(async () => {
     gate_layout: "separate",
   });
   await createTestTariff(orgId, { price_per_hour: 5000, grace_period_minutes: 0 });
-  const user = await createTestUser(orgId, { role: "owner" });
-  actor = { id: user.id, org_id: orgId, role: "owner" };
+  await createTestTariff(otherOrgId, { price_per_hour: 5000, grace_period_minutes: 0 });
+  actor = await createOwnerActorForTest(orgId);
+  otherActor = await createOwnerActorForTest(otherOrgId);
+  authorizationHeader = `Bearer ${signAccessToken(actor)}`;
+  otherAuthorizationHeader = `Bearer ${signAccessToken(otherActor)}`;
+  vi.mocked(openBarrier).mockReset().mockResolvedValue({ status: "opened", success: true });
   vi.clearAllMocks();
 });
 
 afterEach(async () => {
   await clearWebhookDedupeCache();
+  await fs.rm(path.join(process.cwd(), "uploads", "parking-events", String(orgId)), {
+    recursive: true,
+    force: true,
+  });
   await cleanupOrganization(orgId);
   await cleanupOrganization(otherOrgId);
 });
 
 afterAll(closeDb);
 
-describe("safe exit candidate workflow", () => {
-  it("exact regular exit pending candidate yaratadi va session/payment/barrierga tegmaydi", async () => {
-    const sessionId = await createTestActiveSession(orgId, "01A100AA", new Date(Date.now() - 65 * 60_000));
-    const before = await db("tb_parking_sessions").where({ id: sessionId }).first();
-
-    const response = await postExit("01A100AA");
-    expect(response.status).toBe(200);
-    expect(response.body).toMatchObject({ parsed: true, candidate_created: true });
-
-    const candidate = await candidateForPlate("01A100AA");
-    expect(candidate).toMatchObject({ status: "pending", matched_session_id: sessionId });
-    const after = await db("tb_parking_sessions").where({ id: sessionId }).first();
-    expect(after.status).toBe("active");
-    expect(after.exited_at).toEqual(before.exited_at);
-    expect(after.duration_minutes).toEqual(before.duration_minutes);
-    expect(after.amount).toEqual(before.amount);
-    expect(after.active_plate_key).toBe(before.active_plate_key);
-    expect(await db("tb_payments").where({ org_id: orgId })).toHaveLength(0);
-    expect(openBarrier).not.toHaveBeenCalled();
-    expect(emitExitAwaitingPayment).not.toHaveBeenCalled();
-    expect(emitExitCandidateCreated).toHaveBeenCalledWith(orgId, expect.objectContaining({ id: candidate.id }));
-
-    const list = await request(app).get("/api/exit-candidates").set("Authorization", authHeader());
-    expect(list.status).toBe(200);
-    expect(list.body.candidates[0]).toMatchObject({
-      id: candidate.id,
-      detected_plate: "01A100AA",
-      matched_session: { id: sessionId },
-      overviewImageUrl: expect.any(String),
-      plateImageUrl: expect.any(String),
-    });
-  });
-
-  it.each(["vip", "subscription"] as const)(
-    "%s camera eventi sessionni avtomatik completed qilmaydi",
-    async (source) => {
-      const sessionId = await createTestActiveSession(orgId, `${source}-PLATE`);
-      await db("tb_parking_sessions").where({ id: sessionId }).update({ session_source: source });
-      await postExit(`${source}-PLATE`);
-      const session = await db("tb_parking_sessions").where({ id: sessionId }).first();
-      expect(session.status).toBe("active");
-      expect(openBarrier).not.toHaveBeenCalled();
-      expect(emitExitCompleted).not.toHaveBeenCalled();
-    }
-  );
-
-  it("unmatched exit candidate va rasmlarni session_id=null bilan saqlaydi", async () => {
-    await postExit("01A404AA");
-    const candidate = await candidateForPlate("01A404AA");
-    expect(candidate).toMatchObject({ status: "pending", matched_session_id: null });
-    const event = await db("tb_webhook_events").where({ id: candidate.webhook_event_id }).first();
-    expect(event.overview_image_path).toBeTruthy();
-    expect(event.processing_result).toBe("exit_candidate_pending");
-  });
-
-  it("bir webhook event bitta candidate, takroriy event esa pending candidate bilan coalesce bo'ladi", async () => {
-    await createTestActiveSession(orgId, "01A200AA");
-    await postExit("01A200AA");
-    const first = await candidateForPlate("01A200AA");
-    const sameEvent = await createExitCandidate({
-      orgId,
-      webhookEventId: first.webhook_event_id,
-      detectedPlate: "01A200AA",
-      confidence: 91,
-    });
-    expect(sameEvent.candidate.id).toBe(first.id);
-    expect(sameEvent.created).toBe(false);
-
-    await db("tb_webhook_events").where({ id: first.webhook_event_id }).update({
-      created_at: db.raw("NOW() - INTERVAL 11 SECOND"),
-      camera_event_at: null,
-    });
-    const repeated = await postExit("01A200AA");
-    expect(repeated.body).toMatchObject({ candidate_created: false, candidate_coalesced: true, candidate_id: first.id });
-    const [{ count }] = await db("tb_exit_candidates")
-      .where({ org_id: orgId })
-      .count<{ count: string }[]>("id as count");
-    expect(Number(count)).toBe(1);
+describe("exit candidate completion workflow", () => {
+  it("1. exact regular cash completed, payment va next response to'g'ri", async () => {
+    const sessionId = await createSessionForTest("01A100AA");
+    await postExitForTest("01A100AA");
+    const candidate = await findCandidateForTest("01A100AA");
     expect(emitExitCandidateCreated).toHaveBeenCalledTimes(1);
-  });
-
-  it("regular accept awaiting_payment qiladi, payment/barrier yaratmaydi va qayta resolve 409", async () => {
-    const sessionId = await createTestActiveSession(orgId, "01A300AA", new Date(Date.now() - 61 * 60_000));
-    await postExit("01A300AA");
-    const candidate = await candidateForPlate("01A300AA");
-    vi.clearAllMocks();
-
-    await acceptExitCandidate(actor, undefined, candidate.id);
-    const session = await db("tb_parking_sessions").where({ id: sessionId }).first();
-    expect(session.status).toBe("awaiting_payment");
-    expect(session.exited_at).toBeTruthy();
-    expect(session.duration_minutes).toBeGreaterThanOrEqual(61);
-    expect(Number(session.amount)).toBe(10000);
-    expect(session.active_plate_key).toBe(`${orgId}:01A300AA`);
-    expect(await db("tb_payments").where({ session_id: sessionId })).toHaveLength(0);
-    expect(openBarrier).not.toHaveBeenCalled();
-    expect(emitExitAwaitingPayment).toHaveBeenCalledOnce();
-    expect(emitExitCandidateResolved).toHaveBeenCalledWith(orgId, expect.objectContaining({ status: "accepted" }));
-    await expect(acceptExitCandidate(actor, undefined, candidate.id)).rejects.toMatchObject({ statusCode: 409 });
-  });
-
-  it("awaiting_payment sessiya keyingi eventlarda yangi yoki unmatched candidate yaratmaydi", async () => {
-    const plate = "01A301AA";
-    const sessionId = await createTestActiveSession(orgId, plate, new Date(Date.now() - 61 * 60_000));
-    await postExit(plate);
-    const candidate = await candidateForPlate(plate);
-    await acceptExitCandidate(actor, undefined, candidate.id);
-    const acceptedSession = await db("tb_parking_sessions").where({ id: sessionId }).first();
-    expect(acceptedSession.status).toBe("awaiting_payment");
-    vi.clearAllMocks();
-
-    await db("tb_webhook_events")
-      .where({ org_id: orgId, direction: "exit", plate_number: plate })
-      .update({ camera_event_at: null, created_at: new Date(Date.now() - 15_000) });
-    const insideCoalesceWindow = await postExit(plate);
-    expect(insideCoalesceWindow.body).toMatchObject({
-      parsed: true,
-      ignored: true,
-      reason: "already_awaiting_payment",
-      session_id: sessionId,
+    const createdCall = vi.mocked(emitExitCandidateCreated).mock.calls[0];
+    if (!createdCall) throw new Error("Exit candidate socket eventi yuborilmadi");
+    expect(createdCall[0]).toBe(orgId);
+    expect(createdCall[1]).toMatchObject({
+      candidateId: candidate.id,
+      orgId,
+      webhookEventId: candidate.webhook_event_id,
+      detectedPlate: "01A100AA",
+      matchedSessionId: sessionId,
+      confidence: 91,
+      status: "pending",
     });
-
-    await db("tb_webhook_events")
-      .where({ org_id: orgId, direction: "exit", plate_number: plate })
-      .update({ camera_event_at: null, created_at: new Date(Date.now() - 31_000) });
-    const afterCoalesceWindow = await postExit(plate);
-    expect(afterCoalesceWindow.body).toMatchObject({
-      parsed: true,
-      ignored: true,
-      reason: "already_awaiting_payment",
-      session_id: sessionId,
+    const createdPayload = createdCall[1];
+    expect(typeof createdPayload.cameraEventAt).toBe("string");
+    expect(typeof createdPayload.exitImages.overviewUrl).toBe("string");
+    expect(typeof createdPayload.exitImages.vehicleUrl).toBe("string");
+    expect(typeof createdPayload.exitImages.plateUrl).toBe("string");
+    const next = await request(app)
+      .get("/api/exit-candidates/next")
+      .set("Authorization", authorizationHeader);
+    expect(next.status).toBe(200);
+    expect(next.body).toMatchObject({
+      candidate_id: candidate.id,
+      status: "pending",
+      detected_plate: "01A100AA",
+      exit_images: { vehicle_url: null, image_available: true },
+      matched_session: {
+        session_id: sessionId,
+        plate_number: "01A100AA",
+        session_source: "regular",
+        entry_images: { overview_url: null, vehicle_url: null, image_available: false },
+        tariff_snapshot_amount: 10000,
+      },
+      pending_count_for_org: 1,
     });
-
-    expect(await db("tb_exit_candidates").where({ id: candidate.id, org_id: orgId }).first()).toMatchObject({
+    expect(typeof next.body.exit_images.overview_url).toBe("string");
+    const response = await confirmCandidateForTest(candidate.id, { payment_method: "cash" });
+    expect(response.status).toBe(200);
+    expect(response.body.barrier_status).toBe("opened");
+    expect(await db("tb_parking_sessions").where({ id: sessionId }).first()).toMatchObject({
+      status: "completed",
+      payment_method: "cash",
+      active_plate_key: null,
+    });
+    const payment = await db("tb_payments").where({ session_id: sessionId }).first();
+    expect(payment).toMatchObject({ payment_method: "cash" });
+    expect(Number(payment.amount)).toBe(10000);
+    expect(openBarrier).toHaveBeenCalledWith(orgId, "exit");
+    expect(emitExitCompleted).toHaveBeenCalledWith(
+      orgId,
+      expect.objectContaining({
+        orgId,
+        sessionId,
+        plateNumber: "01A100AA",
+        amount: 10000,
+        paymentMethod: "cash",
+        barrierStatus: "opened",
+      })
+    );
+    expect(emitExitCandidateResolved).toHaveBeenCalledWith(orgId, {
+      candidateId: candidate.id,
+      orgId,
       status: "accepted",
-      detected_plate: plate,
-      resolved_session_id: sessionId,
-    });
-    const [{ extraCandidateCount }] = await db("tb_exit_candidates")
-      .where({ org_id: orgId })
-      .whereNot({ id: candidate.id })
-      .count<{ extraCandidateCount: string }[]>("id as extraCandidateCount");
-    expect(Number(extraCandidateCount)).toBe(0);
-    const sessionAfter = await db("tb_parking_sessions").where({ id: sessionId }).first();
-    expect(sessionAfter).toMatchObject({
-      status: "awaiting_payment",
-      exited_at: acceptedSession.exited_at,
-      duration_minutes: acceptedSession.duration_minutes,
-      amount: acceptedSession.amount,
-      active_plate_key: acceptedSession.active_plate_key,
-    });
-    expect(await db("tb_payments").where({ session_id: sessionId })).toHaveLength(0);
-    expect(openBarrier).not.toHaveBeenCalled();
-    expect(emitExitCandidateCreated).not.toHaveBeenCalled();
-
-    const latestAudit = await db("tb_webhook_events")
-      .where({ org_id: orgId, direction: "exit", plate_number: plate })
-      .orderBy("id", "desc")
-      .first();
-    expect(latestAudit).toMatchObject({
-      processing_result: "already_awaiting_payment",
-      processing_reason: "session_already_awaiting_payment",
-      session_id: sessionId,
-      processed_at: null,
+      resolutionType: "exact",
+      sessionId,
+      barrierStatus: "opened",
     });
   });
 
-  it.each(["vip", "subscription"] as const)("%s accept completed qiladi va barrier ochadi", async (source) => {
-    const plate = source === "vip" ? "01V100AA" : "01S100AA";
-    const sessionId = await createTestActiveSession(orgId, plate, new Date(Date.now() - 10 * 60_000));
-    await db("tb_parking_sessions").where({ id: sessionId }).update({ session_source: source });
-    await postExit(plate);
-    const candidate = await candidateForPlate(plate);
-    vi.clearAllMocks();
+  it("2. exact regular online completed va online payment yaratadi", async () => {
+    const sessionId = await createSessionForTest("01A101AA");
+    await postExitForTest("01A101AA");
+    const candidate = await findCandidateForTest("01A101AA");
+    const response = await confirmCandidateForTest(candidate.id, { payment_method: "online" });
+    expect(response.status).toBe(200);
+    expect(await db("tb_parking_sessions").where({ id: sessionId }).first()).toMatchObject({
+      status: "completed",
+      payment_method: "online",
+    });
+    expect(await db("tb_payments").where({ session_id: sessionId }).first()).toMatchObject({
+      payment_method: "online",
+    });
+  });
 
-    await acceptExitCandidate(actor, undefined, candidate.id);
+  it("3. exact VIP amount nol, paymentsiz completed va barrier open", async () => {
+    const sessionId = await createSessionForTest("01V100AA", "vip");
+    await postExitForTest("01V100AA");
+    const candidate = await findCandidateForTest("01V100AA");
+    expect((await confirmCandidateForTest(candidate.id, {})).status).toBe(200);
     const session = await db("tb_parking_sessions").where({ id: sessionId }).first();
-    expect(session).toMatchObject({ status: "completed", active_plate_key: null });
+    expect(session.status).toBe("completed");
     expect(Number(session.amount)).toBe(0);
     expect(await db("tb_payments").where({ session_id: sessionId })).toHaveLength(0);
     expect(openBarrier).toHaveBeenCalledWith(orgId, "exit");
-    expect(emitExitCompleted).toHaveBeenCalledWith(orgId, expect.objectContaining({ plateNumber: plate, amount: 0 }));
   });
 
-  it("reassign active sessiyaga ishlaydi, cross-org sessiyani bloklaydi", async () => {
-    const selectedId = await createTestActiveSession(orgId, "01A500AA");
-    await postExit("WRONG500");
-    const candidate = await candidateForPlate("WRONG500");
-    await reassignExitCandidate(actor, undefined, candidate.id, selectedId);
-    expect((await db("tb_parking_sessions").where({ id: selectedId }).first()).status).toBe("awaiting_payment");
-    expect((await db("tb_exit_candidates").where({ id: candidate.id }).first()).resolution_type).toBe("reassigned");
+  it("4. exact subscription amount nol, paymentsiz completed va barrier open", async () => {
+    const sessionId = await createSessionForTest("01S100AA", "subscription");
+    await postExitForTest("01S100AA");
+    const candidate = await findCandidateForTest("01S100AA");
+    expect((await confirmCandidateForTest(candidate.id, { payment_method: "online" })).status).toBe(200);
+    const session = await db("tb_parking_sessions").where({ id: sessionId }).first();
+    expect(session.status).toBe("completed");
+    expect(Number(session.amount)).toBe(0);
+    expect(await db("tb_payments").where({ session_id: sessionId })).toHaveLength(0);
+  });
 
-    await clearWebhookDedupeCache();
-    await postExit("WRONG501");
-    const crossCandidate = await candidateForPlate("WRONG501");
-    const foreignSessionId = await createTestActiveSession(otherOrgId, "FOREIGN501");
-    await expect(
-      reassignExitCandidate(actor, undefined, crossCandidate.id, foreignSessionId)
-    ).rejects.toMatchObject({ statusCode: 409 });
+  it("5. fuzzy search bir belgi xatosida to'g'ri sessiyani score bilan topadi", async () => {
+    const sessionId = await createSessionForTest("01A123BC");
+    await postExitForTest("WRONG500");
+    const candidate = await findCandidateForTest("WRONG500");
+    const response = await request(app)
+      .post(`/api/exit-candidates/${candidate.id}/search`)
+      .set("Authorization", authorizationHeader)
+      .send({ plate: "01A12XBC" });
+    expect(response.status).toBe(200);
+    expect(response.body.results[0]).toMatchObject({
+      session_id: String(sessionId),
+      plate_number: "01A123BC",
+      tariff_snapshot_amount: 10000,
+      entry_images: { image_available: false },
+    });
+    expect(typeof response.body.results[0].similarity_score).toBe("number");
+    expect(typeof response.body.results[0].duration_minutes).toBe("number");
+    expect(response.body.results[0].similarity_score).toBeGreaterThan(80);
+  });
+
+  it("6. fuzzy search boshqa organization sessiyasini chiqarmaydi", async () => {
+    await createSessionForTest("01A124BC", "regular", otherOrgId);
+    await postExitForTest("WRONG501");
+    const candidate = await findCandidateForTest("WRONG501");
+    const response = await request(app)
+      .post(`/api/exit-candidates/${candidate.id}/search`)
+      .set("Authorization", authorizationHeader)
+      .send({ plate: "01A124BX" });
+    expect(response.status).toBe(200);
+    expect(response.body.results).toEqual([]);
+  });
+
+  it("7. session_id bilan confirm reassigned sessiyani yakunlaydi", async () => {
+    const sessionId = await createSessionForTest("01A200AA");
+    await postExitForTest("WRONG502");
+    const candidate = await findCandidateForTest("WRONG502");
+    const response = await confirmCandidateForTest(candidate.id, {
+      session_id: String(sessionId),
+      payment_method: "cash",
+    });
+    expect(response.status).toBe(200);
+    expect(await db("tb_parking_sessions").where({ id: sessionId }).first()).toMatchObject({ status: "completed" });
+    expect(await db("tb_exit_candidates").where({ id: candidate.id }).first()).toMatchObject({
+      status: "accepted",
+      resolution_type: "reassigned",
+      resolved_session_id: sessionId,
+    });
+  });
+
+  it("8. force-open session va paymentga tegmaydi, to'liq audit va barrier yaratadi", async () => {
+    const sessionId = await createSessionForTest("01A300AA");
+    const before = await testDb("tb_parking_sessions").where({ id: sessionId }).first();
+    await postExitForTest("UNKNOWN1");
+    const candidate = await findCandidateForTest("UNKNOWN1");
+    const response = await request(app)
+      .post(`/api/exit-candidates/${candidate.id}/force-open`)
+      .set("Authorization", authorizationHeader)
+      .send({ reason: "camera_misread", note: "Operator tekshirdi", entered_plate: "01 A 300 AA" });
+    expect(response.status).toBe(200);
+    expect(response.body.barrier_status).toBe("opened");
+    expect(await db("tb_parking_sessions").where({ id: sessionId }).first()).toMatchObject({
+      status: before.status,
+      exited_at: before.exited_at,
+      amount: before.amount,
+      active_plate_key: before.active_plate_key,
+    });
+    expect(await db("tb_payments").where({ session_id: sessionId })).toHaveLength(0);
+    expect(await db("tb_exit_candidates").where({ id: candidate.id }).first()).toMatchObject({
+      status: "dismissed",
+      resolution_type: "forced_open",
+    });
+    const audit = await db<ActivityLogRow>("tb_activity_logs")
+      .where({ action: "exit_candidate.forced_open", target_id: candidate.id })
+      .first();
+    if (!audit) throw new Error("Force-open audit topilmadi");
+    expect(audit.details).toMatchObject({
+      operatorId: actor.id,
+      orgId,
+      reason: "camera_misread",
+      note: "Operator tekshirdi",
+      enteredPlate: "01A300AA",
+      candidateId: candidate.id,
+      webhookEventId: candidate.webhook_event_id,
+    });
+    expect(typeof audit.details.exitImageRef).toBe("string");
+    expect(openBarrier).toHaveBeenCalledWith(orgId, "exit");
+    expect(emitExitCandidateResolved).toHaveBeenCalledWith(orgId, {
+      candidateId: candidate.id,
+      orgId,
+      status: "dismissed",
+      resolutionType: "forced_open",
+      sessionId: null,
+      barrierStatus: "opened",
+    });
+  });
+
+  it("9. retry-barrier faqat relay va yangi retry auditini bajaradi", async () => {
+    const sessionId = await createSessionForTest("01A400AA");
+    await postExitForTest("01A400AA");
+    const candidate = await findCandidateForTest("01A400AA");
+    vi.mocked(openBarrier).mockResolvedValueOnce({ status: "failed", success: false });
+    expect((await confirmCandidateForTest(candidate.id, { payment_method: "cash" })).body.barrier_status).toBe(
+      "failed"
+    );
+    const sessionBefore = await db("tb_parking_sessions").where({ id: sessionId }).first();
+    const candidateBefore = await db("tb_exit_candidates").where({ id: candidate.id }).first();
+    const paymentsBefore = await db("tb_payments").where({ session_id: sessionId });
+    vi.mocked(openBarrier).mockResolvedValueOnce({ status: "opened", success: true });
+    const retry = await request(app)
+      .post(`/api/exit-candidates/${candidate.id}/retry-barrier`)
+      .set("Authorization", authorizationHeader)
+      .send({});
+    expect(retry.status).toBe(200);
+    expect(retry.body.barrier_status).toBe("opened");
+    expect(await db("tb_parking_sessions").where({ id: sessionId }).first()).toEqual(sessionBefore);
+    expect(await db("tb_exit_candidates").where({ id: candidate.id }).first()).toEqual(candidateBefore);
+    expect(await db("tb_payments").where({ session_id: sessionId })).toEqual(paymentsBefore);
+    const retryAudit = await db("tb_activity_logs")
+      .where({ action: "parking.exit_candidate_barrier_opened", target_id: candidate.id })
+      .orderBy("id", "desc")
+      .first();
+    expect(retryAudit.details).toMatchObject({ barrierStatus: "opened", retryAttempt: true });
+  });
+
+  it("10. candidate ikkinchi marta confirm qilinsa 409", async () => {
+    await createSessionForTest("01A500AA");
+    await postExitForTest("01A500AA");
+    const candidate = await findCandidateForTest("01A500AA");
+    expect((await confirmCandidateForTest(candidate.id, { payment_method: "cash" })).status).toBe(200);
+    const second = await confirmCandidateForTest(candidate.id, { payment_method: "cash" });
+    expect(second.status).toBe(409);
+    expect(second.body.message).toBe("Bu chiqish allaqachon hal qilingan");
+  });
+
+  it("11. cross-org candidate va session urinishlari bloklanadi", async () => {
+    const ownSessionId = await createSessionForTest("01A600AA");
+    const foreignSessionId = await createSessionForTest("01A601AA", "regular", otherOrgId);
+    await postExitForTest("WRONG600");
+    const candidate = await findCandidateForTest("WRONG600");
+    const foreignCandidateAccess = await confirmCandidateForTest(
+      candidate.id,
+      { session_id: ownSessionId, payment_method: "cash" },
+      otherAuthorizationHeader
+    );
+    expect(foreignCandidateAccess.status).toBe(404);
+    const foreignSessionAccess = await confirmCandidateForTest(candidate.id, {
+      session_id: foreignSessionId,
+      payment_method: "cash",
+    });
+    expect(foreignSessionAccess.status).toBe(409);
     expect((await db("tb_parking_sessions").where({ id: foreignSessionId }).first()).status).toBe("active");
   });
 
-  it("dismiss sessionga tegmaydi va ikkinchi resolve'ni bloklaydi", async () => {
-    const sessionId = await createTestActiveSession(orgId, "01A600AA");
-    await postExit("01A600AA");
-    const candidate = await candidateForPlate("01A600AA");
-    await dismissExitCandidate(actor, undefined, candidate.id, "OCR noto'g'ri");
-    expect((await db("tb_parking_sessions").where({ id: sessionId }).first()).status).toBe("active");
+  it("12. tanlangan session completed bo'lsa confirm 409", async () => {
+    const sessionId = await createSessionForTest("01A700AA");
+    await postExitForTest("01A700AA");
+    const candidate = await findCandidateForTest("01A700AA");
+    await db("tb_parking_sessions").where({ id: sessionId }).update({
+      status: "completed",
+      exited_at: new Date(),
+      active_plate_key: null,
+    });
+    const response = await confirmCandidateForTest(candidate.id, { payment_method: "cash" });
+    expect(response.status).toBe(409);
+    expect(await db("tb_payments").where({ session_id: sessionId })).toHaveLength(0);
+    expect((await db("tb_exit_candidates").where({ id: candidate.id }).first()).status).toBe("pending");
+  });
+
+  it("13. confirm relay failed bo'lsa session va payment saqlanadi, failure audit yoziladi", async () => {
+    const sessionId = await createSessionForTest("01A800AA");
+    await postExitForTest("01A800AA");
+    const candidate = await findCandidateForTest("01A800AA");
+    vi.mocked(openBarrier).mockResolvedValueOnce({ status: "failed", success: false });
+    const response = await confirmCandidateForTest(candidate.id, { payment_method: "cash" });
+    expect(response.status).toBe(200);
+    expect(response.body.barrier_status).toBe("failed");
+    expect((await db("tb_parking_sessions").where({ id: sessionId }).first()).status).toBe("completed");
+    expect(await db("tb_payments").where({ session_id: sessionId })).toHaveLength(1);
+    expect(
+      await db("tb_activity_logs")
+        .where({ action: "parking.exit_candidate_barrier_open_failed", target_id: candidate.id })
+        .first()
+    ).toBeTruthy();
+  });
+
+  it("14. force-open relay failed bo'lsa dismissed qaror saqlanadi", async () => {
+    await postExitForTest("UNKNOWN2");
+    const candidate = await findCandidateForTest("UNKNOWN2");
+    vi.mocked(openBarrier).mockResolvedValueOnce({ status: "failed", success: false });
+    const response = await request(app)
+      .post(`/api/exit-candidates/${candidate.id}/force-open`)
+      .set("Authorization", authorizationHeader)
+      .send({ reason: "technical_issue" });
+    expect(response.status).toBe(200);
+    expect(response.body.barrier_status).toBe("failed");
     expect(await db("tb_exit_candidates").where({ id: candidate.id }).first()).toMatchObject({
       status: "dismissed",
-      resolution_type: "dismissed",
-      resolution_note: "OCR noto'g'ri",
+      resolution_type: "forced_open",
     });
-    expect(openBarrier).not.toHaveBeenCalled();
-    await expect(dismissExitCandidate(actor, undefined, candidate.id)).rejects.toMatchObject({ statusCode: 409 });
+    expect(
+      await db("tb_activity_logs")
+        .where({ action: "parking.exit_candidate_barrier_open_failed", target_id: candidate.id })
+        .first()
+    ).toBeTruthy();
+  });
+
+  it("15. amount entry tariff snapshotidan, active tarifdan emas", async () => {
+    const sessionId = await createSessionForTest("01A900AA", "regular", orgId, 4000);
+    await db("tb_tariffs").where({ org_id: orgId }).update({ price_per_hour: 99000 });
+    await postExitForTest("01A900AA");
+    const candidate = await findCandidateForTest("01A900AA");
+    expect((await confirmCandidateForTest(candidate.id, { payment_method: "cash" })).status).toBe(200);
+    const session = await db("tb_parking_sessions").where({ id: sessionId }).first();
+    const payment = await db("tb_payments").where({ session_id: sessionId }).first();
+    expect(Number(session.amount)).toBe(8000);
+    expect(Number(payment.amount)).toBe(8000);
+  });
+
+  it("16. next pending candidate bo'lmasa 204 bodyless qaytaradi", async () => {
+    const response = await request(app)
+      .get("/api/exit-candidates/next")
+      .set("Authorization", authorizationHeader);
+    expect(response.status).toBe(204);
+    expect(response.text).toBe("");
+  });
+
+  it("17. retry disabled va not_configured auditdan keyin konfiguratsiya xabari bilan 400 qaytaradi", async () => {
+    for (const status of ["disabled", "not_configured"] as const) {
+      const plate = status === "disabled" ? "UNKNOWN3" : "UNKNOWN4";
+      await postExitForTest(plate);
+      const candidate = await findCandidateForTest(plate);
+      vi.mocked(openBarrier).mockResolvedValueOnce({ status, success: false });
+      const forceOpen = await request(app)
+        .post(`/api/exit-candidates/${candidate.id}/force-open`)
+        .set("Authorization", authorizationHeader)
+        .send({ reason: "technical_issue" });
+      expect(forceOpen.status).toBe(200);
+      expect(forceOpen.body.barrier_status).toBe(status);
+      const retry = await request(app)
+        .post(`/api/exit-candidates/${candidate.id}/retry-barrier`)
+        .set("Authorization", authorizationHeader)
+        .send({});
+      expect(retry.status).toBe(400);
+      expect(retry.body.message).toBe("Shlagbaum konfiguratsiya qilinmagan, administrator bilan bog'laning");
+    }
   });
 });

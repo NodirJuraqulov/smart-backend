@@ -176,7 +176,7 @@ describe("Chiqish webhook", () => {
     expect(candidate).toMatchObject({ status: "pending", matched_session_id: session.id });
     expect(emitExitCandidateCreated).toHaveBeenCalledWith(
       orgId,
-      expect.objectContaining({ id: candidate.id, matched_session_id: session.id })
+      expect.objectContaining({ candidateId: candidate.id, matchedSessionId: session.id, orgId })
     );
     expect(emitExitAwaitingPayment).not.toHaveBeenCalled();
     expect(emitExitCompleted).not.toHaveBeenCalled();

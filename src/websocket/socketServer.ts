@@ -7,6 +7,42 @@ import { AuthTokenPayload } from "@/modules/auth/auth.service";
 
 let io: SocketIOServer | null = null;
 
+export type ExitBarrierStatus = "opened" | "disabled" | "not_configured" | "failed";
+
+export interface ExitCandidateCreatedPayload {
+  candidateId: number;
+  orgId: number;
+  webhookEventId: number;
+  detectedPlate: string | null;
+  matchedSessionId: number | null;
+  confidence: number | null;
+  cameraEventAt: string;
+  status: "pending";
+  exitImages: {
+    overviewUrl: string | null;
+    vehicleUrl: string | null;
+    plateUrl: string | null;
+  };
+}
+
+export interface ExitCandidateResolvedPayload {
+  candidateId: number;
+  orgId: number;
+  status: "accepted" | "dismissed";
+  resolutionType: "exact" | "reassigned" | "dismissed" | "forced_open";
+  sessionId: number | null;
+  barrierStatus: ExitBarrierStatus | null;
+}
+
+export interface ExitCompletedPayload {
+  orgId: number;
+  sessionId: number;
+  plateNumber: string;
+  amount: number;
+  paymentMethod: "cash" | "online" | null;
+  barrierStatus: ExitBarrierStatus;
+}
+
 async function authenticate(socket: Socket): Promise<AuthTokenPayload> {
   const token = socket.handshake.auth?.token as string | undefined;
   if (!token) {
@@ -104,16 +140,16 @@ export function emitExitAwaitingPayment(orgId: number, payload: unknown): void {
   getIO()?.to(`public:org:${orgId}`).emit("exit_awaiting_payment", payload);
 }
 
-export function emitExitCompleted(orgId: number, payload: unknown): void {
+export function emitExitCompleted(orgId: number, payload: ExitCompletedPayload): void {
   getIO()?.to(`org_${orgId}`).emit("exit_completed", payload);
   getIO()?.to(`public:org:${orgId}`).emit("exit_completed", payload);
 }
 
-export function emitExitCandidateCreated(orgId: number, payload: unknown): void {
+export function emitExitCandidateCreated(orgId: number, payload: ExitCandidateCreatedPayload): void {
   getIO()?.to(`org_${orgId}`).emit("exit_candidate_created", payload);
 }
 
-export function emitExitCandidateResolved(orgId: number, payload: unknown): void {
+export function emitExitCandidateResolved(orgId: number, payload: ExitCandidateResolvedPayload): void {
   getIO()?.to(`org_${orgId}`).emit("exit_candidate_resolved", payload);
 }
 

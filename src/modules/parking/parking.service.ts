@@ -7,13 +7,11 @@ import { isDuplicateKeyError } from "@/utils/dbErrors";
 import { resolveOrgIdFilter, resolveOrgIdRequired } from "@/utils/orgScope";
 import {
   emitEntryDetected,
-  emitExitAwaitingPayment,
   emitExitCompleted,
   emitParkingFull,
-  emitPlateNotRecognizedForExit,
   emitRelayFailed,
 } from "@/websocket/socketServer";
-import { openBarrier } from "@/modules/relay/relay.service";
+import { BarrierStatus, openBarrier } from "@/modules/relay/relay.service";
 import { printReceipt } from "@/modules/printer/printer.service";
 import { logActivity } from "@/utils/activityLog";
 import { env } from "@/config/env";
@@ -99,7 +97,7 @@ function sessionsBaseQuery(executor: Knex) {
   );
 }
 
-function parseIntervalsSnapshot(
+export function parseIntervalsSnapshot(
   raw: TariffIntervalSnapshot[] | string | null
 ): TariffIntervalSnapshot[] | null {
   if (!raw) return null;
@@ -163,6 +161,27 @@ export function calculateAmount(
   }
   const amount = Math.ceil(durationMinutes / 60) * pricePerHour;
   return Number.isFinite(amount) && amount >= 0 ? Math.round(amount * 100) / 100 : 0;
+}
+
+export function calculateTariffSnapshotAmount(
+  session: Pick<
+    SessionRecord,
+    | "session_source"
+    | "tariff_price_per_hour"
+    | "tariff_grace_period_minutes"
+    | "tariff_intervals_snapshot"
+  >,
+  durationMinutes: number
+): number | null {
+  if (session.session_source !== "regular") return 0;
+  const intervals = parseIntervalsSnapshot(session.tariff_intervals_snapshot);
+  if (intervals) return calculateAmount(durationMinutes, 0, 0, intervals);
+  if (session.tariff_price_per_hour === null) return null;
+  return calculateAmount(
+    durationMinutes,
+    Number(session.tariff_price_per_hour),
+    session.tariff_grace_period_minutes ?? 0
+  );
 }
 
 function imageUrl(sessionId: number, kind: string, imagePath: string | null): string | null {
@@ -582,7 +601,7 @@ export async function exitManual(
     input.payment_method ?? "cash"
   );
 
-  await openBarrierOrWarn(orgId, "exit", input.plate_number);
+  const barrierStatus = await openBarrierOrWarn(orgId, "exit", input.plate_number);
 
   const printResult = await printReceiptForSession(actor, result.session.id);
   if (!printResult.success) {
@@ -590,8 +609,12 @@ export async function exitManual(
   }
 
   emitExitCompleted(orgId, {
+    orgId,
+    sessionId: result.session.id,
     plateNumber: input.plate_number,
     amount: Number(result.session.amount),
+    paymentMethod: result.session.payment_method,
+    barrierStatus,
   });
 
   return result;
@@ -601,7 +624,7 @@ async function openBarrierOrWarn(
   orgId: number,
   direction: "entry" | "exit",
   plateNumber: string
-): Promise<void> {
+): Promise<BarrierStatus> {
   const result = await openBarrier(orgId, direction);
   if (result.status === "failed") {
     emitRelayFailed(orgId, {
@@ -610,137 +633,7 @@ async function openBarrierOrWarn(
       message: "Shlagbaum avtomatik ochilmadi, qo'lda oching",
     });
   }
-}
-
-async function moveSessionToAwaitingPayment(
-  orgId: number,
-  plateNumber: string,
-  exitedAt: Date
-): Promise<SessionRecord> {
-  return db.transaction(async (trx) => {
-    const session = await sessionsBaseQuery(trx)
-      .where({ org_id: orgId, plate_number: plateNumber, status: "active" })
-      .orderBy("entered_at", "desc")
-      .forUpdate()
-      .first();
-
-    if (!session) {
-      throw new ApiError(`"${plateNumber}" nomeri uchun faol sessiya topilmadi`, 404);
-    }
-
-    const enteredAt = new Date(session.entered_at);
-    const durationMinutes = calculateDurationMinutes(enteredAt, exitedAt);
-
-    const intervalsSnapshot = parseIntervalsSnapshot(session.tariff_intervals_snapshot);
-    let amount: number;
-    if (intervalsSnapshot) {
-      amount = calculateAmount(durationMinutes, 0, 0, intervalsSnapshot);
-    } else if (session.tariff_price_per_hour !== null) {
-      const pricePerHour = Number(session.tariff_price_per_hour);
-      const gracePeriodMinutes = session.tariff_grace_period_minutes ?? 0;
-      amount = calculateAmount(durationMinutes, pricePerHour, gracePeriodMinutes);
-    } else {
-      const tariff = await findTariff(trx, orgId);
-      amount = calculateAmount(durationMinutes, Number(tariff.price_per_hour), tariff.grace_period_minutes);
-    }
-
-    await trx("tb_parking_sessions").where({ id: session.id }).update({
-      status: "awaiting_payment",
-      exited_at: exitedAt,
-      duration_minutes: durationMinutes,
-      amount,
-      exit_method: "auto",
-      active_plate_key: activePlateKey(orgId, plateNumber),
-    });
-
-    return {
-      ...session,
-      status: "awaiting_payment" as const,
-      exited_at: exitedAt,
-      duration_minutes: durationMinutes,
-      amount: String(amount),
-      exit_method: "auto",
-    };
-  });
-}
-
-export async function resolveExitCandidateSession(
-  trx: Knex.Transaction,
-  input: { orgId: number; sessionId: number; cameraEventAt: Date }
-) {
-  const session = await sessionsBaseQuery(trx)
-    .where({ id: input.sessionId, org_id: input.orgId, status: "active" })
-    .forUpdate()
-    .first();
-  if (!session) {
-    throw new ApiError("Tanlangan faol sessiya topilmadi", 409);
-  }
-
-  const enteredAt = new Date(session.entered_at);
-  const now = new Date();
-  const cameraEventAt = new Date(input.cameraEventAt);
-  const cameraTimeIsSafe =
-    Number.isFinite(cameraEventAt.getTime()) &&
-    cameraEventAt.getTime() >= enteredAt.getTime() &&
-    cameraEventAt.getTime() <= now.getTime() + 5 * 60 * 1000;
-  const exitedAt = cameraTimeIsSafe ? cameraEventAt : now.getTime() >= enteredAt.getTime() ? now : enteredAt;
-  const durationMinutes = calculateDurationMinutes(enteredAt, exitedAt);
-
-  if (session.session_source !== "regular") {
-    await trx("tb_parking_sessions").where({ id: session.id, org_id: input.orgId }).update({
-      status: "completed",
-      exited_at: exitedAt,
-      duration_minutes: durationMinutes,
-      amount: 0,
-      exit_method: "auto",
-      active_plate_key: null,
-    });
-    return {
-      status: "completed" as const,
-      session: {
-        ...session,
-        status: "completed" as const,
-        exited_at: exitedAt,
-        duration_minutes: durationMinutes,
-        amount: "0",
-        exit_method: "auto" as const,
-      },
-    };
-  }
-
-  const intervalsSnapshot = parseIntervalsSnapshot(session.tariff_intervals_snapshot);
-  let amount: number;
-  if (intervalsSnapshot) {
-    amount = calculateAmount(durationMinutes, 0, 0, intervalsSnapshot);
-  } else if (session.tariff_price_per_hour !== null) {
-    amount = calculateAmount(
-      durationMinutes,
-      Number(session.tariff_price_per_hour),
-      session.tariff_grace_period_minutes ?? 0
-    );
-  } else {
-    const tariff = await findTariff(trx, input.orgId);
-    amount = calculateAmount(durationMinutes, Number(tariff.price_per_hour), tariff.grace_period_minutes);
-  }
-
-  await trx("tb_parking_sessions").where({ id: session.id, org_id: input.orgId }).update({
-    status: "awaiting_payment",
-    exited_at: exitedAt,
-    duration_minutes: durationMinutes,
-    amount,
-    exit_method: "auto",
-  });
-  return {
-    status: "awaiting_payment" as const,
-    session: {
-      ...session,
-      status: "awaiting_payment" as const,
-      exited_at: exitedAt,
-      duration_minutes: durationMinutes,
-      amount: String(amount),
-      exit_method: "auto" as const,
-    },
-  };
+  return result.status;
 }
 
 interface CameraParkingInput {
@@ -790,57 +683,6 @@ export async function createEntryFromWebhook(input: CameraParkingInput) {
     if (err instanceof ApiError) {
       console.warn(`Webhook kirish rad etildi (org_id: ${orgId}, plate: ${plateNumber}): ${err.message}`);
       return { created: false as const, reason: "rejected" as const };
-    }
-    throw err;
-  }
-}
-
-export async function createExitFromWebhook(input: CameraParkingInput) {
-  const { orgId, event } = input;
-  const plateNumber = event.plateNumber;
-  try {
-    const activeSession = await sessionsBaseQuery(db)
-      .where({ org_id: orgId, plate_number: plateNumber, status: "active" })
-      .orderBy("entered_at", "desc")
-      .first();
-
-    if (!activeSession) {
-      console.warn(`Webhook chiqish: "${plateNumber}" uchun faol sessiya topilmadi (org_id: ${orgId})`);
-      emitPlateNotRecognizedForExit(orgId, {
-        plateNumber,
-        message: "Operator bilan bog'laning — nomer faol sessiyalar orasida topilmadi",
-      });
-      return { updated: false as const, reason: "not_found" as const };
-    }
-
-    const exitedAt = new Date();
-
-    if (activeSession.session_source !== "regular") {
-      const result = await completeSession(orgId, plateNumber, null, "auto", null, exitedAt);
-      const sessionWithImages = await attachCameraImages(result.session, "exit", event);
-      await openBarrierOrWarn(orgId, "exit", plateNumber);
-      emitExitCompleted(orgId, { plateNumber, amount: 0 });
-      return { updated: true as const, status: "completed" as const, session: withImageUrls(sessionWithImages), confidence: event.confidence };
-    }
-
-    let session = await moveSessionToAwaitingPayment(orgId, plateNumber, exitedAt);
-    session = await attachCameraImages(session, "exit", event);
-    emitExitAwaitingPayment(orgId, {
-      plateNumber,
-      amount: Number(session.amount),
-      enteredAt: session.entered_at,
-      durationMinutes: session.duration_minutes,
-    });
-    await logActivity(null, "parking.exit_webhook", "session", session.id, {
-      plateNumber,
-      amount: Number(session.amount),
-    });
-
-    return { updated: true as const, status: "awaiting_payment" as const, session: withImageUrls(session), confidence: event.confidence };
-  } catch (err) {
-    if (err instanceof ApiError) {
-      console.warn(`Webhook chiqish rad etildi (org_id: ${orgId}, plate: ${plateNumber}): ${err.message}`);
-      return { updated: false as const, reason: "rejected" as const };
     }
     throw err;
   }
@@ -1055,7 +897,7 @@ export async function confirmCashPayment(actor: AuthTokenPayload, id: number) {
     };
   });
 
-  await openBarrierOrWarn(result.session.org_id, "exit", result.session.plate_number);
+  const barrierStatus = await openBarrierOrWarn(result.session.org_id, "exit", result.session.plate_number);
 
   const printResult = await printReceiptForSession(actor, id);
   if (!printResult.success) {
@@ -1063,8 +905,12 @@ export async function confirmCashPayment(actor: AuthTokenPayload, id: number) {
   }
 
   emitExitCompleted(result.session.org_id, {
+    orgId: result.session.org_id,
+    sessionId: result.session.id,
     plateNumber: result.session.plate_number,
     amount: Number(result.session.amount),
+    paymentMethod: "cash",
+    barrierStatus,
   });
 
   await logActivity(actor.id, "parking.cash_payment_confirmed", "session", id, {
@@ -1201,7 +1047,7 @@ export async function forceCloseSession(
   const orgId = result.session!.org_id;
   const plateNumber = result.session!.plate_number;
 
-  await openBarrierOrWarn(orgId, "exit", plateNumber);
+  const barrierStatus = await openBarrierOrWarn(orgId, "exit", plateNumber);
 
   const printResult = await printReceiptForSession(actor, id);
   if (!printResult.success) {
@@ -1209,8 +1055,12 @@ export async function forceCloseSession(
   }
 
   emitExitCompleted(orgId, {
+    orgId,
+    sessionId: result.session!.id,
     plateNumber,
     amount: Number(result.session!.amount),
+    paymentMethod: result.session!.payment_method,
+    barrierStatus,
   });
 
   return result;
