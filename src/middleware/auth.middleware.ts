@@ -87,6 +87,14 @@ export function isSuperAdminOrOperatorOrOwner(req: Request, res: Response, next:
   next();
 }
 
+export function isSuperAdminOrOwner(req: Request, res: Response, next: NextFunction) {
+  if (req.user?.role !== "super_admin" && req.user?.role !== "owner") {
+    res.status(403).json({ message: "Ruxsat yo'q — faqat Super Admin yoki stoyanka egasi uchun" });
+    return;
+  }
+  next();
+}
+
 export function checkPermission(sectionKey: string) {
   return asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
     if (req.user?.role !== "operator") {

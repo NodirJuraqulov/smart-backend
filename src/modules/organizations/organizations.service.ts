@@ -7,6 +7,7 @@ import { seedDefaultPermissions } from "@/modules/operatorPermissions/operatorPe
 import { ApiError } from "@/utils/ApiError";
 import { isDuplicateKeyError } from "@/utils/dbErrors";
 import { applyCompletedExitFilter, applyInsideSessionsFilter } from "@/modules/parking/sessionStatus";
+import { encryptSecret } from "@/utils/encryption";
 
 interface OrganizationRecord {
   id: number;
@@ -345,6 +346,102 @@ export async function updateIntegrationSettings(
   }
 
   return findIntegrationSettingsOrFail(id);
+}
+
+export type CameraRelayDirection = "entry" | "exit";
+
+interface CameraRelaySettingsRow {
+  id: number;
+  entry_camera_relay_host: string | null;
+  entry_camera_relay_port: number | null;
+  entry_camera_relay_username: string | null;
+  entry_camera_relay_password_encrypted: string | null;
+  entry_camera_relay_channel: number | null;
+  exit_camera_relay_host: string | null;
+  exit_camera_relay_port: number | null;
+  exit_camera_relay_username: string | null;
+  exit_camera_relay_password_encrypted: string | null;
+  exit_camera_relay_channel: number | null;
+}
+
+export interface CameraRelaySettingsInput {
+  host?: string | null;
+  port?: number | null;
+  username?: string | null;
+  password?: string | null;
+  channel?: number | null;
+}
+
+async function findCameraRelaySettingsOrFail(id: number): Promise<CameraRelaySettingsRow> {
+  const organization = await db<CameraRelaySettingsRow>("tb_organizations")
+    .select(
+      "id",
+      "entry_camera_relay_host",
+      "entry_camera_relay_port",
+      "entry_camera_relay_username",
+      "entry_camera_relay_password_encrypted",
+      "entry_camera_relay_channel",
+      "exit_camera_relay_host",
+      "exit_camera_relay_port",
+      "exit_camera_relay_username",
+      "exit_camera_relay_password_encrypted",
+      "exit_camera_relay_channel"
+    )
+    .where({ id })
+    .first();
+  if (!organization) throw new ApiError("Stoyanka topilmadi", 404);
+  return organization;
+}
+
+function publicCameraRelaySettings(row: CameraRelaySettingsRow, direction: CameraRelayDirection) {
+  const host = direction === "entry" ? row.entry_camera_relay_host : row.exit_camera_relay_host;
+  const port = direction === "entry" ? row.entry_camera_relay_port : row.exit_camera_relay_port;
+  const username = direction === "entry" ? row.entry_camera_relay_username : row.exit_camera_relay_username;
+  const password =
+    direction === "entry"
+      ? row.entry_camera_relay_password_encrypted
+      : row.exit_camera_relay_password_encrypted;
+  const channel = direction === "entry" ? row.entry_camera_relay_channel : row.exit_camera_relay_channel;
+  return {
+    configured: Boolean(host && username && password),
+    host,
+    port: port ?? 80,
+    username,
+    channel: channel ?? 1,
+  };
+}
+
+export async function getCameraRelaySettings(id: number) {
+  const row = await findCameraRelaySettingsOrFail(id);
+  return {
+    entry: publicCameraRelaySettings(row, "entry"),
+    exit: publicCameraRelaySettings(row, "exit"),
+  };
+}
+
+export async function updateCameraRelaySettings(
+  id: number,
+  input: { entry?: CameraRelaySettingsInput; exit?: CameraRelaySettingsInput }
+) {
+  await findCameraRelaySettingsOrFail(id);
+  const updates: Record<string, unknown> = {};
+  for (const direction of ["entry", "exit"] as const) {
+    const settings = input[direction];
+    if (!settings) continue;
+    if (settings.host !== undefined) updates[`${direction}_camera_relay_host`] = settings.host;
+    if (settings.port !== undefined) updates[`${direction}_camera_relay_port`] = settings.port;
+    if (settings.username !== undefined) updates[`${direction}_camera_relay_username`] = settings.username;
+    if (settings.channel !== undefined) updates[`${direction}_camera_relay_channel`] = settings.channel;
+    if (settings.password !== undefined) {
+      updates[`${direction}_camera_relay_password_encrypted`] = settings.password
+        ? encryptSecret(settings.password)
+        : null;
+    }
+  }
+  if (Object.keys(updates).length > 0) {
+    await db("tb_organizations").where({ id }).update(updates);
+  }
+  return getCameraRelaySettings(id);
 }
 
 export async function regenerateWebhookToken(id: number): Promise<string> {

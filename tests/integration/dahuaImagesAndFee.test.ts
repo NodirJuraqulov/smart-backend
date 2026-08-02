@@ -28,6 +28,10 @@ vi.mock("@/modules/relay/relay.service", () => ({
 }));
 vi.mock("@/websocket/socketServer", () => ({
   emitEntryDetected: vi.fn(),
+  emitEntryBarrierFailed: vi.fn(),
+  emitEntryCandidateCreated: vi.fn(),
+  emitEntryCandidateResolved: vi.fn(),
+  emitEntryCompleted: vi.fn(),
   emitParkingFull: vi.fn(),
   emitExitAwaitingPayment: vi.fn(),
   emitExitCompleted: vi.fn(),

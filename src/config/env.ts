@@ -47,6 +47,7 @@ export const env = {
 
   pythonOcrUrl: process.env.PYTHON_OCR_URL || "http://localhost:8000",
   internalApiKey: process.env.INTERNAL_API_KEY || "",
+  encryptionKey: process.env.ENCRYPTION_KEY || "",
   corsOrigin: process.env.CORS_ORIGIN || "*",
 
   uploadsMaxSizeMB: Number(process.env.UPLOADS_MAX_SIZE_MB) || 2000,
@@ -68,6 +69,7 @@ export interface ProductionSafetyConfig {
   corsOrigin: string;
   dbPassword: string;
   publicBaseUrl: string | undefined;
+  encryptionKey: string;
 }
 
 export function collectProductionSafetyErrors(config: ProductionSafetyConfig): string[] {
@@ -98,6 +100,13 @@ export function collectProductionSafetyErrors(config: ProductionSafetyConfig): s
     }
   }
 
+  const encryptionKey = /^[a-f\d]{64}$/i.test(config.encryptionKey)
+    ? Buffer.from(config.encryptionKey, "hex")
+    : Buffer.from(config.encryptionKey, "base64");
+  if (encryptionKey.length !== 32) {
+    errors.push("ENCRYPTION_KEY 32 baytli hex yoki base64 qiymat bo'lishi kerak");
+  }
+
   return errors;
 }
 
@@ -109,6 +118,7 @@ function validateProductionSafety(): void {
     corsOrigin: env.corsOrigin,
     dbPassword: env.db.password,
     publicBaseUrl: process.env.PUBLIC_BASE_URL,
+    encryptionKey: env.encryptionKey,
   });
 
   if (errors.length > 0) {

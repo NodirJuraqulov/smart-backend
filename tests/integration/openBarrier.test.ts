@@ -99,24 +99,13 @@ describe("POST /api/parking/sessions/:id/open-barrier", () => {
 });
 
 describe("POST /api/admin/organizations/:id/relay/test", () => {
-  it("super_admin uchun ishlaydi", async () => {
+  it("production API da mavjud emas", async () => {
     const res = await request(buildApp())
       .post(`/api/admin/organizations/${orgId}/relay/test`)
       .set("Authorization", authHeader(superAdmin))
       .send({ direction: "exit" });
 
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ status: "opened", success: true });
-    expect(openBarrier).toHaveBeenCalledWith(orgId, "exit");
-  });
-
-  it("operator uchun 403 qaytaradi", async () => {
-    const res = await request(buildApp())
-      .post(`/api/admin/organizations/${orgId}/relay/test`)
-      .set("Authorization", authHeader(operator))
-      .send({ direction: "exit" });
-
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(404);
     expect(openBarrier).not.toHaveBeenCalled();
   });
 });

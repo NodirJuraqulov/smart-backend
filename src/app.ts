@@ -24,6 +24,9 @@ import publicDisplayRouter from "./modules/publicDisplay/publicDisplay.routes";
 import paymentRouter from "./modules/payment/payment.routes";
 import webhookEventsRouter from "./modules/webhook/webhookEvents.routes";
 import exitCandidatesRouter from "./modules/exitCandidates/exitCandidates.routes";
+import cameraRelaySettingsRouter from "./modules/organizations/cameraRelaySettings.routes";
+import entryCandidatesRouter from "./modules/entryCandidates/entryCandidates.routes";
+import parkingSessionsEntryBarrierRouter from "./modules/entryCandidates/parkingSessionsEntryBarrier.routes";
 
 const app = express();
 
@@ -125,6 +128,7 @@ app.use("/api", generalApiRateLimit);
 
 app.use("/api/auth", authRouter);
 app.use("/api/admin/organizations", organizationsRouter);
+app.use("/api/organizations", cameraRelaySettingsRouter);
 app.use("/api/admin/stats", adminStatsRouter);
 app.use("/api/admin/users", usersRouter);
 app.use("/api/tariffs", tariffsRouter);
@@ -135,6 +139,8 @@ app.use("/api/vip-vehicles", vipVehiclesRouter);
 app.use("/api/settings", settingsRouter);
 app.use("/api/webhook-events", webhookEventsRouter);
 app.use("/api/exit-candidates", exitCandidatesRouter);
+app.use("/api/entry-candidates", entryCandidatesRouter);
+app.use("/api/parking-sessions", parkingSessionsEntryBarrierRouter);
 app.use("/api/parking", parkingRouter);
 app.use("/api/reports", reportsRouter);
 app.use("/api/admin/activity-logs", activityLogsRouter);

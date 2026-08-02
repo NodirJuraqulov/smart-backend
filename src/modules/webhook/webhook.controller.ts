@@ -8,9 +8,8 @@ import { logWebhookDebug } from "./webhookDebugLog.service";
 import {
   recordWebhookAuditEvent,
   registerWebhookEvent,
-  updateWebhookEventOutcome,
 } from "./webhookIdempotency";
-import { createEntryFromWebhook } from "@/modules/parking/parking.service";
+import { processEntryWebhook } from "@/modules/entryCandidates/entryCandidates.service";
 import { emitPlateNotRecognizedForExit, emitWebhookParseFailed } from "@/websocket/socketServer";
 import { createExitCandidate } from "@/modules/exitCandidates/exitCandidates.service";
 import {
@@ -219,43 +218,19 @@ async function processCameraWebhook(
     return;
   }
 
-  if (!plateNumber) {
-    await updateWebhookEventOutcome(registration.eventId, {
-      processingResult: "plate_not_recognized",
-      processingReason: "camera_ocr_failed",
-      processed: false,
-    });
-    res.status(200).json({
-      ok: true,
-      parsed: true,
-      ignored: true,
-      reason: "plate_not_recognized",
-      event_id: registration.eventId,
-      plate_number: null,
-      confidence: event.confidence,
-      timestamp: event.timestamp,
-    });
-    return;
-  }
-
-  const recognizedEvent = { ...event, plateNumber };
-  const result = await createEntryFromWebhook({ orgId, event: recognizedEvent });
-  const processingResult = result.created
-    ? "entry_created"
-    : result.reason === "already_active"
-      ? "active_entry_already_exists"
-      : "entry_rejected";
-  await updateWebhookEventOutcome(registration.eventId, {
-    processingResult,
-    processingReason: result.created ? null : result.reason,
-    sessionId: result.created ? result.session.id : null,
-    processed: result.created,
+  const entryResult = await processEntryWebhook({
+    orgId,
+    webhookEventId: registration.eventId,
+    event: { ...event, plateNumber },
   });
 
   res.status(200).json({
     ok: true,
     parsed: true,
-    plate_number: event.plateNumber,
+    candidate_created: !entryResult.created && "candidateId" in entryResult,
+    candidate_id: "candidateId" in entryResult ? entryResult.candidateId : undefined,
+    reason: entryResult.reason,
+    plate_number: plateNumber,
     confidence: event.confidence,
     timestamp: event.timestamp,
   });

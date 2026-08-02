@@ -1,7 +1,6 @@
 import { isIP } from "net";
 import { Request, Response } from "express";
 import { env } from "@/config/env";
-import { openBarrier } from "@/modules/relay/relay.service";
 import { printReceipt } from "@/modules/printer/printer.service";
 import { logActivity } from "@/utils/activityLog";
 import { parseId } from "@/utils/httpParams";
@@ -317,18 +316,76 @@ export async function regenerateWebhookTokenHandler(req: Request, res: Response)
   });
 }
 
-export async function relayTestHandler(req: Request, res: Response) {
-  const id = parseId(req, res);
-  if (id === null) return;
+function assertCameraRelayScope(req: Request, id: number, res: Response): boolean {
+  if (req.user?.role === "owner" && req.user.org_id !== id) {
+    res.status(404).json({ message: "Stoyanka topilmadi" });
+    return false;
+  }
+  return true;
+}
 
-  const { direction } = req.body ?? {};
-  if (direction !== "entry" && direction !== "exit") {
-    res.status(400).json({ message: "direction 'entry' yoki 'exit' bo'lishi kerak" });
+function parseRelayDirection(value: unknown, field: string, res: Response) {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    res.status(400).json({ message: `${field} obyekt bo'lishi kerak` });
+    return null;
+  }
+  const data = value as Record<string, unknown>;
+  const host = data.host === "" ? null : data.host;
+  const username = data.username === "" ? null : data.username;
+  const password = data.password === "" ? null : data.password;
+  if (host !== undefined && host !== null && (typeof host !== "string" || /[\s/?#]/.test(host) || host.includes("://"))) {
+    res.status(400).json({ message: `${field}.host noto'g'ri` });
+    return null;
+  }
+  if (username !== undefined && username !== null && typeof username !== "string") {
+    res.status(400).json({ message: `${field}.username noto'g'ri` });
+    return null;
+  }
+  if (password !== undefined && password !== null && typeof password !== "string") {
+    res.status(400).json({ message: `${field}.password noto'g'ri` });
+    return null;
+  }
+  if (data.port !== undefined && data.port !== null && (!Number.isInteger(data.port) || Number(data.port) < 1 || Number(data.port) > 65535)) {
+    res.status(400).json({ message: `${field}.port 1-65535 oralig'ida bo'lishi kerak` });
+    return null;
+  }
+  if (data.channel !== undefined && data.channel !== null && (!Number.isInteger(data.channel) || Number(data.channel) < 1)) {
+    res.status(400).json({ message: `${field}.channel musbat butun son bo'lishi kerak` });
+    return null;
+  }
+  return {
+    host: host as string | null | undefined,
+    port: data.port as number | null | undefined,
+    username: username as string | null | undefined,
+    password: password as string | null | undefined,
+    channel: data.channel as number | null | undefined,
+  };
+}
+
+export async function getCameraRelaySettingsHandler(req: Request, res: Response) {
+  const id = parseId(req, res);
+  if (id === null || !assertCameraRelayScope(req, id, res)) return;
+  res.json(await organizationsService.getCameraRelaySettings(id));
+}
+
+export async function updateCameraRelaySettingsHandler(req: Request, res: Response) {
+  const id = parseId(req, res);
+  if (id === null || !assertCameraRelayScope(req, id, res)) return;
+  const entry = parseRelayDirection(req.body?.entry, "entry", res);
+  if (entry === null) return;
+  const exit = parseRelayDirection(req.body?.exit, "exit", res);
+  if (exit === null) return;
+  if (!entry && !exit) {
+    res.status(400).json({ message: "entry yoki exit sozlamasi yuborilishi kerak" });
     return;
   }
-
-  const result = await openBarrier(id, direction);
-  res.json(result);
+  const settings = await organizationsService.updateCameraRelaySettings(id, { entry, exit });
+  await logActivity(req.user!.id, "organization.camera_relay_settings_updated", "organization", id, {
+    entry: settings.entry,
+    exit: settings.exit,
+  });
+  res.json(settings);
 }
 
 export async function printerTestHandler(req: Request, res: Response) {

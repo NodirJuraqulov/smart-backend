@@ -7,6 +7,7 @@ import { scheduleStorageCleanupJob } from "./jobs/storageCleanupJob";
 import { scheduleUploadsBackupJob } from "./jobs/uploadsBackupJob";
 import { scheduleWebhookDebugLogsCleanupJob } from "./jobs/webhookDebugLogsCleanupJob";
 import { scheduleWebhookEventsCleanupJob } from "./jobs/webhookEventsCleanupJob";
+import { scheduleEntryCandidatesExpiryJob } from "./jobs/entryCandidatesExpiryJob";
 import { initSocketServer } from "./websocket/socketServer";
 
 process.on("uncaughtException", (error) => {
@@ -26,6 +27,7 @@ scheduleUploadsBackupJob();
 scheduleStorageCleanupJob();
 scheduleWebhookEventsCleanupJob();
 scheduleWebhookDebugLogsCleanupJob();
+scheduleEntryCandidatesExpiryJob();
 
 httpServer.listen(env.port, () => {
   console.log(`Server running on port ${env.port} [${env.nodeEnv}]`);

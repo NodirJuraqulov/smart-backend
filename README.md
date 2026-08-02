@@ -48,6 +48,7 @@ To'liq production deploy qo'llanmasi uchun `DEPLOYMENT.md`ga qarang.
 | `DB_POOL_MIN` | Connection pool minimal soni |
 | `DB_POOL_MAX` | Connection pool maksimal soni |
 | `JWT_SECRET` | JWT token imzolash kaliti (kamida 32 belgi) |
+| `ENCRYPTION_KEY` | Kamera relay parollarini AES-256-GCM bilan shifrlash uchun 32 baytli hex yoki base64 kalit |
 | `JWT_EXPIRES_IN` | Access token amal qilish muddati |
 | `REFRESH_TOKEN_EXPIRES_DAYS` | Refresh token amal qilish muddati (kun) |
 | `CORS_ORIGIN` | Frontend manzili |
@@ -57,7 +58,7 @@ To'liq production deploy qo'llanmasi uchun `DEPLOYMENT.md`ga qarang.
 | `PAYME_ENABLED` | Payme onlayn to'lov integratsiyasi yoqilganmi (`true`/`false`) — hozircha faqat skelet, `false` qoldiring |
 | `CLICK_ENABLED` | Click onlayn to'lov integratsiyasi yoqilganmi (`true`/`false`) — hozircha faqat skelet, `false` qoldiring |
 
-Har bir tashkilot (`tb_organizations`) uchun rele/printer/kamera IP manzillari va webhook tokeni bazada saqlanadi — `.env`da emas, `PUT /api/admin/organizations/:id/integration-settings` orqali sozlanadi.
+Har bir tashkilot (`tb_organizations`) uchun printer/kamera va webhook sozlamalari bazada saqlanadi. Kamera relay credentiallari `PATCH /api/organizations/:id/camera-relay-settings` orqali sozlanadi.
 
 ## API endpointlar
 
@@ -76,7 +77,6 @@ Har bir tashkilot (`tb_organizations`) uchun rele/printer/kamera IP manzillari v
 - `PUT /:id/pricing-mode`
 - `PUT /:id/capacity`
 - `POST /:id/operator`
-- `POST /:id/relay/test`
 - `POST /:id/printer/test`
 - `GET /:id/integration-settings`
 - `PUT /:id/integration-settings`

@@ -136,12 +136,12 @@ export async function getDailyReport(
       getSubscriptionRevenue(orgId, dayStart, dayEnd, date, date),
     ]);
 
-  const hourlyEntries = new Array(24).fill(0);
+  const hourlyEntries = Array.from({ length: 24 }, () => 0);
   for (const row of entriesRows) {
     hourlyEntries[DateTime.fromJSDate(new Date(row.entered_at)).setZone(timezone).hour]++;
   }
 
-  const hourlyRevenue = new Array(24).fill(0);
+  const hourlyRevenue = Array.from({ length: 24 }, () => 0);
   for (const row of paymentsRows) {
     hourlyRevenue[DateTime.fromJSDate(new Date(row.paid_at)).setZone(timezone).hour] += Number(row.amount);
   }
@@ -223,17 +223,17 @@ export async function getMonthlyReport(
     getSubscriptionRevenue(orgId, monthStart, monthEnd, monthStartDate, monthEndDate),
   ]);
 
-  const entriesByDay = new Array(daysInMonth + 1).fill(0);
+  const entriesByDay = Array.from({ length: daysInMonth + 1 }, () => 0);
   for (const row of entriesRows) {
     entriesByDay[DateTime.fromJSDate(new Date(row.entered_at)).setZone(timezone).day]++;
   }
 
-  const exitsByDay = new Array(daysInMonth + 1).fill(0);
+  const exitsByDay = Array.from({ length: daysInMonth + 1 }, () => 0);
   for (const row of exitsRows) {
     exitsByDay[DateTime.fromJSDate(new Date(row.exited_at as Date)).setZone(timezone).day]++;
   }
 
-  const revenueByDay = new Array(daysInMonth + 1).fill(0);
+  const revenueByDay = Array.from({ length: daysInMonth + 1 }, () => 0);
   for (const row of paymentsRows) {
     revenueByDay[DateTime.fromJSDate(new Date(row.paid_at)).setZone(timezone).day] += Number(row.amount);
   }
@@ -304,17 +304,17 @@ export async function getYearlyReport(
     getSubscriptionRevenue(orgId, yearStart, yearEnd, yearStartDate, yearEndDate),
   ]);
 
-  const entriesByMonth = new Array(13).fill(0);
+  const entriesByMonth = Array.from({ length: 13 }, () => 0);
   for (const row of entriesRows) {
     entriesByMonth[DateTime.fromJSDate(new Date(row.entered_at)).setZone(timezone).month]++;
   }
 
-  const exitsByMonth = new Array(13).fill(0);
+  const exitsByMonth = Array.from({ length: 13 }, () => 0);
   for (const row of exitsRows) {
     exitsByMonth[DateTime.fromJSDate(new Date(row.exited_at as Date)).setZone(timezone).month]++;
   }
 
-  const revenueByMonth = new Array(13).fill(0);
+  const revenueByMonth = Array.from({ length: 13 }, () => 0);
   for (const row of paymentsRows) {
     revenueByMonth[DateTime.fromJSDate(new Date(row.paid_at)).setZone(timezone).month] += Number(row.amount);
   }

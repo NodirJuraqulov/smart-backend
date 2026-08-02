@@ -1,65 +1,72 @@
 import { db } from "@/config/db";
-
-const RELAY_TIMEOUT_MS = 5000;
-const DEFAULT_OPEN_SECONDS = 5;
+import { decryptSecret } from "@/utils/encryption";
+import { openRelay } from "./dahuaRelay.service";
 
 export type BarrierStatus = "opened" | "disabled" | "not_configured" | "failed";
 
 export interface BarrierResult {
   status: BarrierStatus;
   success: boolean;
+  detail?: string;
 }
 
-export async function triggerRelay(
-  relayIp: string | null | undefined,
-  openSeconds: number
-): Promise<BarrierResult> {
-  if (!relayIp) {
-    return { status: "not_configured", success: false };
-  }
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), RELAY_TIMEOUT_MS);
-
-  try {
-    const response = await fetch(`http://${relayIp}/relay/0?turn=on&timer=${openSeconds}`, {
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      console.error(`Rele javobi xato: ${relayIp} (status: ${response.status})`);
-      return { status: "failed", success: false };
-    }
-
-    console.log(`Rele ochildi: ${relayIp}`);
-    return { status: "opened", success: true };
-  } catch (err) {
-    console.error(`Rele bilan bog'lanib bo'lmadi: ${relayIp}`, err);
-    return { status: "failed", success: false };
-  } finally {
-    clearTimeout(timeout);
-  }
+interface RelayOrganizationRow {
+  id: number;
+  entry_camera_relay_host: string | null;
+  entry_camera_relay_port: number | null;
+  entry_camera_relay_username: string | null;
+  entry_camera_relay_password_encrypted: string | null;
+  entry_camera_relay_channel: number | null;
+  exit_camera_relay_host: string | null;
+  exit_camera_relay_port: number | null;
+  exit_camera_relay_username: string | null;
+  exit_camera_relay_password_encrypted: string | null;
+  exit_camera_relay_channel: number | null;
 }
 
 export async function openBarrier(orgId: number, direction: "entry" | "exit"): Promise<BarrierResult> {
-  const organization = await db("tb_organizations")
-    .leftJoin("tb_settings", "tb_settings.org_id", "tb_organizations.id")
+  const organization = await db<RelayOrganizationRow>("tb_organizations")
     .select(
-      "tb_organizations.relay_entry_ip",
-      "tb_organizations.relay_exit_ip",
-      "tb_settings.barrier_enabled",
-      "tb_settings.barrier_open_seconds"
+      "entry_camera_relay_host",
+      "entry_camera_relay_port",
+      "entry_camera_relay_username",
+      "entry_camera_relay_password_encrypted",
+      "entry_camera_relay_channel",
+      "exit_camera_relay_host",
+      "exit_camera_relay_port",
+      "exit_camera_relay_username",
+      "exit_camera_relay_password_encrypted",
+      "exit_camera_relay_channel"
     )
-    .where("tb_organizations.id", orgId)
+    .where({ id: orgId })
     .first();
-
-  if (!organization?.barrier_enabled) {
-    return { status: "disabled", success: false };
+  const prefix = direction === "entry" ? "entry" : "exit";
+  const host = organization?.[`${prefix}_camera_relay_host`];
+  const username = organization?.[`${prefix}_camera_relay_username`];
+  const encryptedPassword = organization?.[`${prefix}_camera_relay_password_encrypted`];
+  if (!host || !username || !encryptedPassword) {
+    return {
+      status: "not_configured",
+      success: false,
+      detail: "Kamera relay sozlamalari to'liq konfiguratsiya qilinmagan",
+    };
   }
-
-  const relayIp = direction === "entry" ? organization?.relay_entry_ip : organization?.relay_exit_ip;
-  const configuredSeconds = Number(organization.barrier_open_seconds);
-  const openSeconds =
-    Number.isInteger(configuredSeconds) && configuredSeconds > 0 ? configuredSeconds : DEFAULT_OPEN_SECONDS;
-  return triggerRelay(relayIp, openSeconds);
+  let password: string;
+  try {
+    password = decryptSecret(encryptedPassword);
+  } catch (err) {
+    return {
+      status: "failed",
+      success: false,
+      detail: `Kamera relay parolini o'qib bo'lmadi: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  const result = await openRelay({
+    host,
+    port: organization?.[`${prefix}_camera_relay_port`],
+    username,
+    password,
+    channel: organization?.[`${prefix}_camera_relay_channel`],
+  });
+  return { ...result, success: result.status === "opened" };
 }

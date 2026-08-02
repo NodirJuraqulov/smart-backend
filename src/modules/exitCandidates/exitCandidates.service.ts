@@ -5,6 +5,7 @@ import { AuthTokenPayload } from "@/modules/auth/auth.service";
 import {
   calculateDurationMinutes,
   calculateTariffSnapshotAmount,
+  displayPlateNumber,
   getSessionImage,
   TariffIntervalSnapshot,
 } from "@/modules/parking/parking.service";
@@ -56,7 +57,7 @@ interface CandidateRow {
 interface SessionSummary {
   id: number;
   org_id: number;
-  plate_number: string;
+  plate_number: string | null;
   entered_at: Date;
   exited_at: Date | null;
   status: "active" | "awaiting_payment" | "completed";
@@ -76,6 +77,7 @@ interface BarrierAuditDetails {
   candidateId: number;
   barrierStatus: BarrierStatus;
   retryAttempt: boolean;
+  detail: string;
 }
 
 function serializeSessionSummary(session: SessionSummary) {
@@ -87,7 +89,10 @@ function serializeSessionSummary(session: SessionSummary) {
     entry_vehicle_image_path: _entryVehiclePath,
     ...publicSession
   } = session;
-  return publicSession;
+  return {
+    ...publicSession,
+    plate_number: displayPlateNumber(session.plate_number),
+  };
 }
 
 const PENDING_COALESCE_SECONDS = 30;
@@ -316,10 +321,14 @@ async function recordBarrierAttempt(input: {
   retryAttempt: boolean;
 }): Promise<BarrierStatus> {
   let status: BarrierStatus;
+  let detail: string;
   try {
-    status = (await openBarrier(input.orgId, "exit")).status;
-  } catch {
+    const result = await openBarrier(input.orgId, "exit");
+    status = result.status;
+    detail = result.detail ?? result.status;
+  } catch (err) {
     status = "failed";
+    detail = err instanceof Error ? err.message : String(err);
   }
   const action =
     status === "opened"
@@ -332,6 +341,7 @@ async function recordBarrierAttempt(input: {
     candidateId: input.candidateId,
     barrierStatus: status,
     retryAttempt: input.retryAttempt,
+    detail,
   };
   await db("tb_activity_logs").insert({
     actor_id: input.actorId,
@@ -557,7 +567,7 @@ export async function searchExitCandidateSessions(
   actor: AuthTokenPayload,
   requestedOrgId: number | undefined,
   candidateId: number,
-  plate: string
+  plate?: string
 ) {
   const orgId = resolveOrgIdRequired(actor, requestedOrgId);
   const candidate = await db<CandidateRow>("tb_exit_candidates")
@@ -565,21 +575,44 @@ export async function searchExitCandidateSessions(
     .first();
   if (!candidate) throw new ApiError("Chiqish nomzodi topilmadi", 404);
   if (candidate.status !== "pending") throw new ApiError("Bu chiqish allaqachon hal qilingan", 409);
-  const normalized = normalizePlate(plate);
-  if (!normalized) throw new ApiError("Davlat raqami kiritilishi kerak", 400);
-  const sessions = await sessionSummaryQuery().where({ org_id: orgId, status: "active" });
+  const now = new Date();
+  const activeSessions = await sessionSummaryQuery()
+    .where({ org_id: orgId, status: "active" })
+    .orderBy("entered_at", "asc")
+    .limit(30);
+  const active_sessions = await Promise.all(
+    activeSessions.map(async (session) => {
+      const durationMinutes = calculateDurationMinutes(new Date(session.entered_at), now);
+      return {
+        session_id: String(session.id),
+        plate_number: displayPlateNumber(session.plate_number),
+        entered_at: new Date(session.entered_at).toISOString(),
+        session_source: session.session_source,
+        duration_minutes: durationMinutes,
+        tariff_snapshot_amount: calculateTariffSnapshotAmount(session, durationMinutes) ?? 0,
+        entry_images: await entryImages(actor, session),
+      };
+    })
+  );
+  const normalized = plate ? normalizePlate(plate) : "";
+  if (!normalized) return { results: [], active_sessions };
+  const sessions = await sessionSummaryQuery()
+    .where({ org_id: orgId, status: "active" })
+    .whereNotNull("plate_number");
   const scored = sessions
-    .map((session) => ({ session, score: similarityScore(normalized, session.plate_number) }))
+    .map((session) => ({
+      session,
+      score: session.plate_number === null ? null : similarityScore(normalized, session.plate_number),
+    }))
     .filter((item): item is { session: SessionSummary; score: number } => item.score !== null)
     .sort((left, right) => right.score - left.score || left.session.id - right.session.id)
     .slice(0, 10);
-  const now = new Date();
-  return Promise.all(
+  const results = await Promise.all(
     scored.map(async ({ session, score }) => {
       const durationMinutes = calculateDurationMinutes(new Date(session.entered_at), now);
       return {
         session_id: String(session.id),
-        plate_number: session.plate_number,
+        plate_number: displayPlateNumber(session.plate_number),
         entered_at: new Date(session.entered_at).toISOString(),
         session_source: session.session_source,
         similarity_score: score,
@@ -589,6 +622,7 @@ export async function searchExitCandidateSessions(
       };
     })
   );
+  return { results, active_sessions };
 }
 
 export async function confirmExitCandidate(
@@ -605,6 +639,7 @@ export async function confirmExitCandidate(
       .first();
     if (!candidate) throw new ApiError("Chiqish nomzodi topilmadi", 404);
     if (candidate.status !== "pending") throw new ApiError("Bu chiqish allaqachon hal qilingan", 409);
+    await trx("tb_organizations").where({ id: orgId }).forUpdate().first();
     const selectedSessionId = input.sessionId ?? candidate.matched_session_id;
     if (!selectedSessionId) throw new ApiError("Sessiya tanlanmagan", 400);
     const session = await sessionSummaryQuery(trx)
@@ -703,14 +738,14 @@ export async function confirmExitCandidate(
   if (barrierStatus === "failed") {
     emitRelayFailed(orgId, {
       direction: "exit",
-      plateNumber: transactionResult.session.plate_number,
+      plateNumber: displayPlateNumber(transactionResult.session.plate_number),
       message: "Shlagbaum avtomatik ochilmadi, qo'lda oching",
     });
   }
   emitExitCompleted(orgId, {
     orgId,
     sessionId: transactionResult.session.id,
-    plateNumber: transactionResult.session.plate_number,
+    plateNumber: displayPlateNumber(transactionResult.session.plate_number),
     amount: transactionResult.session.amount,
     paymentMethod:
       transactionResult.session.session_source === "regular"

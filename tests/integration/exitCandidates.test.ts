@@ -36,6 +36,10 @@ vi.mock("@/websocket/socketServer", () => {
   const createMock = vi.fn as unknown as () => ReturnType<typeof vi.fn>;
   return {
     emitEntryDetected: createMock(),
+    emitEntryBarrierFailed: createMock(),
+    emitEntryCandidateCreated: createMock(),
+    emitEntryCandidateResolved: createMock(),
+    emitEntryCompleted: createMock(),
     emitParkingFull: createMock(),
     emitExitAwaitingPayment: createMock(),
     emitExitCompleted: createMock(),

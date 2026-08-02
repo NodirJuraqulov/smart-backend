@@ -8,7 +8,6 @@ import { resolveOrgIdFilter, resolveOrgIdRequired } from "@/utils/orgScope";
 import {
   emitEntryDetected,
   emitExitCompleted,
-  emitParkingFull,
   emitRelayFailed,
 } from "@/websocket/socketServer";
 import { BarrierStatus, openBarrier } from "@/modules/relay/relay.service";
@@ -19,7 +18,11 @@ import { NormalizedCameraEvent } from "@/modules/webhook/parsers/normalizedCamer
 import { resolveParkingImageAbsolutePath, saveParkingImages } from "./parkingImage.service";
 import { applyInsideSessionsFilter, INSIDE_SESSION_STATUSES } from "./sessionStatus";
 
-type SessionSource = "regular" | "subscription" | "vip";
+export type SessionSource = "regular" | "subscription" | "vip";
+
+export function displayPlateNumber(plateNumber: string | null | undefined): string {
+  return plateNumber || "Noma'lum";
+}
 
 export interface TariffIntervalSnapshot {
   from_minutes: number;
@@ -27,10 +30,10 @@ export interface TariffIntervalSnapshot {
   price: number | string;
 }
 
-interface SessionRecord {
+export interface SessionRecord {
   id: number;
   org_id: number;
-  plate_number: string;
+  plate_number: string | null;
   entered_at: Date;
   exited_at: Date | null;
   duration_minutes: number | null;
@@ -200,6 +203,7 @@ function withImageUrls(session: SessionRecord) {
   } = session;
   return {
     ...publicSession,
+    plate_number: displayPlateNumber(session.plate_number),
     entryOverviewImageUrl: imageUrl(session.id, "entry-overview", session.entry_overview_image_path),
     entryVehicleImageUrl: imageUrl(session.id, "entry-vehicle", session.entry_vehicle_image_path),
     entryPlateImageUrl: imageUrl(session.id, "entry-plate", session.entry_plate_image_path),
@@ -278,8 +282,8 @@ async function attachCameraImages(
   }
 }
 
-async function assertWithinWorkHours(orgId: number): Promise<void> {
-  const settings = await db("tb_settings")
+async function assertWithinWorkHours(orgId: number, executor: Knex = db): Promise<void> {
+  const settings = await executor("tb_settings")
     .select("work_hours_enabled", "work_start", "work_end")
     .where({ org_id: orgId })
     .first();
@@ -288,7 +292,7 @@ async function assertWithinWorkHours(orgId: number): Promise<void> {
     return;
   }
 
-  const organization = await db("tb_organizations").select("timezone").where({ id: orgId }).first();
+  const organization = await executor("tb_organizations").select("timezone").where({ id: orgId }).first();
   const now = DateTime.now().setZone(organization?.timezone);
   const nowMinutes = now.hour * 60 + now.minute;
 
@@ -299,23 +303,27 @@ async function assertWithinWorkHours(orgId: number): Promise<void> {
   }
 }
 
-async function assertCapacityAvailable(orgId: number): Promise<void> {
-  const organization = await db("tb_organizations").select("total_capacity").where({ id: orgId }).first();
+export async function hasAvailableCapacity(orgId: number, executor: Knex = db): Promise<boolean> {
+  const organization = await executor("tb_organizations").select("total_capacity").where({ id: orgId }).first();
   if (organization?.total_capacity === null || organization?.total_capacity === undefined) {
-    return;
+    return true;
   }
 
   const [{ count }] = await applyInsideSessionsFilter(
-    db("tb_parking_sessions").where({ org_id: orgId })
+    executor("tb_parking_sessions").where({ org_id: orgId })
   ).count<{ count: string }[]>("id as count");
 
-  if (Number(count) >= organization.total_capacity) {
+  return Number(count) < organization.total_capacity;
+}
+
+async function assertCapacityAvailable(orgId: number, executor: Knex = db): Promise<void> {
+  if (!(await hasAvailableCapacity(orgId, executor))) {
     throw new ApiError("Stoyanka to'liq, bo'sh joy yo'q", 400, { reason: "parking_full" });
   }
 }
 
-async function assertNoActiveSessionForPlate(orgId: number, plateNumber: string) {
-  const existing = await sessionsBaseQuery(db)
+async function assertNoActiveSessionForPlate(orgId: number, plateNumber: string, executor: Knex = db) {
+  const existing = await sessionsBaseQuery(executor)
     .where({ org_id: orgId, plate_number: plateNumber })
     .whereIn("status", [...INSIDE_SESSION_STATUSES])
     .first();
@@ -335,9 +343,9 @@ async function insertActiveSession(input: {
   tariff_price_per_hour: string | null;
   tariff_grace_period_minutes: number | null;
   tariff_intervals_snapshot: string | null;
-}) {
+}, executor: Knex = db) {
   try {
-    const [id] = await db("tb_parking_sessions").insert({
+    const [id] = await executor("tb_parking_sessions").insert({
       org_id: input.org_id,
       plate_number: input.plate_number,
       entered_at: input.entered_at,
@@ -351,10 +359,10 @@ async function insertActiveSession(input: {
       tariff_grace_period_minutes: input.tariff_grace_period_minutes,
       tariff_intervals_snapshot: input.tariff_intervals_snapshot,
     });
-    return await sessionsBaseQuery(db).where({ id }).first();
+    return await sessionsBaseQuery(executor).where({ id }).first();
   } catch (err) {
     if (isDuplicateKeyError(err)) {
-      const existing = await sessionsBaseQuery(db)
+      const existing = await sessionsBaseQuery(executor)
         .where({ org_id: input.org_id, plate_number: input.plate_number })
         .whereIn("status", [...INSIDE_SESSION_STATUSES])
         .first();
@@ -372,19 +380,19 @@ async function findTariff(executor: Knex, orgId: number) {
   return tariff;
 }
 
-async function getOrgToday(orgId: number): Promise<string> {
-  const organization = await db("tb_organizations").select("timezone").where({ id: orgId }).first();
+async function getOrgToday(orgId: number, executor: Knex = db): Promise<string> {
+  const organization = await executor("tb_organizations").select("timezone").where({ id: orgId }).first();
   return DateTime.now().setZone(organization?.timezone).toFormat("yyyy-MM-dd");
 }
 
-async function resolveSessionSource(orgId: number, plateNumber: string): Promise<SessionSource> {
-  const vip = await db("tb_vip_vehicles").where({ org_id: orgId, plate_number: plateNumber }).first();
+async function resolveSessionSource(orgId: number, plateNumber: string, executor: Knex = db): Promise<SessionSource> {
+  const vip = await executor("tb_vip_vehicles").where({ org_id: orgId, plate_number: plateNumber }).first();
   if (vip) {
     return "vip";
   }
 
-  const today = await getOrgToday(orgId);
-  const subscription = await db("tb_subscriptions")
+  const today = await getOrgToday(orgId, executor);
+  const subscription = await executor("tb_subscriptions")
     .where({ org_id: orgId, plate_number: plateNumber })
     .andWhere("end_date", ">=", today)
     .first();
@@ -416,18 +424,18 @@ interface EntryPricing {
   tariff_intervals_snapshot: string | null;
 }
 
-async function resolveEntryPricing(orgId: number, sessionSource: SessionSource): Promise<EntryPricing> {
+async function resolveEntryPricing(orgId: number, sessionSource: SessionSource, executor: Knex = db): Promise<EntryPricing> {
   if (sessionSource !== "regular") {
     return { tariff_price_per_hour: null, tariff_grace_period_minutes: null, tariff_intervals_snapshot: null };
   }
 
-  const organization = await db("tb_organizations")
+  const organization = await executor("tb_organizations")
     .select("pricing_mode")
     .where({ id: orgId })
     .first();
 
   if (organization?.pricing_mode === "interval") {
-    const intervals = await findTariffIntervals(db, orgId);
+    const intervals = await findTariffIntervals(executor, orgId);
     return {
       tariff_price_per_hour: null,
       tariff_grace_period_minutes: null,
@@ -435,7 +443,7 @@ async function resolveEntryPricing(orgId: number, sessionSource: SessionSource):
     };
   }
 
-  const tariff = await findTariff(db, orgId);
+  const tariff = await findTariff(executor, orgId);
   return {
     tariff_price_per_hour: tariff.price_per_hour,
     tariff_grace_period_minutes: tariff.grace_period_minutes,
@@ -554,6 +562,51 @@ async function completeSession(
   });
 }
 
+export async function createEntrySessionInTransaction(
+  trx: Knex.Transaction,
+  input: {
+    orgId: number;
+    plateNumber: string;
+    entryMethod: "auto" | "manual";
+    operatorId: number | null;
+    enteredAt: Date;
+    skipCapacity?: boolean;
+    skipWorkHours?: boolean;
+  }
+): Promise<SessionRecord> {
+  if (!input.skipWorkHours) await assertWithinWorkHours(input.orgId, trx);
+  if (!input.skipCapacity) await assertCapacityAvailable(input.orgId, trx);
+  const plateNumber = input.plateNumber;
+  if (!plateNumber) throw new ApiError("Davlat raqami kiritilishi kerak", 400);
+  await assertNoActiveSessionForPlate(input.orgId, plateNumber, trx);
+  const sessionSource = await resolveSessionSource(input.orgId, plateNumber, trx);
+  const pricing = await resolveEntryPricing(input.orgId, sessionSource, trx);
+  const session = await insertActiveSession(
+    {
+      org_id: input.orgId,
+      plate_number: plateNumber,
+      entry_method: input.entryMethod,
+      image_entry: null,
+      operator_id: input.operatorId,
+      entered_at: input.enteredAt,
+      session_source: sessionSource,
+      tariff_price_per_hour: pricing.tariff_price_per_hour,
+      tariff_grace_period_minutes: pricing.tariff_grace_period_minutes,
+      tariff_intervals_snapshot: pricing.tariff_intervals_snapshot,
+    },
+    trx
+  );
+  if (!session) throw new ApiError("Sessiya yaratilmadi", 500);
+  return session;
+}
+
+export async function attachWebhookEntryImages(
+  session: SessionRecord,
+  event: NormalizedCameraEvent
+): Promise<SessionRecord> {
+  return attachCameraImages(session, "entry", event);
+}
+
 export async function entryManual(
   actor: AuthTokenPayload,
   input: { org_id?: number; plate_number: string }
@@ -617,75 +670,26 @@ export async function exitManual(
     barrierStatus,
   });
 
-  return result;
+  return {
+    ...result,
+    session: { ...result.session, plate_number: displayPlateNumber(result.session.plate_number) },
+  };
 }
 
 async function openBarrierOrWarn(
   orgId: number,
   direction: "entry" | "exit",
-  plateNumber: string
+  plateNumber: string | null
 ): Promise<BarrierStatus> {
   const result = await openBarrier(orgId, direction);
   if (result.status === "failed") {
     emitRelayFailed(orgId, {
       direction,
-      plateNumber,
+      plateNumber: displayPlateNumber(plateNumber),
       message: "Shlagbaum avtomatik ochilmadi, qo'lda oching",
     });
   }
   return result.status;
-}
-
-interface CameraParkingInput {
-  orgId: number;
-  event: NormalizedCameraEvent & { plateNumber: string };
-}
-
-export async function createEntryFromWebhook(input: CameraParkingInput) {
-  const { orgId, event } = input;
-  const plateNumber = event.plateNumber;
-  try {
-    await assertWithinWorkHours(orgId);
-    await assertCapacityAvailable(orgId);
-    await assertNoActiveSessionForPlate(orgId, plateNumber);
-
-    const sessionSource = await resolveSessionSource(orgId, plateNumber);
-    const pricing = await resolveEntryPricing(orgId, sessionSource);
-
-    let session = await insertActiveSession({
-      org_id: orgId,
-      plate_number: plateNumber,
-      entry_method: "auto",
-      image_entry: null,
-      operator_id: null,
-      entered_at: new Date(),
-      session_source: sessionSource,
-      tariff_price_per_hour: pricing.tariff_price_per_hour,
-      tariff_grace_period_minutes: pricing.tariff_grace_period_minutes,
-      tariff_intervals_snapshot: pricing.tariff_intervals_snapshot,
-    });
-    session = await attachCameraImages(session!, "entry", event);
-
-    await openBarrierOrWarn(orgId, "entry", plateNumber);
-    emitEntryDetected(orgId, { plateNumber, enteredAt: session!.entered_at });
-    await logActivity(null, "parking.entry_webhook", "session", session!.id, { plateNumber, orgId });
-
-    return { created: true as const, session: withImageUrls(session), confidence: event.confidence };
-  } catch (err) {
-    if (err instanceof ApiError && err.details?.reason === "parking_full") {
-      emitParkingFull(orgId, { plateNumber });
-      return { created: false as const, reason: "parking_full" as const };
-    }
-    if (err instanceof ApiError && err.statusCode === 409) {
-      console.warn(`Webhook kirish: "${plateNumber}" mashinasi allaqachon stoyankada (org_id: ${orgId})`);
-      return { created: false as const, reason: "already_active" as const };
-    }
-    if (err instanceof ApiError) {
-      console.warn(`Webhook kirish rad etildi (org_id: ${orgId}, plate: ${plateNumber}): ${err.message}`);
-      return { created: false as const, reason: "rejected" as const };
-    }
-    throw err;
-  }
 }
 
 export async function listActive(actor: AuthTokenPayload, requestedOrgId?: number) {
@@ -812,7 +816,7 @@ export async function printReceiptForSession(actor: AuthTokenPayload, id: number
 
   const success = await printReceipt(organization.printer_ip, {
     orgName: organization.name,
-    plateNumber: session.plate_number,
+    plateNumber: displayPlateNumber(session.plate_number),
     enteredAt: new Date(session.entered_at),
     exitedAt: session.exited_at ? new Date(session.exited_at) : new Date(),
     durationMinutes: session.duration_minutes ?? 0,
@@ -907,19 +911,22 @@ export async function confirmCashPayment(actor: AuthTokenPayload, id: number) {
   emitExitCompleted(result.session.org_id, {
     orgId: result.session.org_id,
     sessionId: result.session.id,
-    plateNumber: result.session.plate_number,
+    plateNumber: displayPlateNumber(result.session.plate_number),
     amount: Number(result.session.amount),
     paymentMethod: "cash",
     barrierStatus,
   });
 
   await logActivity(actor.id, "parking.cash_payment_confirmed", "session", id, {
-    plateNumber: result.session.plate_number,
+    plateNumber: displayPlateNumber(result.session.plate_number),
     amount: Number(result.session.amount),
     actorId: actor.id,
   });
 
-  return result;
+  return {
+    ...result,
+    session: { ...result.session, plate_number: displayPlateNumber(result.session.plate_number) },
+  };
 }
 
 export async function updateSessionPaymentMethod(
@@ -936,7 +943,8 @@ export async function updateSessionPaymentMethod(
 
   await db("tb_parking_sessions").where({ id }).update({ payment_method: paymentMethod });
 
-  return sessionsBaseQuery(db).where({ id }).first();
+  const updated = await sessionsBaseQuery(db).where({ id }).first();
+  return updated ? { ...updated, plate_number: displayPlateNumber(updated.plate_number) } : updated;
 }
 
 export async function forceCloseSession(
@@ -1045,7 +1053,7 @@ export async function forceCloseSession(
   });
 
   const orgId = result.session!.org_id;
-  const plateNumber = result.session!.plate_number;
+  const plateNumber = displayPlateNumber(result.session!.plate_number);
 
   const barrierStatus = await openBarrierOrWarn(orgId, "exit", plateNumber);
 
@@ -1063,7 +1071,12 @@ export async function forceCloseSession(
     barrierStatus,
   });
 
-  return result;
+  return {
+    ...result,
+    session: result.session
+      ? { ...result.session, plate_number: displayPlateNumber(result.session.plate_number) }
+      : result.session,
+  };
 }
 
 export async function getCapacity(actor: AuthTokenPayload, requestedOrgId?: number) {

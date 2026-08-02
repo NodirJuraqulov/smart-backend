@@ -6,6 +6,7 @@ const validConfig = {
   corsOrigin: "https://app.stoyanka.uz",
   dbPassword: "Kuchli-Tasodifiy-Parol-2026",
   publicBaseUrl: "http://195.158.9.168:84",
+  encryptionKey: "a".repeat(64),
 };
 
 describe("stripTrailingSlashes", () => {
@@ -45,7 +46,8 @@ describe("collectProductionSafetyErrors — PUBLIC_BASE_URL", () => {
       corsOrigin: "*",
       dbPassword: "",
       publicBaseUrl: undefined,
+      encryptionKey: "",
     });
-    expect(errors).toHaveLength(4);
+    expect(errors).toHaveLength(5);
   });
 });

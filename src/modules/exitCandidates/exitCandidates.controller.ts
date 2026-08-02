@@ -48,11 +48,11 @@ export async function searchHandler(req: Request, res: Response) {
   if (id === null) return;
   const orgId = requestScope(req, res);
   if (orgId === null) return;
-  if (typeof req.body?.plate !== "string" || !req.body.plate.trim()) {
-    res.status(400).json({ message: "plate majburiy" });
+  if (req.body?.plate !== undefined && typeof req.body.plate !== "string") {
+    res.status(400).json({ message: "plate matn bo'lishi kerak" });
     return;
   }
-  res.json({ results: await service.searchExitCandidateSessions(req.user!, orgId, id, req.body.plate) });
+  res.json(await service.searchExitCandidateSessions(req.user!, orgId, id, req.body?.plate));
 }
 
 function parseSessionId(req: Request, res: Response): number | undefined | null {

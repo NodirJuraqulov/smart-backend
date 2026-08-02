@@ -43,6 +43,39 @@ export interface ExitCompletedPayload {
   barrierStatus: ExitBarrierStatus;
 }
 
+export interface EntryCandidateCreatedPayload {
+  candidateId: number;
+  orgId: number;
+  detectedPlate: string | null;
+  cameraEventAt: string;
+  confidence: number | null;
+  entryImages: {
+    overviewUrl: string | null;
+    vehicleUrl: string | null;
+    imageAvailable: boolean;
+  };
+}
+
+export interface EntryCandidateResolvedPayload {
+  candidateId: number;
+  orgId: number;
+  status: "accepted" | "declined" | "expired";
+  sessionId: number | null;
+  barrierStatus: ExitBarrierStatus | null;
+}
+
+export interface EntryCompletedPayload {
+  sessionId: number;
+  plateNumber: string;
+  barrierStatus: ExitBarrierStatus;
+}
+
+export interface EntryBarrierFailedPayload {
+  sessionId: number;
+  plateNumber: string;
+  detail: string;
+}
+
 async function authenticate(socket: Socket): Promise<AuthTokenPayload> {
   const token = socket.handshake.auth?.token as string | undefined;
   if (!token) {
@@ -129,6 +162,23 @@ export function getIO(): SocketIOServer | null {
 export function emitEntryDetected(orgId: number, payload: unknown): void {
   getIO()?.to(`org_${orgId}`).emit("entry_detected", payload);
   getIO()?.to(`public:org:${orgId}`).emit("entry_detected", payload);
+}
+
+export function emitEntryCompleted(orgId: number, payload: EntryCompletedPayload): void {
+  getIO()?.to(`org_${orgId}`).emit("entry_completed", payload);
+  getIO()?.to(`public:org:${orgId}`).emit("entry_completed", payload);
+}
+
+export function emitEntryBarrierFailed(orgId: number, payload: EntryBarrierFailedPayload): void {
+  getIO()?.to(`org_${orgId}`).emit("entry_barrier_failed", payload);
+}
+
+export function emitEntryCandidateCreated(orgId: number, payload: EntryCandidateCreatedPayload): void {
+  getIO()?.to(`org_${orgId}`).emit("entry_candidate_created", payload);
+}
+
+export function emitEntryCandidateResolved(orgId: number, payload: EntryCandidateResolvedPayload): void {
+  getIO()?.to(`org_${orgId}`).emit("entry_candidate_resolved", payload);
 }
 
 export function emitParkingFull(orgId: number, payload: unknown): void {

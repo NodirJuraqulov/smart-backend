@@ -1,13 +1,10 @@
+import http from "http";
+import { AddressInfo } from "net";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { db } from "@/config/db";
 import { openBarrier } from "@/modules/relay/relay.service";
-import {
-  assertTestDatabase,
-  cleanupOrganization,
-  closeDb,
-  createTestOrganization,
-  createTestSettings,
-} from "./helpers";
+import { encryptSecret } from "@/utils/encryption";
+import { assertTestDatabase, cleanupOrganization, closeDb, createTestOrganization } from "./helpers";
 
 let orgId: number;
 
@@ -20,37 +17,44 @@ afterEach(async () => {
 
 afterAll(closeDb);
 
-describe("openBarrier konfiguratsiyasi", () => {
-  it("disabled holatda fetchsiz disabled qaytaradi", async () => {
+describe("Dahua camera relay konfiguratsiyasi", () => {
+  it("host konfiguratsiya qilinmagan exit relay uchun fetchsiz not_configured qaytaradi", async () => {
     orgId = await createTestOrganization();
-    await createTestSettings(orgId, { barrier_enabled: false });
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
-    expect(await openBarrier(orgId, "entry")).toEqual({ status: "disabled", success: false });
+    expect(await openBarrier(orgId, "exit")).toMatchObject({ status: "not_configured", success: false });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("yoqilgan, ammo direction IP yo'q bo'lsa fetchsiz not_configured qaytaradi", async () => {
+  it("konfiguratsiya qilingan exit relayga Digest authentication bilan haqiqiy HTTP so'rov yuboradi", async () => {
     orgId = await createTestOrganization();
-    await createTestSettings(orgId, { barrier_enabled: true });
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-    expect(await openBarrier(orgId, "exit")).toEqual({ status: "not_configured", success: false });
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it("entry/exit IP va barrier_open_seconds ni ishlatadi", async () => {
-    orgId = await createTestOrganization();
-    await createTestSettings(orgId, { barrier_enabled: true, barrier_open_seconds: 7 });
-    await db("tb_organizations").where({ id: orgId }).update({
-      relay_entry_ip: "192.168.1.10",
-      relay_exit_ip: "192.168.1.11",
+    let authenticatedRequest = false;
+    const relayServer = http.createServer((req, res) => {
+      if (!req.headers.authorization) {
+        res.statusCode = 401;
+        res.setHeader("WWW-Authenticate", 'Digest realm="Dahua", nonce="abc123", qop="auth", algorithm=MD5');
+        res.end();
+        return;
+      }
+      authenticatedRequest = /^Digest /.test(req.headers.authorization);
+      res.statusCode = 200;
+      res.end("OK");
     });
-    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
-    vi.stubGlobal("fetch", fetchMock);
-    expect(await openBarrier(orgId, "entry")).toMatchObject({ status: "opened" });
-    expect(await openBarrier(orgId, "exit")).toMatchObject({ status: "opened" });
-    expect(fetchMock.mock.calls[0][0]).toContain("192.168.1.10/relay/0?turn=on&timer=7");
-    expect(fetchMock.mock.calls[1][0]).toContain("192.168.1.11/relay/0?turn=on&timer=7");
+    await new Promise<void>((resolve) => relayServer.listen(0, "127.0.0.1", resolve));
+    const port = (relayServer.address() as AddressInfo).port;
+    await db("tb_organizations").where({ id: orgId }).update({
+      exit_camera_relay_host: "127.0.0.1",
+      exit_camera_relay_port: port,
+      exit_camera_relay_username: "admin",
+      exit_camera_relay_password_encrypted: encryptSecret("secret"),
+      exit_camera_relay_channel: 2,
+    });
+    try {
+      const result = await openBarrier(orgId, "exit");
+      expect(result).toMatchObject({ status: "opened", success: true });
+      expect(authenticatedRequest).toBe(true);
+    } finally {
+      await new Promise<void>((resolve, reject) => relayServer.close((err) => (err ? reject(err) : resolve())));
+    }
   });
 });

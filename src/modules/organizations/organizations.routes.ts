@@ -14,7 +14,6 @@ import {
   pricingModeHandler,
   printerTestHandler,
   regenerateWebhookTokenHandler,
-  relayTestHandler,
   statsHandler,
   updateHandler,
   updateIntegrationSettingsHandler,
@@ -32,7 +31,6 @@ router.get("/:id/stats", asyncHandler(statsHandler));
 router.put("/:id/pricing-mode", asyncHandler(pricingModeHandler));
 router.put("/:id/capacity", asyncHandler(capacityHandler));
 router.post("/:id/operator", asyncHandler(addOperatorHandler));
-router.post("/:id/relay/test", asyncHandler(relayTestHandler));
 router.post("/:id/printer/test", asyncHandler(printerTestHandler));
 router.get("/:id/integration-settings", asyncHandler(getIntegrationSettingsHandler));
 router.put("/:id/integration-settings", asyncHandler(updateIntegrationSettingsHandler));

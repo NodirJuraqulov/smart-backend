@@ -20,6 +20,9 @@ Keyin quyidagi qiymatlarni **haqiqiy** ma'lumotlar bilan to'ldiring.
 # JWT_SECRET (64 bayt = 128 hex belgi)
 node -e "console.log(require('crypto').randomBytes(64).toString('hex'))"
 
+# ENCRYPTION_KEY (32 bayt = 64 hex belgi)
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+
 # DB_PASSWORD (kuchli, tasodifiy parol)
 node -e "console.log(require('crypto').randomBytes(24).toString('base64'))"
 ```
@@ -31,13 +34,14 @@ Har birini `.env`dagi mos o'zgaruvchiga qo'ying:
 | `DB_HOST`/`DB_PORT`/`DB_NAME`/`DB_USER` | Production MySQL server ma'lumotlari |
 | `DB_PASSWORD` | Yuqoridagi generatsiya qilingan parol |
 | `JWT_SECRET` | Yuqoridagi generatsiya qilingan hex string |
+| `ENCRYPTION_KEY` | Yuqoridagi 32 baytli generatsiya qilingan hex string |
 | `CORS_ORIGIN` | Frontend production domeni, masalan `https://app.stoyanka.uz` |
 | `PUBLIC_BASE_URL` | Serverning tashqi manzili — protokol + host + (agar standart bo'lmasa) port, oxirida `/` BO'LMASIN. Nginx orqasida bo'lsangiz ham HAQIQIY tashqi manzilni yozing (masalan `http://195.158.9.168:84`), Nginx qanday port ochganidan qat'iy nazar — bu qiymat kameraga/Payme/Click'ga ko'rsatiladigan webhook URL'larini generatsiya qilish uchun ishlatiladi va hech qachon so'rov sarlavhalaridan (Host) avtomatik aniqlanmaydi |
 | `PAYME_ENABLED`/`CLICK_ENABLED` | Haqiqiy Payme/Click integratsiyasi ulanmaguncha `false` qoldiring |
 
-Rele, printer, kamera IP manzillari va webhook tokeni `.env`da EMAS — har bir
-tashkilot uchun bazada saqlanadi va `PUT /api/admin/organizations/:id/integration-settings`
-orqali sozlanadi.
+Printer, kamera va webhook sozlamalari `.env`da EMAS — har bir tashkilot uchun
+bazada saqlanadi. Kamera relay credentiallari
+`PATCH /api/organizations/:id/camera-relay-settings` orqali sozlanadi.
 
 ## 2. Startup xavfsizlik tekshiruvi
 
@@ -50,6 +54,7 @@ avtomatik tekshiradi va MOS KELMASA serverni **ishga tushirishdan oldin**
 - `DB_PASSWORD` bo'sh, 8 belgidan qisqa, yoki oddiy parollar ro'yxatida
   (`password`, `123456`, `admin` va h.k.)
 - `PUBLIC_BASE_URL` belgilanmagan yoki noto'g'ri URL formatida
+- `ENCRYPTION_KEY` 32 baytli hex yoki base64 qiymat bo'lmasa
 
 Bu — birov tasodifan dev `.env`ni production serverga ko'chirib qo'ymasligi
 uchun so'nggi xavfsizlik to'sig'i. Agar server shu sabab bilan to'xtasa,

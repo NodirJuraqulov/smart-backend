@@ -1,18 +1,19 @@
 import http from "http";
 import express from "express";
 import request from "supertest";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, type MockedFunction, vi } from "vitest";
 import { db } from "@/config/db";
 import webhookRouter from "@/modules/webhook/webhook.routes";
 import { clearWebhookDedupeCache } from "@/modules/webhook/webhookIdempotency";
 import {
   emitEntryDetected,
+  emitEntryBarrierFailed,
+  emitEntryCandidateCreated,
   emitExitAwaitingPayment,
   emitExitCompleted,
   emitExitCandidateCreated,
   emitParkingFull,
   emitPlateNotRecognizedForExit,
-  emitRelayFailed,
   emitWebhookParseFailed,
 } from "@/websocket/socketServer";
 import { openBarrier } from "@/modules/relay/relay.service";
@@ -30,6 +31,10 @@ import {
 
 vi.mock("@/websocket/socketServer", () => ({
   emitEntryDetected: vi.fn(),
+  emitEntryBarrierFailed: vi.fn(),
+  emitEntryCandidateCreated: vi.fn(),
+  emitEntryCandidateResolved: vi.fn(),
+  emitEntryCompleted: vi.fn(),
   emitParkingFull: vi.fn(),
   emitExitAwaitingPayment: vi.fn(),
   emitExitCompleted: vi.fn(),
@@ -43,6 +48,8 @@ vi.mock("@/websocket/socketServer", () => ({
 vi.mock("@/modules/relay/relay.service", () => ({
   openBarrier: vi.fn().mockResolvedValue({ status: "opened", success: true }),
 }));
+
+const openBarrierMock = openBarrier as MockedFunction<typeof openBarrier>;
 
 let orgId: number;
 let webhookToken: string;
@@ -73,6 +80,13 @@ async function postWebhook(
     .post(`/api/webhook/hikvision/${token}/${direction}`)
     .set("Content-Type", contentType)
     .send(rawBody);
+}
+
+async function postMalformedWebhook() {
+  return request(server)
+    .post(`/api/webhook/hikvision/${webhookToken}/entry`)
+    .set("Content-Type", "text/plain")
+    .send(Buffer.from("bu hikvision formatida emas"));
 }
 
 async function activeSessionCount(): Promise<number> {
@@ -125,14 +139,17 @@ describe("Kirish webhook", () => {
     expect(openBarrier).toHaveBeenCalledWith(orgId, "entry");
   });
 
-  it("rele xato qaytarsa — sessiya baribir yaratiladi, relay_failed eventi yuboriladi", async () => {
-    vi.mocked(openBarrier).mockResolvedValueOnce({ status: "failed", success: false });
+  it("rele xato qaytarsa — sessiya baribir yaratiladi, entry_barrier_failed eventi yuboriladi", async () => {
+    openBarrierMock.mockResolvedValueOnce({ status: "failed", success: false });
 
     const res = await postWebhook("entry", "01A112AA");
 
     expect(res.status).toBe(200);
     expect(await activeSessionCount()).toBe(1);
-    expect(emitRelayFailed).toHaveBeenCalledWith(orgId, expect.objectContaining({ direction: "entry" }));
+    expect(emitEntryBarrierFailed).toHaveBeenCalledWith(
+      orgId,
+      expect.objectContaining({ plateNumber: "01A112AA" })
+    );
   });
 
   it("sig'im to'liq bo'lsa — sessiya yaratilmaydi, parking_full eventi yuboriladi", async () => {
@@ -145,6 +162,10 @@ describe("Kirish webhook", () => {
     expect(res.status).toBe(200);
     expect(await activeSessionCount()).toBe(1);
     expect(emitParkingFull).toHaveBeenCalledWith(orgId, expect.objectContaining({ plateNumber: "01A333AA" }));
+    expect(emitEntryCandidateCreated).toHaveBeenCalledWith(
+      orgId,
+      expect.objectContaining({ detectedPlate: "01A333AA" })
+    );
   });
 
   it("mashina allaqachon ichkarida bo'lsa — yangi sessiya yaratilmaydi", async () => {
@@ -187,7 +208,8 @@ describe("Chiqish webhook", () => {
 
     expect(res.status).toBe(200);
     expect(await activeSessionCount()).toBe(0);
-    expect(await db("tb_exit_candidates").where({ org_id: orgId }).first()).toMatchObject({
+    const unmatchedCandidate = await db("tb_exit_candidates").where({ org_id: orgId }).first();
+    expect(unmatchedCandidate).toMatchObject({
       status: "pending",
       detected_plate: "01A666AA",
       matched_session_id: null,
@@ -207,7 +229,8 @@ describe("Chiqish webhook", () => {
     const session = await db("tb_parking_sessions").where({ org_id: orgId, plate_number: "01A777AA" }).first();
     expect(session.status).toBe("active");
     expect(session.exited_at).toBeNull();
-    expect(await db("tb_exit_candidates").where({ matched_session_id: session.id }).first()).toBeTruthy();
+    const candidate = await db("tb_exit_candidates").where({ matched_session_id: session.id }).first();
+    expect(candidate).toBeTruthy();
     expect(emitExitCompleted).not.toHaveBeenCalled();
     expect(emitExitAwaitingPayment).not.toHaveBeenCalled();
     expect(openBarrier).not.toHaveBeenCalledWith(orgId, "exit");
@@ -225,7 +248,8 @@ describe("Chiqish webhook", () => {
     const session = await db("tb_parking_sessions").where({ org_id: orgId, plate_number: "01A888AA" }).first();
     expect(session.status).toBe("active");
     expect(session.exited_at).toBeNull();
-    expect(await db("tb_exit_candidates").where({ matched_session_id: session.id }).first()).toBeTruthy();
+    const candidate = await db("tb_exit_candidates").where({ matched_session_id: session.id }).first();
+    expect(candidate).toBeTruthy();
   });
 });
 
@@ -265,12 +289,13 @@ describe("Shared gate cross-camera guard", () => {
 
   it("guard tugagach haqiqiy exit normal ishlaydi", async () => {
     await postWebhook("entry", "01A124BC");
+    const outsideGuardAt = new Date("2020-01-01T00:00:00.000Z");
     await db("tb_webhook_events")
       .where({ org_id: orgId, plate_number: "01A124BC", direction: "entry" })
       .update({
         camera_event_at: null,
-        created_at: new Date(Date.now() - 92_000),
-        processed_at: new Date(Date.now() - 92_000),
+        created_at: outsideGuardAt,
+        processed_at: outsideGuardAt,
       });
 
     const exit = await postWebhook("exit", "01A124BC");
@@ -280,11 +305,12 @@ describe("Shared gate cross-camera guard", () => {
       .first();
     expect(session.status).toBe("active");
     expect(session.exited_at).toBeNull();
-    expect(await db("tb_exit_candidates").where({ matched_session_id: session.id }).first()).toBeTruthy();
+    const candidate = await db("tb_exit_candidates").where({ matched_session_id: session.id }).first();
+    expect(candidate).toBeTruthy();
   });
 
   it("exit dan keyingi entry echo ham simmetrik ignored bo'ladi", async () => {
-    await createTestActiveSession(orgId, "01A125BC", new Date(Date.now() - 120_000));
+    await createTestActiveSession(orgId, "01A125BC", new Date("2020-01-01T00:00:00.000Z"));
     await postWebhook("exit", "01A125BC");
     vi.clearAllMocks();
 
@@ -310,7 +336,8 @@ describe("Shared gate cross-camera guard", () => {
       .where({ org_id: orgId, plate_number: "01A126BC" })
       .first();
     expect(session.status).toBe("active");
-    expect(await db("tb_exit_candidates").where({ matched_session_id: session.id }).first()).toBeTruthy();
+    const candidate = await db("tb_exit_candidates").where({ matched_session_id: session.id }).first();
+    expect(candidate).toBeTruthy();
   });
 
   it("boshqa org va boshqa plate hodisalari guard bilan aralashmaydi", async () => {
@@ -366,10 +393,7 @@ describe("Idempotentlik", () => {
 
 describe("Webhook parse xatosi", () => {
   it("notanish format kelganda — webhook_parse_failed eventi org va public xonalariga yuboriladi", async () => {
-    const res = await request(server)
-      .post(`/api/webhook/hikvision/${webhookToken}/entry`)
-      .set("Content-Type", "text/plain")
-      .send(Buffer.from("bu hikvision formatida emas"));
+    const res = await postMalformedWebhook();
 
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ ok: true, parsed: false });
