@@ -8,6 +8,18 @@ import { assertTestDatabase, cleanupOrganization, closeDb, createTestOrganizatio
 
 let orgId: number;
 
+async function readRpcBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+}
+
+function sendRpc(res: http.ServerResponse, body: Record<string, unknown>): void {
+  res.statusCode = 200;
+  res.setHeader("Content-Type", "application/json");
+  res.end(JSON.stringify(body));
+}
+
 beforeAll(assertTestDatabase);
 
 afterEach(async () => {
@@ -26,19 +38,25 @@ describe("Dahua camera relay konfiguratsiyasi", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("konfiguratsiya qilingan exit relayga Digest authentication bilan haqiqiy HTTP so'rov yuboradi", async () => {
+  it("konfiguratsiya qilingan exit relayga RPC2 login va openStrobe so'rovlarini yuboradi", async () => {
     orgId = await createTestOrganization();
-    let authenticatedRequest = false;
-    const relayServer = http.createServer((req, res) => {
-      if (!req.headers.authorization) {
-        res.statusCode = 401;
-        res.setHeader("WWW-Authenticate", 'Digest realm="Dahua", nonce="abc123", qop="auth", algorithm=MD5');
-        res.end();
+    const requests: Record<string, unknown>[] = [];
+    const relayServer = http.createServer(async (req, res) => {
+      const body = await readRpcBody(req);
+      requests.push(body);
+      if (body.id === 1) {
+        sendRpc(res, {
+          result: false,
+          params: { random: "ABC123", realm: "Dahua", encryption: "Default" },
+          session: "temporary-session",
+        });
         return;
       }
-      authenticatedRequest = /^Digest /.test(req.headers.authorization);
-      res.statusCode = 200;
-      res.end("OK");
+      if (body.id === 2) {
+        sendRpc(res, { result: true, session: "authenticated-session" });
+        return;
+      }
+      sendRpc(res, { result: true });
     });
     await new Promise<void>((resolve) => relayServer.listen(0, "127.0.0.1", resolve));
     const port = (relayServer.address() as AddressInfo).port;
@@ -52,7 +70,15 @@ describe("Dahua camera relay konfiguratsiyasi", () => {
     try {
       const result = await openBarrier(orgId, "exit");
       expect(result).toMatchObject({ status: "opened", success: true });
-      expect(authenticatedRequest).toBe(true);
+      expect(requests).toHaveLength(3);
+      expect(requests[0]).toMatchObject({ method: "global.login", id: 1 });
+      expect(requests[1]).toMatchObject({ method: "global.login", id: 2, session: "temporary-session" });
+      expect(requests[2]).toEqual({
+        method: "trafficSnap.openStrobe",
+        params: { info: { openType: "Test", plateNumber: "" } },
+        id: 3,
+        session: "authenticated-session",
+      });
     } finally {
       await new Promise<void>((resolve, reject) => relayServer.close((err) => (err ? reject(err) : resolve())));
     }

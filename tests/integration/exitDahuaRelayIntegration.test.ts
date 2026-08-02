@@ -21,6 +21,18 @@ let orgId: number;
 let actor: AuthTokenPayload;
 let app: express.Express;
 
+async function readRpcBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+}
+
+function sendRpc(res: http.ServerResponse, body: Record<string, unknown>): void {
+  res.statusCode = 200;
+  res.setHeader("Content-Type", "application/json");
+  res.end(JSON.stringify(body));
+}
+
 async function createCandidate(plate: string) {
   const [sessionId] = await db("tb_parking_sessions").insert({
     org_id: orgId,
@@ -86,18 +98,24 @@ describe("exit candidate Dahua relay integration", () => {
     expect((await db("tb_parking_sessions").where({ id: candidate.sessionId }).first()).status).toBe("completed");
   });
 
-  it("host konfiguratsiya qilingan confirm Digest relayni haqiqiy HTTP stub orqali chaqiradi", async () => {
-    let authenticatedRequest = false;
-    const relayServer = http.createServer((req, res) => {
-      if (!req.headers.authorization) {
-        res.statusCode = 401;
-        res.setHeader("WWW-Authenticate", 'Digest realm="Dahua", nonce="exit123", qop="auth", algorithm=MD5');
-        res.end();
+  it("host konfiguratsiya qilingan confirm RPC2 relayni haqiqiy HTTP stub orqali chaqiradi", async () => {
+    const requests: Record<string, unknown>[] = [];
+    const relayServer = http.createServer(async (req, res) => {
+      const body = await readRpcBody(req);
+      requests.push(body);
+      if (body.id === 1) {
+        sendRpc(res, {
+          result: false,
+          params: { random: "EXIT123", realm: "Dahua", encryption: "Default" },
+          session: "temporary-exit-session",
+        });
         return;
       }
-      authenticatedRequest = /^Digest /.test(req.headers.authorization);
-      res.statusCode = 200;
-      res.end("OK");
+      if (body.id === 2) {
+        sendRpc(res, { result: true, session: "authenticated-exit-session" });
+        return;
+      }
+      sendRpc(res, { result: true });
     });
     await new Promise<void>((resolve) => relayServer.listen(0, "127.0.0.1", resolve));
     const port = (relayServer.address() as AddressInfo).port;
@@ -116,7 +134,15 @@ describe("exit candidate Dahua relay integration", () => {
         .send({ payment_method: "cash" });
       expect(response.status).toBe(200);
       expect(response.body.barrier_status).toBe("opened");
-      expect(authenticatedRequest).toBe(true);
+      expect(requests.map((item) => item.method)).toEqual([
+        "global.login",
+        "global.login",
+        "trafficSnap.openStrobe",
+      ]);
+      expect(requests[2]).toMatchObject({
+        params: { info: { openType: "Test", plateNumber: "" } },
+        session: "authenticated-exit-session",
+      });
     } finally {
       await new Promise<void>((resolve, reject) => relayServer.close((err) => (err ? reject(err) : resolve())));
     }
