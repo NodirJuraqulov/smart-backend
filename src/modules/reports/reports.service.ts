@@ -59,7 +59,7 @@ function regularPaymentsQuery(orgId: number, start: Date, end: Date) {
     .select(
       "tb_payments.paid_at as paid_at",
       "tb_payments.amount as amount",
-      "tb_parking_sessions.payment_method as payment_method"
+      "tb_payments.payment_method as payment_method"
     );
 }
 
@@ -435,10 +435,10 @@ async function getRangeReport(
       .whereBetween("tb_payments.paid_at", [startDate, endDate])
       .select(
         db.raw("DATE_FORMAT(tb_payments.paid_at, ?) as bucket", [format]),
-        "tb_parking_sessions.payment_method"
+        "tb_payments.payment_method"
       )
       .sum<GroupedPaymentRow[]>("tb_payments.amount as total")
-      .groupBy("bucket", "tb_parking_sessions.payment_method"),
+      .groupBy("bucket", "tb_payments.payment_method"),
     db<SubscriptionRangeRow>("tb_subscriptions")
       .where({ org_id: orgId })
       .andWhere((builder) => {

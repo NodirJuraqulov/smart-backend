@@ -44,6 +44,8 @@ vi.mock("@/websocket/socketServer", () => ({
   emitExitCandidateCreated: vi.fn(),
   emitExitCandidateResolved: vi.fn(),
   emitPlateNotRecognizedForExit: vi.fn(),
+  emitPublicEntryStatusChanged: vi.fn(),
+  emitPublicExitStatusChanged: vi.fn(),
   emitRelayFailed: vi.fn(),
   emitWebhookParseFailed: vi.fn(),
 }));
@@ -53,6 +55,24 @@ let orgId: number;
 let otherOrgId: number;
 let token: string;
 let owner: AuthTokenPayload;
+
+interface EntryCandidateRow {
+  id: number;
+  detected_plate: string | null;
+  status: string;
+}
+
+interface EntrySessionRow {
+  id: number;
+  status: string;
+}
+
+interface CameraRelayPasswordRow {
+  entry_camera_relay_password_encrypted: string | null;
+}
+
+const testDb: typeof db = db;
+const testRequest: typeof request = request;
 
 function buildHikvisionBody(plate: string) {
   const boundary = `Boundary${Math.random().toString(36).slice(2)}`;
@@ -67,7 +87,7 @@ function buildHikvisionBody(plate: string) {
   };
 }
 
-function authHeader(actor = owner) {
+function authHeader(actor = owner): string {
   return `Bearer ${signAccessToken(actor)}`;
 }
 
@@ -79,8 +99,12 @@ async function postEntry(plate: string) {
     .send(payload.body);
 }
 
-async function pendingCandidate() {
-  return db("tb_entry_candidates").where({ org_id: orgId, status: "pending" }).first();
+async function pendingCandidate(): Promise<EntryCandidateRow> {
+  const candidate = await testDb<EntryCandidateRow>("tb_entry_candidates")
+    .where({ org_id: orgId, status: "pending" })
+    .first();
+  if (!candidate) throw new Error("Pending entry candidate topilmadi");
+  return candidate;
 }
 
 beforeAll(async () => {
@@ -137,8 +161,11 @@ describe("entry capacity va candidate workflow", () => {
     await setOrgCapacity(orgId, 2);
     vi.mocked(openBarrier).mockResolvedValueOnce({ status: "failed", success: false, detail: "timeout" });
     await postEntry("01E101AA");
-    const session = await db("tb_parking_sessions").where({ org_id: orgId, plate_number: "01E101AA" }).first();
-    const audit = await db("tb_activity_logs")
+    const session = await testDb<EntrySessionRow>("tb_parking_sessions")
+      .where({ org_id: orgId, plate_number: "01E101AA" })
+      .first();
+    if (!session) throw new Error("Entry session topilmadi");
+    const audit = await testDb("tb_activity_logs")
       .where({ target_type: "session", target_id: session.id, action: "parking.entry_barrier_open_failed" })
       .first();
     expect(session.status).toBe("active");
@@ -152,7 +179,7 @@ describe("entry capacity va candidate workflow", () => {
   it("parking to'lsa sessiyasiz pending candidate yaratadi va relay chaqirmaydi", async () => {
     await setOrgCapacity(orgId, 0);
     await postEntry("01E102AA");
-    const candidate = await pendingCandidate();
+    const candidate: EntryCandidateRow = await pendingCandidate();
     expect(await db("tb_parking_sessions").where({ org_id: orgId }).first()).toBeUndefined();
     expect(candidate).toMatchObject({ detected_plate: "01E102AA", status: "pending" });
     expect(openBarrier).not.toHaveBeenCalled();
@@ -166,7 +193,7 @@ describe("entry capacity va candidate workflow", () => {
     await setOrgCapacity(orgId, 0);
     await postEntry("01E103AA");
     const candidate = await pendingCandidate();
-    const response = await request(server)
+    const response = await testRequest(server)
       .post(`/api/entry-candidates/${candidate.id}/accept`)
       .set("Authorization", authHeader())
       .send({ plate_number: "01E103AA" });
@@ -203,8 +230,8 @@ describe("entry capacity va candidate workflow", () => {
   it("decline sessiya va relay yaratmaydi, candidate va auditni yangilaydi", async () => {
     await setOrgCapacity(orgId, 0);
     await postEntry("01E105AA");
-    const candidate = await pendingCandidate();
-    const response = await request(server)
+    const candidate: EntryCandidateRow = await pendingCandidate();
+    const response = await testRequest(server)
       .post(`/api/entry-candidates/${candidate.id}/decline`)
       .set("Authorization", authHeader())
       .send({ note: "Joy berilmadi" });
@@ -225,7 +252,7 @@ describe("entry capacity va candidate workflow", () => {
   it("hal qilingan candidate ikkinchi accept yoki decline uchun 409 qaytaradi", async () => {
     await setOrgCapacity(orgId, 0);
     await postEntry("01E106AA");
-    const candidate = await pendingCandidate();
+    const candidate: EntryCandidateRow = await pendingCandidate();
     await request(server)
       .post(`/api/entry-candidates/${candidate.id}/decline`)
       .set("Authorization", authHeader())
@@ -312,12 +339,19 @@ describe("camera relay settings", () => {
       .set("Authorization", authHeader())
       .send({ entry: { host: "192.168.1.10", port: 80, username: "admin", password: "secret", channel: 1 } });
     expect(first.status).toBe(200);
-    const before = await db("tb_organizations").select("entry_camera_relay_password_encrypted").where({ id: orgId }).first();
+    const before = await testDb<CameraRelayPasswordRow>("tb_organizations")
+      .select("entry_camera_relay_password_encrypted")
+      .where({ id: orgId })
+      .first();
     const second = await request(server)
       .patch(`/api/organizations/${orgId}/camera-relay-settings`)
       .set("Authorization", authHeader())
       .send({ entry: { host: "192.168.1.11", port: 8080, username: "admin2", channel: 2 } });
-    const after = await db("tb_organizations").select("entry_camera_relay_password_encrypted").where({ id: orgId }).first();
+    const after = await testDb<CameraRelayPasswordRow>("tb_organizations")
+      .select("entry_camera_relay_password_encrypted")
+      .where({ id: orgId })
+      .first();
+    if (!before || !after) throw new Error("Camera relay sozlamalari topilmadi");
     expect(second.status).toBe(200);
     expect(after.entry_camera_relay_password_encrypted).toBe(before.entry_camera_relay_password_encrypted);
     expect(second.body.entry).toMatchObject({ configured: true, host: "192.168.1.11", port: 8080, username: "admin2", channel: 2 });

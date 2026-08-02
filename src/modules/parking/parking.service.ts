@@ -531,11 +531,12 @@ async function completeSession(
 
     await trx("tb_parking_sessions").where({ id: session.id }).update(sessionUpdates);
 
+    const persistedPaymentMethod = session.session_source === "regular" ? paymentMethod : "cash";
     const [paymentId] = await trx("tb_payments").insert({
       org_id: orgId,
       session_id: session.id,
       amount,
-      payment_method: "cash",
+      payment_method: persistedPaymentMethod,
     });
 
     return {
@@ -555,7 +556,7 @@ async function completeSession(
         org_id: orgId,
         session_id: session.id,
         amount: String(amount),
-        payment_method: "cash" as const,
+        payment_method: persistedPaymentMethod,
         paid_at: exitedAt,
       },
     };
@@ -668,6 +669,8 @@ export async function exitManual(
     amount: Number(result.session.amount),
     paymentMethod: result.session.payment_method,
     barrierStatus,
+    sessionSource: result.session.session_source,
+    durationMinutes: result.session.duration_minutes,
   });
 
   return {
@@ -915,6 +918,8 @@ export async function confirmCashPayment(actor: AuthTokenPayload, id: number) {
     amount: Number(result.session.amount),
     paymentMethod: "cash",
     barrierStatus,
+    sessionSource: result.session.session_source,
+    durationMinutes: result.session.duration_minutes,
   });
 
   await logActivity(actor.id, "parking.cash_payment_confirmed", "session", id, {
@@ -941,7 +946,10 @@ export async function updateSessionPaymentMethod(
     throw new ApiError("Sessiya hali yopilmagan", 400);
   }
 
-  await db("tb_parking_sessions").where({ id }).update({ payment_method: paymentMethod });
+  await db.transaction(async (trx) => {
+    await trx("tb_parking_sessions").where({ id }).update({ payment_method: paymentMethod });
+    await trx("tb_payments").where({ session_id: id }).update({ payment_method: paymentMethod });
+  });
 
   const updated = await sessionsBaseQuery(db).where({ id }).first();
   return updated ? { ...updated, plate_number: displayPlateNumber(updated.plate_number) } : updated;
@@ -1030,11 +1038,13 @@ export async function forceCloseSession(
 
     await trx("tb_parking_sessions").where({ id }).update(sessionUpdates);
 
+    const persistedPaymentMethod =
+      lockedSession.session_source === "regular" ? input.payment_method ?? "cash" : "cash";
     const [paymentId] = await trx("tb_payments").insert({
       org_id: lockedSession.org_id,
       session_id: id,
       amount,
-      payment_method: "cash",
+      payment_method: persistedPaymentMethod,
     });
 
     const updatedSession = await sessionsBaseQuery(trx).where({ id }).first();
@@ -1046,7 +1056,7 @@ export async function forceCloseSession(
         org_id: lockedSession.org_id,
         session_id: id,
         amount: String(amount),
-        payment_method: "cash" as const,
+        payment_method: persistedPaymentMethod,
         paid_at: exitedAt,
       },
     };
@@ -1069,6 +1079,8 @@ export async function forceCloseSession(
     amount: Number(result.session!.amount),
     paymentMethod: result.session!.payment_method,
     barrierStatus,
+    sessionSource: result.session!.session_source,
+    durationMinutes: result.session!.duration_minutes,
   });
 
   return {

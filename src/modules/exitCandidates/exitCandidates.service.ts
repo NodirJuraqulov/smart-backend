@@ -13,12 +13,14 @@ import { INSIDE_SESSION_STATUSES } from "@/modules/parking/sessionStatus";
 import { BarrierStatus, openBarrier } from "@/modules/relay/relay.service";
 import { getWebhookEventImage } from "@/modules/webhook/webhookEventImage.service";
 import { resolveSafeCameraEventTime } from "@/modules/webhook/webhookIdempotency";
+import { getExitDisplayStatus } from "@/modules/publicDisplay/publicDisplay.service";
 import { ApiError } from "@/utils/ApiError";
 import { resolveOrgIdRequired } from "@/utils/orgScope";
 import {
   emitExitCandidateCreated,
   emitExitCandidateResolved,
   emitExitCompleted,
+  emitPublicExitStatusChanged,
   emitRelayFailed,
 } from "@/websocket/socketServer";
 
@@ -752,6 +754,8 @@ export async function confirmExitCandidate(
         ? transactionResult.session.payment_method
         : null,
     barrierStatus,
+    sessionSource: transactionResult.session.session_source,
+    durationMinutes: transactionResult.session.duration_minutes,
   });
   emitExitCandidateResolved(orgId, {
     candidateId,
@@ -760,6 +764,14 @@ export async function confirmExitCandidate(
     resolutionType: transactionResult.resolutionType,
     sessionId: transactionResult.session.id,
     barrierStatus,
+    plateNumber: displayPlateNumber(transactionResult.session.plate_number),
+    sessionSource: transactionResult.session.session_source,
+    amount: transactionResult.session.amount,
+    paymentMethod:
+      transactionResult.session.session_source === "regular"
+        ? transactionResult.session.payment_method
+        : null,
+    durationMinutes: transactionResult.session.duration_minutes,
   });
   return {
     candidate: await getCandidateByInternalId(orgId, candidateId),
@@ -827,6 +839,7 @@ export async function forceOpenExitCandidate(
     candidateId,
     retryAttempt: false,
   });
+  const resolvedCandidate = await getCandidateByInternalId(orgId, candidateId);
   emitExitCandidateResolved(orgId, {
     candidateId,
     orgId,
@@ -834,8 +847,9 @@ export async function forceOpenExitCandidate(
     resolutionType: "forced_open",
     sessionId: null,
     barrierStatus,
+    plateNumber: resolvedCandidate.detected_plate,
   });
-  return { candidate: await getCandidateByInternalId(orgId, candidateId), barrier_status: barrierStatus };
+  return { candidate: resolvedCandidate, barrier_status: barrierStatus };
 }
 
 export async function retryExitCandidateBarrier(
@@ -869,6 +883,7 @@ export async function retryExitCandidateBarrier(
     candidateId,
     retryAttempt: true,
   });
+  emitPublicExitStatusChanged(orgId, await getExitDisplayStatus(orgId));
   return { barrier_status: barrierStatus };
 }
 
@@ -900,7 +915,7 @@ export async function dismissExitCandidate(
   note?: string
 ) {
   const orgId = resolveOrgIdRequired(actor, requestedOrgId);
-  await db.transaction(async (trx) => {
+  const detectedPlate = await db.transaction(async (trx) => {
     const candidate = await trx<CandidateRow>("tb_exit_candidates")
       .where({ id: candidateId, org_id: orgId })
       .forUpdate()
@@ -940,6 +955,7 @@ export async function dismissExitCandidate(
         operatorId: actor.id,
       }),
     });
+    return candidate.detected_plate;
   });
   emitExitCandidateResolved(orgId, {
     candidateId,
@@ -948,6 +964,7 @@ export async function dismissExitCandidate(
     resolutionType: "dismissed",
     sessionId: null,
     barrierStatus: null,
+    plateNumber: detectedPlate,
   });
   return getCandidateByInternalId(orgId, candidateId);
 }

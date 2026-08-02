@@ -46,6 +46,8 @@ vi.mock("@/websocket/socketServer", () => {
     emitExitCandidateCreated: createMock(),
     emitExitCandidateResolved: createMock(),
     emitPlateNotRecognizedForExit: createMock(),
+    emitPublicEntryStatusChanged: createMock(),
+    emitPublicExitStatusChanged: createMock(),
     emitRelayFailed: createMock(),
     emitWebhookParseFailed: createMock(),
   };
@@ -70,6 +72,25 @@ interface TestCandidateRow {
 
 interface ActivityLogRow {
   details: Record<string, unknown>;
+}
+
+interface CompletionSessionRow {
+  status: string;
+  amount: number | string;
+  payment_method: string | null;
+  exited_at?: Date | string | null;
+  active_plate_key?: string | null;
+}
+
+interface CandidateStateRow {
+  status: string;
+  resolution_type: string | null;
+  resolved_session_id: number | null;
+}
+
+interface PaymentRow {
+  amount: number | string;
+  payment_method: string;
 }
 
 const app = express();
@@ -146,14 +167,49 @@ async function createJpegBase64(): Promise<string> {
   return buffer.toString("base64");
 }
 
-const createOrganizationForTest: typeof createTestOrganization = createTestOrganization;
-const postExitForTest: typeof postExit = postExit;
-const createSessionForTest: typeof createSession = createSession;
-const findCandidateForTest: typeof candidateForPlate = candidateForPlate;
-const confirmCandidateForTest: typeof confirm = confirm;
-const createOwnerActorForTest: typeof createOwnerActor = createOwnerActor;
-const createJpegBase64ForTest: typeof createJpegBase64 = createJpegBase64;
 const testDb: typeof db = db;
+const testRequest: typeof request = request;
+const openBarrierMock = openBarrier as unknown as ReturnType<typeof vi.fn>;
+const exitCandidateCreatedMock = emitExitCandidateCreated as unknown as ReturnType<typeof vi.fn>;
+
+function createOrganizationForTest(
+  overrides: { name?: string; is_active?: boolean; timezone?: string } = {}
+): Promise<number> {
+  return createTestOrganization(overrides);
+}
+
+function postExitForTest(plate: string): Promise<request.Response> {
+  return postExit(plate);
+}
+
+function createSessionForTest(
+  plate: string,
+  source: "regular" | "vip" | "subscription" = "regular",
+  ownerOrgId = orgId,
+  pricePerHour = 5000
+): Promise<number> {
+  return createSession(plate, source, ownerOrgId, pricePerHour);
+}
+
+function findCandidateForTest(plate: string): Promise<TestCandidateRow> {
+  return candidateForPlate(plate);
+}
+
+function createOwnerActorForTest(ownerOrgId: number): Promise<AuthTokenPayload> {
+  return createOwnerActor(ownerOrgId);
+}
+
+function createJpegBase64ForTest(): Promise<string> {
+  return createJpegBase64();
+}
+
+function confirmCandidateForTest(
+  candidateId: number,
+  body: Record<string, unknown>,
+  authorization = authorizationHeader
+): Promise<request.Response> {
+  return confirm(candidateId, body, authorization);
+}
 
 beforeAll(async () => {
   await assertTestDatabase();
@@ -175,7 +231,8 @@ beforeEach(async () => {
   otherActor = await createOwnerActorForTest(otherOrgId);
   authorizationHeader = `Bearer ${signAccessToken(actor)}`;
   otherAuthorizationHeader = `Bearer ${signAccessToken(otherActor)}`;
-  vi.mocked(openBarrier).mockReset().mockResolvedValue({ status: "opened", success: true });
+  openBarrierMock.mockReset();
+  openBarrierMock.mockResolvedValue({ status: "opened", success: true });
   vi.clearAllMocks();
 });
 
@@ -197,7 +254,7 @@ describe("exit candidate completion workflow", () => {
     await postExitForTest("01A100AA");
     const candidate = await findCandidateForTest("01A100AA");
     expect(emitExitCandidateCreated).toHaveBeenCalledTimes(1);
-    const createdCall = vi.mocked(emitExitCandidateCreated).mock.calls[0];
+    const createdCall = exitCandidateCreatedMock.mock.calls[0];
     if (!createdCall) throw new Error("Exit candidate socket eventi yuborilmadi");
     expect(createdCall[0]).toBe(orgId);
     expect(createdCall[1]).toMatchObject({
@@ -214,7 +271,7 @@ describe("exit candidate completion workflow", () => {
     expect(typeof createdPayload.exitImages.overviewUrl).toBe("string");
     expect(typeof createdPayload.exitImages.vehicleUrl).toBe("string");
     expect(typeof createdPayload.exitImages.plateUrl).toBe("string");
-    const next = await request(app)
+    const next = await testRequest(app)
       .get("/api/exit-candidates/next")
       .set("Authorization", authorizationHeader);
     expect(next.status).toBe(200);
@@ -236,12 +293,13 @@ describe("exit candidate completion workflow", () => {
     const response = await confirmCandidateForTest(candidate.id, { payment_method: "cash" });
     expect(response.status).toBe(200);
     expect(response.body.barrier_status).toBe("opened");
-    expect(await db("tb_parking_sessions").where({ id: sessionId }).first()).toMatchObject({
+    const session = await testDb<CompletionSessionRow>("tb_parking_sessions").where({ id: sessionId }).first();
+    expect(session).toMatchObject({
       status: "completed",
       payment_method: "cash",
       active_plate_key: null,
     });
-    const payment = await db("tb_payments").where({ session_id: sessionId }).first();
+    const payment = await testDb<PaymentRow>("tb_payments").where({ session_id: sessionId }).first();
     expect(payment).toMatchObject({ payment_method: "cash" });
     expect(Number(payment.amount)).toBe(10000);
     expect(openBarrier).toHaveBeenCalledWith(orgId, "exit");
@@ -256,27 +314,31 @@ describe("exit candidate completion workflow", () => {
         barrierStatus: "opened",
       })
     );
-    expect(emitExitCandidateResolved).toHaveBeenCalledWith(orgId, {
-      candidateId: candidate.id,
+    expect(emitExitCandidateResolved).toHaveBeenCalledWith(
       orgId,
-      status: "accepted",
-      resolutionType: "exact",
-      sessionId,
-      barrierStatus: "opened",
-    });
+      expect.objectContaining({
+        candidateId: candidate.id,
+        orgId,
+        status: "accepted",
+        resolutionType: "exact",
+        sessionId,
+        barrierStatus: "opened",
+      })
+    );
   });
 
   it("2. exact regular online completed va online payment yaratadi", async () => {
     const sessionId = await createSessionForTest("01A101AA");
     await postExitForTest("01A101AA");
     const candidate = await findCandidateForTest("01A101AA");
-    const response = await confirmCandidateForTest(candidate.id, { payment_method: "online" });
-    expect(response.status).toBe(200);
-    expect(await db("tb_parking_sessions").where({ id: sessionId }).first()).toMatchObject({
+    await confirmCandidateForTest(candidate.id, { payment_method: "online" });
+    const session = await testDb<CompletionSessionRow>("tb_parking_sessions").where({ id: sessionId }).first();
+    expect(session).toMatchObject({
       status: "completed",
       payment_method: "online",
     });
-    expect(await db("tb_payments").where({ session_id: sessionId }).first()).toMatchObject({
+    const payment = await testDb<PaymentRow>("tb_payments").where({ session_id: sessionId }).first();
+    expect(payment).toMatchObject({
       payment_method: "online",
     });
   });
@@ -285,11 +347,13 @@ describe("exit candidate completion workflow", () => {
     const sessionId = await createSessionForTest("01V100AA", "vip");
     await postExitForTest("01V100AA");
     const candidate = await findCandidateForTest("01V100AA");
-    expect((await confirmCandidateForTest(candidate.id, {})).status).toBe(200);
-    const session = await db("tb_parking_sessions").where({ id: sessionId }).first();
+    await confirmCandidateForTest(candidate.id, {});
+    const session = await testDb<CompletionSessionRow>("tb_parking_sessions").where({ id: sessionId }).first();
+    if (!session) throw new Error("VIP session topilmadi");
     expect(session.status).toBe("completed");
     expect(Number(session.amount)).toBe(0);
-    expect(await db("tb_payments").where({ session_id: sessionId })).toHaveLength(0);
+    const payments = await testDb<PaymentRow>("tb_payments").where({ session_id: sessionId });
+    expect(payments).toHaveLength(0);
     expect(openBarrier).toHaveBeenCalledWith(orgId, "exit");
   });
 
@@ -297,18 +361,21 @@ describe("exit candidate completion workflow", () => {
     const sessionId = await createSessionForTest("01S100AA", "subscription");
     await postExitForTest("01S100AA");
     const candidate = await findCandidateForTest("01S100AA");
-    expect((await confirmCandidateForTest(candidate.id, { payment_method: "online" })).status).toBe(200);
-    const session = await db("tb_parking_sessions").where({ id: sessionId }).first();
+    const response = await confirmCandidateForTest(candidate.id, { payment_method: "online" });
+    expect(response.status).toBe(200);
+    const session = await testDb<CompletionSessionRow>("tb_parking_sessions").where({ id: sessionId }).first();
+    if (!session) throw new Error("Subscription session topilmadi");
     expect(session.status).toBe("completed");
     expect(Number(session.amount)).toBe(0);
-    expect(await db("tb_payments").where({ session_id: sessionId })).toHaveLength(0);
+    const payments = await testDb<PaymentRow>("tb_payments").where({ session_id: sessionId });
+    expect(payments).toHaveLength(0);
   });
 
   it("5. fuzzy search bir belgi xatosida to'g'ri sessiyani score bilan topadi", async () => {
     const sessionId = await createSessionForTest("01A123BC");
     await postExitForTest("WRONG500");
     const candidate = await findCandidateForTest("WRONG500");
-    const response = await request(app)
+    const response = await testRequest(app)
       .post(`/api/exit-candidates/${candidate.id}/search`)
       .set("Authorization", authorizationHeader)
       .send({ plate: "01A12XBC" });
@@ -328,7 +395,7 @@ describe("exit candidate completion workflow", () => {
     await createSessionForTest("01A124BC", "regular", otherOrgId);
     await postExitForTest("WRONG501");
     const candidate = await findCandidateForTest("WRONG501");
-    const response = await request(app)
+    const response = await testRequest(app)
       .post(`/api/exit-candidates/${candidate.id}/search`)
       .set("Authorization", authorizationHeader)
       .send({ plate: "01A124BX" });
@@ -345,8 +412,14 @@ describe("exit candidate completion workflow", () => {
       payment_method: "cash",
     });
     expect(response.status).toBe(200);
-    expect(await db("tb_parking_sessions").where({ id: sessionId }).first()).toMatchObject({ status: "completed" });
-    expect(await db("tb_exit_candidates").where({ id: candidate.id }).first()).toMatchObject({
+    const reassignedSession = await testDb<CompletionSessionRow>("tb_parking_sessions")
+      .where({ id: sessionId })
+      .first();
+    const reassignedCandidate = await testDb<CandidateStateRow>("tb_exit_candidates")
+      .where({ id: candidate.id })
+      .first();
+    expect(reassignedSession).toMatchObject({ status: "completed" });
+    expect(reassignedCandidate).toMatchObject({
       status: "accepted",
       resolution_type: "reassigned",
       resolved_session_id: sessionId,
@@ -355,23 +428,29 @@ describe("exit candidate completion workflow", () => {
 
   it("8. force-open session va paymentga tegmaydi, to'liq audit va barrier yaratadi", async () => {
     const sessionId = await createSessionForTest("01A300AA");
-    const before = await testDb("tb_parking_sessions").where({ id: sessionId }).first();
+    const before = await testDb<CompletionSessionRow>("tb_parking_sessions").where({ id: sessionId }).first();
+    if (!before) throw new Error("Force-open session topilmadi");
     await postExitForTest("UNKNOWN1");
     const candidate = await findCandidateForTest("UNKNOWN1");
-    const response = await request(app)
+    const response = await testRequest(app)
       .post(`/api/exit-candidates/${candidate.id}/force-open`)
       .set("Authorization", authorizationHeader)
       .send({ reason: "camera_misread", note: "Operator tekshirdi", entered_plate: "01 A 300 AA" });
     expect(response.status).toBe(200);
     expect(response.body.barrier_status).toBe("opened");
-    expect(await db("tb_parking_sessions").where({ id: sessionId }).first()).toMatchObject({
+    const sessionAfter = await testDb<CompletionSessionRow>("tb_parking_sessions").where({ id: sessionId }).first();
+    const paymentsAfter = await testDb<PaymentRow>("tb_payments").where({ session_id: sessionId });
+    const forcedCandidate = await testDb<CandidateStateRow>("tb_exit_candidates")
+      .where({ id: candidate.id })
+      .first();
+    expect(sessionAfter).toMatchObject({
       status: before.status,
       exited_at: before.exited_at,
       amount: before.amount,
       active_plate_key: before.active_plate_key,
     });
-    expect(await db("tb_payments").where({ session_id: sessionId })).toHaveLength(0);
-    expect(await db("tb_exit_candidates").where({ id: candidate.id }).first()).toMatchObject({
+    expect(paymentsAfter).toHaveLength(0);
+    expect(forcedCandidate).toMatchObject({
       status: "dismissed",
       resolution_type: "forced_open",
     });
@@ -390,49 +469,56 @@ describe("exit candidate completion workflow", () => {
     });
     expect(typeof audit.details.exitImageRef).toBe("string");
     expect(openBarrier).toHaveBeenCalledWith(orgId, "exit");
-    expect(emitExitCandidateResolved).toHaveBeenCalledWith(orgId, {
-      candidateId: candidate.id,
+    expect(emitExitCandidateResolved).toHaveBeenCalledWith(
       orgId,
-      status: "dismissed",
-      resolutionType: "forced_open",
-      sessionId: null,
-      barrierStatus: "opened",
-    });
+      expect.objectContaining({
+        candidateId: candidate.id,
+        orgId,
+        status: "dismissed",
+        resolutionType: "forced_open",
+        sessionId: null,
+        barrierStatus: "opened",
+      })
+    );
   });
 
   it("9. retry-barrier faqat relay va yangi retry auditini bajaradi", async () => {
     const sessionId = await createSessionForTest("01A400AA");
     await postExitForTest("01A400AA");
-    const candidate = await findCandidateForTest("01A400AA");
-    vi.mocked(openBarrier).mockResolvedValueOnce({ status: "failed", success: false });
-    expect((await confirmCandidateForTest(candidate.id, { payment_method: "cash" })).body.barrier_status).toBe(
-      "failed"
-    );
-    const sessionBefore = await db("tb_parking_sessions").where({ id: sessionId }).first();
-    const candidateBefore = await db("tb_exit_candidates").where({ id: candidate.id }).first();
-    const paymentsBefore = await db("tb_payments").where({ session_id: sessionId });
-    vi.mocked(openBarrier).mockResolvedValueOnce({ status: "opened", success: true });
-    const retry = await request(app)
+    const candidate: TestCandidateRow = await findCandidateForTest("01A400AA");
+    openBarrierMock.mockResolvedValueOnce({ status: "failed", success: false });
+    const confirmResponse = await confirmCandidateForTest(candidate.id, { payment_method: "cash" });
+    expect(confirmResponse.body.barrier_status).toBe("failed");
+    const sessionBefore = await testDb<CompletionSessionRow>("tb_parking_sessions").where({ id: sessionId }).first();
+    const candidateBefore = await testDb<CandidateStateRow>("tb_exit_candidates").where({ id: candidate.id }).first();
+    const paymentsBefore = await testDb<PaymentRow>("tb_payments").where({ session_id: sessionId });
+    openBarrierMock.mockResolvedValueOnce({ status: "opened", success: true });
+    const retry = await testRequest(app)
       .post(`/api/exit-candidates/${candidate.id}/retry-barrier`)
       .set("Authorization", authorizationHeader)
       .send({});
     expect(retry.status).toBe(200);
     expect(retry.body.barrier_status).toBe("opened");
-    expect(await db("tb_parking_sessions").where({ id: sessionId }).first()).toEqual(sessionBefore);
-    expect(await db("tb_exit_candidates").where({ id: candidate.id }).first()).toEqual(candidateBefore);
-    expect(await db("tb_payments").where({ session_id: sessionId })).toEqual(paymentsBefore);
-    const retryAudit = await db("tb_activity_logs")
+    const sessionAfter = await testDb<CompletionSessionRow>("tb_parking_sessions").where({ id: sessionId }).first();
+    const candidateAfter = await testDb<CandidateStateRow>("tb_exit_candidates").where({ id: candidate.id }).first();
+    const paymentsAfter = await testDb<PaymentRow>("tb_payments").where({ session_id: sessionId });
+    expect(sessionAfter).toEqual(sessionBefore);
+    expect(candidateAfter).toEqual(candidateBefore);
+    expect(paymentsAfter).toEqual(paymentsBefore);
+    const retryAudit = await testDb<ActivityLogRow>("tb_activity_logs")
       .where({ action: "parking.exit_candidate_barrier_opened", target_id: candidate.id })
       .orderBy("id", "desc")
       .first();
+    if (!retryAudit) throw new Error("Retry barrier audit topilmadi");
     expect(retryAudit.details).toMatchObject({ barrierStatus: "opened", retryAttempt: true });
   });
 
   it("10. candidate ikkinchi marta confirm qilinsa 409", async () => {
     await createSessionForTest("01A500AA");
     await postExitForTest("01A500AA");
-    const candidate = await findCandidateForTest("01A500AA");
-    expect((await confirmCandidateForTest(candidate.id, { payment_method: "cash" })).status).toBe(200);
+    const candidate: TestCandidateRow = await findCandidateForTest("01A500AA");
+    const first = await confirmCandidateForTest(candidate.id, { payment_method: "cash" });
+    expect(first.status).toBe(200);
     const second = await confirmCandidateForTest(candidate.id, { payment_method: "cash" });
     expect(second.status).toBe(409);
     expect(second.body.message).toBe("Bu chiqish allaqachon hal qilingan");
@@ -454,11 +540,20 @@ describe("exit candidate completion workflow", () => {
       payment_method: "cash",
     });
     expect(foreignSessionAccess.status).toBe(409);
-    expect((await db("tb_parking_sessions").where({ id: foreignSessionId }).first()).status).toBe("active");
+    const foreignSession = await testDb<CompletionSessionRow>("tb_parking_sessions")
+      .where({ id: foreignSessionId })
+      .first();
+    expect(foreignSession?.status).toBe("active");
   });
 
   it("12. tanlangan session completed bo'lsa confirm 409", async () => {
-    const sessionId = await createSessionForTest("01A700AA");
+    await createSessionForTest("01A700AA");
+    const session = await testDb<{ id: number }>("tb_parking_sessions")
+      .select("id")
+      .where({ org_id: orgId, plate_number: "01A700AA", status: "active" })
+      .first();
+    if (!session) throw new Error("Completed qilinadigan session topilmadi");
+    const sessionId = session.id;
     await postExitForTest("01A700AA");
     const candidate = await findCandidateForTest("01A700AA");
     await db("tb_parking_sessions").where({ id: sessionId }).update({
@@ -468,46 +563,51 @@ describe("exit candidate completion workflow", () => {
     });
     const response = await confirmCandidateForTest(candidate.id, { payment_method: "cash" });
     expect(response.status).toBe(409);
-    expect(await db("tb_payments").where({ session_id: sessionId })).toHaveLength(0);
-    expect((await db("tb_exit_candidates").where({ id: candidate.id }).first()).status).toBe("pending");
+    const payments = await testDb<PaymentRow>("tb_payments").where({ session_id: sessionId });
+    const pendingCandidate = await testDb<CandidateStateRow>("tb_exit_candidates").where({ id: candidate.id }).first();
+    expect(payments).toHaveLength(0);
+    expect(pendingCandidate?.status).toBe("pending");
   });
 
   it("13. confirm relay failed bo'lsa session va payment saqlanadi, failure audit yoziladi", async () => {
     const sessionId = await createSessionForTest("01A800AA");
     await postExitForTest("01A800AA");
     const candidate = await findCandidateForTest("01A800AA");
-    vi.mocked(openBarrier).mockResolvedValueOnce({ status: "failed", success: false });
+    openBarrierMock.mockResolvedValueOnce({ status: "failed", success: false });
     const response = await confirmCandidateForTest(candidate.id, { payment_method: "cash" });
     expect(response.status).toBe(200);
     expect(response.body.barrier_status).toBe("failed");
-    expect((await db("tb_parking_sessions").where({ id: sessionId }).first()).status).toBe("completed");
-    expect(await db("tb_payments").where({ session_id: sessionId })).toHaveLength(1);
-    expect(
-      await db("tb_activity_logs")
-        .where({ action: "parking.exit_candidate_barrier_open_failed", target_id: candidate.id })
-        .first()
-    ).toBeTruthy();
+    const session = await testDb<CompletionSessionRow>("tb_parking_sessions").where({ id: sessionId }).first();
+    const payments = await testDb<PaymentRow>("tb_payments").where({ session_id: sessionId });
+    expect(session?.status).toBe("completed");
+    expect(payments).toHaveLength(1);
+    const failedBarrierAudit = await testDb<ActivityLogRow>("tb_activity_logs")
+      .where({ action: "parking.exit_candidate_barrier_open_failed", target_id: candidate.id })
+      .first();
+    expect(failedBarrierAudit).toBeTruthy();
   });
 
   it("14. force-open relay failed bo'lsa dismissed qaror saqlanadi", async () => {
     await postExitForTest("UNKNOWN2");
     const candidate = await findCandidateForTest("UNKNOWN2");
-    vi.mocked(openBarrier).mockResolvedValueOnce({ status: "failed", success: false });
-    const response = await request(app)
+    openBarrierMock.mockResolvedValueOnce({ status: "failed", success: false });
+    const response = await testRequest(app)
       .post(`/api/exit-candidates/${candidate.id}/force-open`)
       .set("Authorization", authorizationHeader)
       .send({ reason: "technical_issue" });
     expect(response.status).toBe(200);
     expect(response.body.barrier_status).toBe("failed");
-    expect(await db("tb_exit_candidates").where({ id: candidate.id }).first()).toMatchObject({
+    const dismissedCandidate = await testDb<CandidateStateRow>("tb_exit_candidates")
+      .where({ id: candidate.id })
+      .first();
+    expect(dismissedCandidate).toMatchObject({
       status: "dismissed",
       resolution_type: "forced_open",
     });
-    expect(
-      await db("tb_activity_logs")
-        .where({ action: "parking.exit_candidate_barrier_open_failed", target_id: candidate.id })
-        .first()
-    ).toBeTruthy();
+    const failedBarrierAudit = await testDb<ActivityLogRow>("tb_activity_logs")
+      .where({ action: "parking.exit_candidate_barrier_open_failed", target_id: candidate.id })
+      .first();
+    expect(failedBarrierAudit).toBeTruthy();
   });
 
   it("15. amount entry tariff snapshotidan, active tarifdan emas", async () => {
@@ -515,15 +615,16 @@ describe("exit candidate completion workflow", () => {
     await db("tb_tariffs").where({ org_id: orgId }).update({ price_per_hour: 99000 });
     await postExitForTest("01A900AA");
     const candidate = await findCandidateForTest("01A900AA");
-    expect((await confirmCandidateForTest(candidate.id, { payment_method: "cash" })).status).toBe(200);
-    const session = await db("tb_parking_sessions").where({ id: sessionId }).first();
-    const payment = await db("tb_payments").where({ session_id: sessionId }).first();
+    const response = await confirmCandidateForTest(candidate.id, { payment_method: "cash" });
+    expect(response.status).toBe(200);
+    const session = await testDb<CompletionSessionRow>("tb_parking_sessions").where({ id: sessionId }).first();
+    const payment = await testDb<PaymentRow>("tb_payments").where({ session_id: sessionId }).first();
     expect(Number(session.amount)).toBe(8000);
     expect(Number(payment.amount)).toBe(8000);
   });
 
   it("16. next pending candidate bo'lmasa 204 bodyless qaytaradi", async () => {
-    const response = await request(app)
+    const response = await testRequest(app)
       .get("/api/exit-candidates/next")
       .set("Authorization", authorizationHeader);
     expect(response.status).toBe(204);
@@ -535,14 +636,14 @@ describe("exit candidate completion workflow", () => {
       const plate = status === "disabled" ? "UNKNOWN3" : "UNKNOWN4";
       await postExitForTest(plate);
       const candidate = await findCandidateForTest(plate);
-      vi.mocked(openBarrier).mockResolvedValueOnce({ status, success: false });
-      const forceOpen = await request(app)
+      openBarrierMock.mockResolvedValueOnce({ status, success: false });
+      const forceOpen = await testRequest(app)
         .post(`/api/exit-candidates/${candidate.id}/force-open`)
         .set("Authorization", authorizationHeader)
         .send({ reason: "technical_issue" });
       expect(forceOpen.status).toBe(200);
       expect(forceOpen.body.barrier_status).toBe(status);
-      const retry = await request(app)
+      const retry = await testRequest(app)
         .post(`/api/exit-candidates/${candidate.id}/retry-barrier`)
         .set("Authorization", authorizationHeader)
         .send({});

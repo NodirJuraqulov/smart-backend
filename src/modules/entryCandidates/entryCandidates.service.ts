@@ -327,7 +327,7 @@ export async function processEntryWebhook(input: {
       plateNumber: displayPlateNumber(attachedSession.plate_number),
       detail: barrier.detail,
     });
-  } else if (barrier.status === "opened") {
+  } else {
     emitEntryCompleted(input.orgId, {
       sessionId: attachedSession.id,
       plateNumber: displayPlateNumber(attachedSession.plate_number),
@@ -437,7 +437,7 @@ export async function acceptEntryCandidate(
       plateNumber: displayPlateNumber(transactionResult.session.plate_number),
       detail: barrier.detail,
     });
-  } else if (barrier.status === "opened") {
+  } else {
     emitEntryCompleted(orgId, {
       sessionId: transactionResult.session.id,
       plateNumber: displayPlateNumber(transactionResult.session.plate_number),
@@ -450,6 +450,7 @@ export async function acceptEntryCandidate(
     status: "accepted",
     sessionId: transactionResult.session.id,
     barrierStatus: barrier.status,
+    plateNumber: displayPlateNumber(transactionResult.session.plate_number),
   });
   return {
     session_id: transactionResult.session.id,
@@ -507,7 +508,7 @@ export async function createManualEntry(
       plateNumber: displayPlateNumber(session.plate_number),
       detail: barrier.detail,
     });
-  } else if (barrier.status === "opened") {
+  } else {
     emitEntryCompleted(orgId, {
       sessionId: session.id,
       plateNumber: displayPlateNumber(session.plate_number),
@@ -532,7 +533,7 @@ export async function declineEntryCandidate(
   note?: string
 ) {
   const orgId = resolveOrgIdRequired(actor, requestedOrgId);
-  await db.transaction(async (trx) => {
+  const detectedPlate = await db.transaction(async (trx) => {
     const candidate = await trx<EntryCandidateRow>("tb_entry_candidates")
       .where({ id: candidateId, org_id: orgId })
       .forUpdate()
@@ -564,6 +565,7 @@ export async function declineEntryCandidate(
         note: note?.trim() || null,
       }),
     });
+    return candidate.detected_plate;
   });
   emitEntryCandidateResolved(orgId, {
     candidateId,
@@ -571,6 +573,7 @@ export async function declineEntryCandidate(
     status: "declined",
     sessionId: null,
     barrierStatus: null,
+    plateNumber: detectedPlate,
   });
   return { status: "declined" as const };
 }
@@ -614,5 +617,18 @@ export async function retryEntryBarrier(
     sessionId,
     retryAttempt: true,
   });
+  if (barrier.status === "failed") {
+    emitEntryBarrierFailed(orgId, {
+      sessionId,
+      plateNumber: displayPlateNumber(session.plate_number),
+      detail: barrier.detail,
+    });
+  } else {
+    emitEntryCompleted(orgId, {
+      sessionId,
+      plateNumber: displayPlateNumber(session.plate_number),
+      barrierStatus: barrier.status,
+    });
+  }
   return { barrier_status: barrier.status };
 }

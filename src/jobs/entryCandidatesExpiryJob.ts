@@ -9,11 +9,11 @@ export async function runEntryCandidatesExpiry(now = new Date()): Promise<number
   const cutoff = new Date(now.getTime() - EXPIRY_MINUTES * 60_000);
   const expired = await db.transaction(async (trx) => {
     const candidates = await trx("tb_entry_candidates")
-      .select("id", "org_id", "webhook_event_id")
+      .select("id", "org_id", "webhook_event_id", "detected_plate")
       .where({ status: "pending" })
       .andWhere("created_at", "<", cutoff)
       .forUpdate();
-    const resolved: Array<{ id: number; orgId: number }> = [];
+    const resolved: Array<{ id: number; orgId: number; plateNumber: string | null }> = [];
     for (const candidate of candidates) {
       const changed = await trx("tb_entry_candidates")
         .where({ id: candidate.id, org_id: candidate.org_id, status: "pending" })
@@ -41,7 +41,7 @@ export async function runEntryCandidatesExpiry(now = new Date()): Promise<number
           note: EXPIRY_NOTE,
         }),
       });
-      resolved.push({ id: candidate.id, orgId: candidate.org_id });
+      resolved.push({ id: candidate.id, orgId: candidate.org_id, plateNumber: candidate.detected_plate });
     }
     return resolved;
   });
@@ -52,6 +52,7 @@ export async function runEntryCandidatesExpiry(now = new Date()): Promise<number
       status: "expired",
       sessionId: null,
       barrierStatus: null,
+      plateNumber: candidate.plateNumber,
     });
   }
   return expired.length;
