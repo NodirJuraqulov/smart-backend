@@ -13,6 +13,7 @@ import parkingSessionsEntryBarrierRouter from "@/modules/entryCandidates/parking
 import { runEntryCandidatesExpiry } from "@/jobs/entryCandidatesExpiryJob";
 import exitCandidatesRouter from "@/modules/exitCandidates/exitCandidates.routes";
 import { openBarrier } from "@/modules/relay/relay.service";
+import parkingRouter from "@/modules/parking/parking.routes";
 import webhookRouter from "@/modules/webhook/webhook.routes";
 import { clearWebhookDedupeCache } from "@/modules/webhook/webhookIdempotency";
 import {
@@ -52,6 +53,7 @@ app.use("/api/webhook", webhookRouter);
 app.use(express.json());
 app.use("/api/entry-candidates", entryCandidatesRouter);
 app.use("/api/parking-sessions", parkingSessionsEntryBarrierRouter);
+app.use("/api/parking", parkingRouter);
 app.use("/api/exit-candidates", exitCandidatesRouter);
 app.use(errorHandler);
 
@@ -110,6 +112,31 @@ async function searchExit(candidateId: number, plate?: string) {
     .send(plate === undefined ? {} : { plate });
 }
 
+async function expectCopiedEntryImages(sessionId: number, eventId: number) {
+  const [session, event] = await Promise.all([
+    db("tb_parking_sessions").where({ id: sessionId, org_id: orgId }).first(),
+    db("tb_webhook_events").where({ id: eventId, org_id: orgId }).first(),
+  ]);
+  if (
+    !session?.entry_overview_image_path ||
+    !session.entry_vehicle_image_path ||
+    !event?.overview_image_path ||
+    !event.vehicle_image_path
+  ) {
+    throw new Error("Entry rasm yo'llari saqlanmadi");
+  }
+  expect(session.entry_overview_image_path).toContain(`uploads/parking/${orgId}/`);
+  expect(session.entry_vehicle_image_path).toContain(`uploads/parking/${orgId}/`);
+  const [sessionOverview, sessionVehicle, eventOverview, eventVehicle] = await Promise.all([
+    fs.readFile(path.resolve(session.entry_overview_image_path)),
+    fs.readFile(path.resolve(session.entry_vehicle_image_path)),
+    fs.readFile(path.resolve(event.overview_image_path)),
+    fs.readFile(path.resolve(event.vehicle_image_path)),
+  ]);
+  expect(sessionOverview).toEqual(eventOverview);
+  expect(sessionVehicle).toEqual(eventVehicle);
+}
+
 beforeAll(async () => {
   await assertTestDatabase();
   imageBase64 = (await sharp({
@@ -138,6 +165,10 @@ beforeEach(async () => {
 afterEach(async () => {
   await clearWebhookDedupeCache();
   await fs.rm(path.join(process.cwd(), "uploads", "parking-events", String(orgId)), {
+    recursive: true,
+    force: true,
+  });
+  await fs.rm(path.join(process.cwd(), "uploads", "parking", String(orgId)), {
     recursive: true,
     force: true,
   });
@@ -351,5 +382,57 @@ describe("entry identifier production workflow", () => {
       session_id: String(accepted.body.session_id),
       plate_number: "YANGI022",
     });
+  });
+});
+
+describe("entry candidate session images", () => {
+  it("plate_not_detected candidate accept event rasmlarini yangi sessiyaga biriktiradi", async () => {
+    await setOrgCapacity(orgId, 2);
+    await postCamera("entry", null);
+    const candidate = await entryCandidate();
+    expect(candidate.reason).toBe("plate_not_detected");
+    const accepted = await acceptCandidate(candidate.id, "01IMG001");
+    expect(accepted.status).toBe(200);
+    await expectCopiedEntryImages(accepted.body.session_id, candidate.webhook_event_id);
+  });
+
+  it("capacity_full candidate accept event rasmlarini yangi sessiyaga biriktiradi", async () => {
+    await setOrgCapacity(orgId, 0);
+    await postCamera("entry", "01IMG002");
+    const candidate = await entryCandidate();
+    expect(candidate.reason).toBe("capacity_full");
+    const accepted = await acceptCandidate(candidate.id, "01IMG002");
+    expect(accepted.status).toBe(200);
+    await expectCopiedEntryImages(accepted.body.session_id, candidate.webhook_event_id);
+  });
+
+  it("candidate accept sessiya image endpointlari haqiqiy rasmlarni qaytaradi", async () => {
+    await setOrgCapacity(orgId, 2);
+    await postCamera("entry", null);
+    const candidate = await entryCandidate();
+    const accepted = await acceptCandidate(candidate.id, "01IMG003");
+    const overview = await request(app)
+      .get(`/api/parking/sessions/${accepted.body.session_id}/images/entry-overview`)
+      .set("Authorization", authorization);
+    const vehicle = await request(app)
+      .get(`/api/parking/sessions/${accepted.body.session_id}/images/entry-vehicle`)
+      .set("Authorization", authorization);
+    expect(overview.status).toBe(200);
+    expect(overview.headers["content-type"]).toBe("image/jpeg");
+    expect(vehicle.status).toBe(200);
+    expect(vehicle.headers["content-type"]).toBe("image/jpeg");
+  });
+
+  it("avtomatik entry oqimi session rasmlarini saqlashda davom etadi", async () => {
+    await setOrgCapacity(orgId, 2);
+    await postCamera("entry", "01IMG004");
+    const session = await db("tb_parking_sessions")
+      .where({ org_id: orgId, plate_number: "01IMG004" })
+      .first();
+    const event = await db("tb_webhook_events")
+      .where({ org_id: orgId, plate_number: "01IMG004", direction: "entry" })
+      .first();
+    if (!session || !event) throw new Error("Avtomatik entry ma'lumotlari topilmadi");
+    await expectCopiedEntryImages(session.id, event.id);
   });
 });

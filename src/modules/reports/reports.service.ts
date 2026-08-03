@@ -1,4 +1,5 @@
 import { DateTime } from "luxon";
+import type { Knex } from "knex";
 import { db } from "@/config/db";
 import { AuthTokenPayload } from "@/modules/auth/auth.service";
 import { ApiError } from "@/utils/ApiError";
@@ -50,20 +51,34 @@ interface PaymentRow {
   payment_method: "cash" | "online";
 }
 
-function regularPaymentsQuery(orgId: number, start: Date, end: Date) {
-  return db<PaymentRow>("tb_payments")
-    .join("tb_parking_sessions", "tb_parking_sessions.id", "tb_payments.session_id")
-    .where("tb_payments.org_id", orgId)
-    .andWhere("tb_parking_sessions.session_source", "regular")
-    .whereBetween("tb_payments.paid_at", [start, end])
-    .select(
-      "tb_payments.paid_at as paid_at",
-      "tb_payments.amount as amount",
-      "tb_payments.payment_method as payment_method"
-    );
+type PaymentLedgerRow = Pick<PaymentRow, "paid_at" | "amount" | "payment_method">;
+
+function unixSeconds(value: Date): number {
+  return Math.floor(value.getTime() / 1000);
 }
 
-function splitRevenueByPaymentMethod(paymentsRows: PaymentRow[]): {
+function timestampRange(column: string, start: Date, endExclusive: Date) {
+  return db.raw("?? >= FROM_UNIXTIME(?) AND ?? < FROM_UNIXTIME(?)", [
+    column,
+    unixSeconds(start),
+    column,
+    unixSeconds(endExclusive),
+  ]);
+}
+
+function paymentLedgerQuery(orgId: number, start: Date, endExclusive: Date) {
+  return db<PaymentRow>("tb_payments")
+    .where({ org_id: orgId })
+    .where(timestampRange("paid_at", start, endExclusive))
+    .select("paid_at", "amount", "payment_method");
+}
+
+function safeAmount(value: string | number | null | undefined): number {
+  const amount = Number(value ?? 0);
+  return Number.isFinite(amount) && amount > 0 ? amount : 0;
+}
+
+function splitRevenueByPaymentMethod(paymentsRows: PaymentLedgerRow[]): {
   cashRevenue: number;
   onlineRevenue: number;
 } {
@@ -71,9 +86,9 @@ function splitRevenueByPaymentMethod(paymentsRows: PaymentRow[]): {
   let onlineRevenue = 0;
   for (const row of paymentsRows) {
     if (row.payment_method === "online") {
-      onlineRevenue += Number(row.amount);
-    } else {
-      cashRevenue += Number(row.amount);
+      onlineRevenue += safeAmount(row.amount);
+    } else if (row.payment_method === "cash") {
+      cashRevenue += safeAmount(row.amount);
     }
   }
   return { cashRevenue, onlineRevenue };
@@ -82,7 +97,7 @@ function splitRevenueByPaymentMethod(paymentsRows: PaymentRow[]): {
 async function getSubscriptionRevenue(
   orgId: number,
   createdStart: Date,
-  createdEnd: Date,
+  createdEndExclusive: Date,
   renewedStartDate: string,
   renewedEndDate: string
 ): Promise<number> {
@@ -90,11 +105,11 @@ async function getSubscriptionRevenue(
     .where({ org_id: orgId })
     .andWhere((builder) => {
       builder
-        .whereBetween("created_at", [createdStart, createdEnd])
+        .where(timestampRange("created_at", createdStart, createdEndExclusive))
         .orWhereBetween("last_renewed_at", [renewedStartDate, renewedEndDate]);
     })
     .sum<{ total: string | null }[]>("price_snapshot as total");
-  return Number(total ?? 0);
+  return safeAmount(total);
 }
 
 export async function getDailyReport(
@@ -114,26 +129,27 @@ export async function getDailyReport(
     throw new ApiError("Kelajakdagi sana uchun hisobot bo'lishi mumkin emas", 400);
   }
 
-  const dayStart = DateTime.fromISO(date, { zone: timezone }).startOf("day").toJSDate();
-  const dayEnd = DateTime.fromISO(date, { zone: timezone }).endOf("day").toJSDate();
+  const dayAnchor = DateTime.fromISO(date, { zone: timezone }).startOf("day");
+  const dayStart = dayAnchor.toJSDate();
+  const dayEndExclusive = dayAnchor.plus({ days: 1 }).toJSDate();
 
   const [entriesRows, exitsRows, paymentsRows, [{ count: currentlyParked }], subscriptionRevenue] =
     await Promise.all([
       db<SessionTimeRow>("tb_parking_sessions")
         .where({ org_id: orgId })
-        .whereBetween("entered_at", [dayStart, dayEnd])
+        .where(timestampRange("entered_at", dayStart, dayEndExclusive))
         .select("entered_at"),
       applyCompletedExitFilter(
         db<SessionTimeRow>("tb_parking_sessions").where({ org_id: orgId })
       )
-        .whereBetween("exited_at", [dayStart, dayEnd])
+        .where(timestampRange("exited_at", dayStart, dayEndExclusive))
         .select("exited_at"),
-      regularPaymentsQuery(orgId, dayStart, dayEnd),
+      paymentLedgerQuery(orgId, dayStart, dayEndExclusive),
       applyInsideSessionsFilter(
         db("tb_parking_sessions").where({ org_id: orgId })
       )
         .count<{ count: string }[]>("id as count"),
-      getSubscriptionRevenue(orgId, dayStart, dayEnd, date, date),
+      getSubscriptionRevenue(orgId, dayStart, dayEndExclusive, date, date),
     ]);
 
   const hourlyEntries = Array.from({ length: 24 }, () => 0);
@@ -143,7 +159,7 @@ export async function getDailyReport(
 
   const hourlyRevenue = Array.from({ length: 24 }, () => 0);
   for (const row of paymentsRows) {
-    hourlyRevenue[DateTime.fromJSDate(new Date(row.paid_at)).setZone(timezone).hour] += Number(row.amount);
+    hourlyRevenue[DateTime.fromJSDate(new Date(row.paid_at)).setZone(timezone).hour] += safeAmount(row.amount);
   }
 
   const hourlyBreakdown = hourlyEntries.map((entries, hour) => ({
@@ -171,6 +187,7 @@ export async function getDailyReport(
     online_revenue: onlineRevenue,
     regular_revenue: regularRevenue,
     subscription_revenue: subscriptionRevenue,
+    vip_revenue: 0,
     total_revenue: regularRevenue + subscriptionRevenue,
     currently_parked: Number(currentlyParked),
     busiest_hour: busiestHour,
@@ -204,7 +221,7 @@ export async function getMonthlyReport(
 
   const monthAnchor = DateTime.fromObject({ year, month, day: 1 }, { zone: timezone });
   const monthStart = monthAnchor.startOf("month").toJSDate();
-  const monthEnd = monthAnchor.endOf("month").toJSDate();
+  const monthEndExclusive = monthAnchor.plus({ months: 1 }).startOf("month").toJSDate();
   const monthStartDate = monthAnchor.startOf("month").toFormat("yyyy-MM-dd");
   const monthEndDate = monthAnchor.endOf("month").toFormat("yyyy-MM-dd");
   const daysInMonth = monthAnchor.daysInMonth as number;
@@ -212,15 +229,15 @@ export async function getMonthlyReport(
   const [entriesRows, exitsRows, paymentsRows, subscriptionRevenue] = await Promise.all([
     db<SessionTimeRow>("tb_parking_sessions")
       .where({ org_id: orgId })
-      .whereBetween("entered_at", [monthStart, monthEnd])
+      .where(timestampRange("entered_at", monthStart, monthEndExclusive))
       .select("entered_at"),
     applyCompletedExitFilter(
       db<SessionTimeRow>("tb_parking_sessions").where({ org_id: orgId })
     )
-      .whereBetween("exited_at", [monthStart, monthEnd])
+      .where(timestampRange("exited_at", monthStart, monthEndExclusive))
       .select("exited_at"),
-    regularPaymentsQuery(orgId, monthStart, monthEnd),
-    getSubscriptionRevenue(orgId, monthStart, monthEnd, monthStartDate, monthEndDate),
+    paymentLedgerQuery(orgId, monthStart, monthEndExclusive),
+    getSubscriptionRevenue(orgId, monthStart, monthEndExclusive, monthStartDate, monthEndDate),
   ]);
 
   const entriesByDay = Array.from({ length: daysInMonth + 1 }, () => 0);
@@ -235,7 +252,7 @@ export async function getMonthlyReport(
 
   const revenueByDay = Array.from({ length: daysInMonth + 1 }, () => 0);
   for (const row of paymentsRows) {
-    revenueByDay[DateTime.fromJSDate(new Date(row.paid_at)).setZone(timezone).day] += Number(row.amount);
+    revenueByDay[DateTime.fromJSDate(new Date(row.paid_at)).setZone(timezone).day] += safeAmount(row.amount);
   }
 
   const dailyBreakdown = [];
@@ -261,6 +278,7 @@ export async function getMonthlyReport(
     online_revenue: onlineRevenue,
     regular_revenue: regularRevenue,
     subscription_revenue: subscriptionRevenue,
+    vip_revenue: 0,
     total_revenue: regularRevenue + subscriptionRevenue,
     daily_breakdown: dailyBreakdown,
   };
@@ -286,22 +304,22 @@ export async function getYearlyReport(
 
   const yearAnchor = DateTime.fromObject({ year, month: 1, day: 1 }, { zone: timezone });
   const yearStart = yearAnchor.startOf("year").toJSDate();
-  const yearEnd = yearAnchor.endOf("year").toJSDate();
+  const yearEndExclusive = yearAnchor.plus({ years: 1 }).startOf("year").toJSDate();
   const yearStartDate = yearAnchor.startOf("year").toFormat("yyyy-MM-dd");
   const yearEndDate = yearAnchor.endOf("year").toFormat("yyyy-MM-dd");
 
   const [entriesRows, exitsRows, paymentsRows, subscriptionRevenue] = await Promise.all([
     db<SessionTimeRow>("tb_parking_sessions")
       .where({ org_id: orgId })
-      .whereBetween("entered_at", [yearStart, yearEnd])
+      .where(timestampRange("entered_at", yearStart, yearEndExclusive))
       .select("entered_at"),
     applyCompletedExitFilter(
       db<SessionTimeRow>("tb_parking_sessions").where({ org_id: orgId })
     )
-      .whereBetween("exited_at", [yearStart, yearEnd])
+      .where(timestampRange("exited_at", yearStart, yearEndExclusive))
       .select("exited_at"),
-    regularPaymentsQuery(orgId, yearStart, yearEnd),
-    getSubscriptionRevenue(orgId, yearStart, yearEnd, yearStartDate, yearEndDate),
+    paymentLedgerQuery(orgId, yearStart, yearEndExclusive),
+    getSubscriptionRevenue(orgId, yearStart, yearEndExclusive, yearStartDate, yearEndDate),
   ]);
 
   const entriesByMonth = Array.from({ length: 13 }, () => 0);
@@ -316,7 +334,7 @@ export async function getYearlyReport(
 
   const revenueByMonth = Array.from({ length: 13 }, () => 0);
   for (const row of paymentsRows) {
-    revenueByMonth[DateTime.fromJSDate(new Date(row.paid_at)).setZone(timezone).month] += Number(row.amount);
+    revenueByMonth[DateTime.fromJSDate(new Date(row.paid_at)).setZone(timezone).month] += safeAmount(row.amount);
   }
 
   const monthlyBreakdown = [];
@@ -341,6 +359,7 @@ export async function getYearlyReport(
     online_revenue: onlineRevenue,
     regular_revenue: regularRevenue,
     subscription_revenue: subscriptionRevenue,
+    vip_revenue: 0,
     total_revenue: regularRevenue + subscriptionRevenue,
     monthly_breakdown: monthlyBreakdown,
   };
@@ -373,25 +392,45 @@ function requireCompleteRange(from: string | undefined, to: string | undefined, 
   return [from, to];
 }
 
-function buildBuckets(start: DateTime, end: DateTime, granularity: RangeGranularity): string[] {
-  const buckets: string[] = [];
+interface RangeBucket {
+  key: string;
+  startUnix: number;
+  endExclusiveUnix: number;
+}
+
+function nextBucketStart(value: DateTime, granularity: RangeGranularity): DateTime {
+  if (granularity === "daily") return value.plus({ days: 1 });
+  if (granularity === "monthly") return value.plus({ months: 1 });
+  return value.plus({ years: 1 });
+}
+
+function buildBuckets(start: DateTime, end: DateTime, granularity: RangeGranularity): RangeBucket[] {
+  const buckets: RangeBucket[] = [];
   let cursor = start;
   while (cursor.toMillis() <= end.toMillis()) {
-    buckets.push(
-      granularity === "daily"
-        ? cursor.toFormat("yyyy-MM-dd")
-        : granularity === "monthly"
-          ? cursor.toFormat("yyyy-MM")
-          : cursor.toFormat("yyyy")
-    );
-    cursor =
-      granularity === "daily"
-        ? cursor.plus({ days: 1 })
-        : granularity === "monthly"
-          ? cursor.plus({ months: 1 })
-          : cursor.plus({ years: 1 });
+    const next = nextBucketStart(cursor, granularity);
+    buckets.push({
+      key:
+        granularity === "daily"
+          ? cursor.toFormat("yyyy-MM-dd")
+          : granularity === "monthly"
+            ? cursor.toFormat("yyyy-MM")
+            : cursor.toFormat("yyyy"),
+      startUnix: unixSeconds(cursor.toJSDate()),
+      endExclusiveUnix: unixSeconds(next.toJSDate()),
+    });
+    cursor = next;
   }
   return buckets;
+}
+
+function bucketExpression(column: string, buckets: RangeBucket[]) {
+  const bindings: Knex.RawBinding[] = [];
+  const clauses = buckets.map((bucket) => {
+    bindings.push(column, bucket.startUnix, column, bucket.endExclusiveUnix, bucket.key);
+    return "WHEN ?? >= FROM_UNIXTIME(?) AND ?? < FROM_UNIXTIME(?) THEN ?";
+  });
+  return db.raw(`CASE ${clauses.join(" ")} END as bucket`, bindings);
 }
 
 async function getRangeReport(
@@ -410,40 +449,35 @@ async function getRangeReport(
   const zonedEnd = end.setZone(timezone, { keepLocalTime: true }).endOf(
     granularity === "daily" ? "day" : granularity === "monthly" ? "month" : "year"
   );
+  const buckets = buildBuckets(zonedStart, zonedEnd, granularity);
   const startDate = zonedStart.toJSDate();
-  const endDate = zonedEnd.toJSDate();
-  const format = granularity === "daily" ? "%Y-%m-%d" : granularity === "monthly" ? "%Y-%m" : "%Y";
+  const endExclusive = new Date(buckets[buckets.length - 1].endExclusiveUnix * 1000);
 
   const [entries, exits, payments, subscriptions] = await Promise.all([
     db("tb_parking_sessions")
       .where({ org_id: orgId })
-      .whereBetween("entered_at", [startDate, endDate])
-      .select(db.raw("DATE_FORMAT(entered_at, ?) as bucket", [format]))
+      .where(timestampRange("entered_at", startDate, endExclusive))
+      .select(bucketExpression("entered_at", buckets))
       .count<GroupedCountRow[]>("id as count")
       .groupBy("bucket"),
     applyCompletedExitFilter(
       db("tb_parking_sessions").where({ org_id: orgId })
     )
-      .whereBetween("exited_at", [startDate, endDate])
-      .select(db.raw("DATE_FORMAT(exited_at, ?) as bucket", [format]))
+      .where(timestampRange("exited_at", startDate, endExclusive))
+      .select(bucketExpression("exited_at", buckets))
       .count<GroupedCountRow[]>("id as count")
       .groupBy("bucket"),
     db("tb_payments")
-      .join("tb_parking_sessions", "tb_parking_sessions.id", "tb_payments.session_id")
-      .where("tb_payments.org_id", orgId)
-      .andWhere("tb_parking_sessions.session_source", "regular")
-      .whereBetween("tb_payments.paid_at", [startDate, endDate])
-      .select(
-        db.raw("DATE_FORMAT(tb_payments.paid_at, ?) as bucket", [format]),
-        "tb_payments.payment_method"
-      )
-      .sum<GroupedPaymentRow[]>("tb_payments.amount as total")
-      .groupBy("bucket", "tb_payments.payment_method"),
+      .where("org_id", orgId)
+      .where(timestampRange("paid_at", startDate, endExclusive))
+      .select(bucketExpression("paid_at", buckets), "payment_method")
+      .sum<GroupedPaymentRow[]>("amount as total")
+      .groupBy("bucket", "payment_method"),
     db<SubscriptionRangeRow>("tb_subscriptions")
       .where({ org_id: orgId })
       .andWhere((builder) => {
         builder
-          .whereBetween("created_at", [startDate, endDate])
+          .where(timestampRange("created_at", startDate, endExclusive))
           .orWhereBetween("last_renewed_at", [
             zonedStart.toFormat("yyyy-MM-dd"),
             zonedEnd.toFormat("yyyy-MM-dd"),
@@ -458,7 +492,7 @@ async function getRangeReport(
   const onlineMap = new Map<string, number>();
   for (const row of payments) {
     const map = row.payment_method === "online" ? onlineMap : cashMap;
-    map.set(row.bucket, (map.get(row.bucket) ?? 0) + Number(row.total ?? 0));
+    map.set(row.bucket, (map.get(row.bucket) ?? 0) + safeAmount(row.total));
   }
 
   const subscriptionMap = new Map<string, number>();
@@ -478,10 +512,10 @@ async function getRangeReport(
         : granularity === "monthly"
           ? occurrence.toFormat("yyyy-MM")
           : occurrence.toFormat("yyyy");
-    subscriptionMap.set(bucket, (subscriptionMap.get(bucket) ?? 0) + Number(row.price_snapshot));
+    subscriptionMap.set(bucket, (subscriptionMap.get(bucket) ?? 0) + safeAmount(row.price_snapshot));
   }
 
-  const items = buildBuckets(zonedStart, zonedEnd, granularity).map((bucket) => {
+  const items = buckets.map(({ key: bucket }) => {
     const cashRevenue = cashMap.get(bucket) ?? 0;
     const onlineRevenue = onlineMap.get(bucket) ?? 0;
     const subscriptionRevenue = subscriptionMap.get(bucket) ?? 0;
@@ -494,6 +528,7 @@ async function getRangeReport(
       online_revenue: onlineRevenue,
       regular_revenue: cashRevenue + onlineRevenue,
       subscription_revenue: subscriptionRevenue,
+      vip_revenue: 0,
       revenue: cashRevenue + onlineRevenue + subscriptionRevenue,
     };
   });
@@ -506,6 +541,7 @@ async function getRangeReport(
       online_revenue: sum.online_revenue + item.online_revenue,
       regular_revenue: sum.regular_revenue + item.regular_revenue,
       subscription_revenue: sum.subscription_revenue + item.subscription_revenue,
+      vip_revenue: 0,
       total_revenue: sum.total_revenue + item.revenue,
     }),
     {
@@ -515,6 +551,7 @@ async function getRangeReport(
       online_revenue: 0,
       regular_revenue: 0,
       subscription_revenue: 0,
+      vip_revenue: 0,
       total_revenue: 0,
     }
   );

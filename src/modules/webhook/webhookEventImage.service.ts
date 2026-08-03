@@ -7,6 +7,12 @@ import { ApiError } from "@/utils/ApiError";
 
 export type WebhookEventImageKind = "overview" | "vehicle" | "plate";
 
+export interface StoredWebhookEventImages {
+  overviewImage: Buffer | null;
+  vehicleImage: Buffer | null;
+  plateImage: Buffer | null;
+}
+
 const EVENT_UPLOAD_ROOT = path.resolve(process.cwd(), "uploads", "parking-events");
 
 function detectImage(buffer: Buffer): { extension: "jpg" | "png"; contentType: string } | null {
@@ -147,6 +153,37 @@ function resolveEventImagePath(relativePath: string, orgId: number, eventId: num
     return null;
   }
   return absolutePath;
+}
+
+async function readStoredImage(
+  relativePath: string | null,
+  orgId: number,
+  eventId: number
+): Promise<Buffer | null> {
+  if (!relativePath) return null;
+  const absolutePath = resolveEventImagePath(relativePath, orgId, eventId);
+  if (!absolutePath) return null;
+  const buffer = await fs.readFile(absolutePath).catch(() => null);
+  return buffer && detectImage(buffer) ? buffer : null;
+}
+
+export async function readWebhookEventImages(
+  orgId: number,
+  eventId: number
+): Promise<StoredWebhookEventImages> {
+  const event = await db("tb_webhook_events")
+    .select("overview_image_path", "vehicle_image_path", "plate_image_path")
+    .where({ id: eventId, org_id: orgId })
+    .first();
+  if (!event) {
+    return { overviewImage: null, vehicleImage: null, plateImage: null };
+  }
+  const [overviewImage, vehicleImage, plateImage] = await Promise.all([
+    readStoredImage(event.overview_image_path, orgId, eventId),
+    readStoredImage(event.vehicle_image_path, orgId, eventId),
+    readStoredImage(event.plate_image_path, orgId, eventId),
+  ]);
+  return { overviewImage, vehicleImage, plateImage };
 }
 
 export async function getWebhookEventImage(

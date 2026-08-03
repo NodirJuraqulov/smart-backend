@@ -15,7 +15,12 @@ import { printReceipt } from "@/modules/printer/printer.service";
 import { logActivity } from "@/utils/activityLog";
 import { env } from "@/config/env";
 import { NormalizedCameraEvent } from "@/modules/webhook/parsers/normalizedCameraEvent";
-import { resolveParkingImageAbsolutePath, saveParkingImages } from "./parkingImage.service";
+import { readWebhookEventImages } from "@/modules/webhook/webhookEventImage.service";
+import {
+  ParkingImageInput,
+  resolveParkingImageAbsolutePath,
+  saveParkingImages,
+} from "./parkingImage.service";
 import { applyInsideSessionsFilter, INSIDE_SESSION_STATUSES } from "./sessionStatus";
 
 export type SessionSource = "regular" | "subscription" | "vip";
@@ -256,14 +261,30 @@ async function attachCameraImages(
   direction: "entry" | "exit",
   event: NormalizedCameraEvent
 ): Promise<SessionRecord> {
+  return attachImageInputs(
+    session,
+    direction,
+    { buffer: event.overviewImage, originalFileName: event.overviewImageFileName },
+    { buffer: event.vehicleImage, originalFileName: event.vehicleImageFileName },
+    { buffer: event.plateImage, originalFileName: event.plateImageFileName }
+  );
+}
+
+async function attachImageInputs(
+  session: SessionRecord,
+  direction: "entry" | "exit",
+  overview: ParkingImageInput,
+  vehicle: ParkingImageInput,
+  plate: ParkingImageInput
+): Promise<SessionRecord> {
   try {
     const paths = await saveParkingImages(
       session.org_id,
       session.id,
       direction,
-      { buffer: event.overviewImage, originalFileName: event.overviewImageFileName },
-      { buffer: event.vehicleImage, originalFileName: event.vehicleImageFileName },
-      { buffer: event.plateImage, originalFileName: event.plateImageFileName }
+      overview,
+      vehicle,
+      plate
     );
     const updates: Record<string, string> = {};
     if (paths.overviewPath) updates[`${direction}_overview_image_path`] = paths.overviewPath;
@@ -606,6 +627,28 @@ export async function attachWebhookEntryImages(
   event: NormalizedCameraEvent
 ): Promise<SessionRecord> {
   return attachCameraImages(session, "entry", event);
+}
+
+export async function attachWebhookEventEntryImages(
+  session: SessionRecord,
+  webhookEventId: number
+): Promise<SessionRecord> {
+  try {
+    const images = await readWebhookEventImages(session.org_id, webhookEventId);
+    return attachImageInputs(
+      session,
+      "entry",
+      { buffer: images.overviewImage },
+      { buffer: images.vehicleImage },
+      { buffer: images.plateImage }
+    );
+  } catch (err) {
+    console.warn(
+      `Webhook event rasmlarini sessiyaga biriktirib bo'lmadi (org=${session.org_id}, session=${session.id}, event=${webhookEventId}):`,
+      err instanceof Error ? err.message : err
+    );
+    return session;
+  }
 }
 
 export async function entryManual(

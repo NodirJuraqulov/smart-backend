@@ -3,6 +3,7 @@ import { env } from "@/config/env";
 import { AuthTokenPayload } from "@/modules/auth/auth.service";
 import {
   attachWebhookEntryImages,
+  attachWebhookEventEntryImages,
   createEntrySessionInTransaction,
   displayPlateNumber,
   hasAvailableCapacity,
@@ -425,22 +426,26 @@ export async function acceptEntryCandidate(
     });
     return { candidate, session };
   });
+  const attachedSession = await attachWebhookEventEntryImages(
+    transactionResult.session,
+    transactionResult.candidate.webhook_event_id
+  );
   const barrier = await recordEntryBarrierAttempt({
     actorId: actor.id,
     orgId,
-    sessionId: transactionResult.session.id,
+    sessionId: attachedSession.id,
     retryAttempt: false,
   });
   if (barrier.status === "failed") {
     emitEntryBarrierFailed(orgId, {
-      sessionId: transactionResult.session.id,
-      plateNumber: displayPlateNumber(transactionResult.session.plate_number),
+      sessionId: attachedSession.id,
+      plateNumber: displayPlateNumber(attachedSession.plate_number),
       detail: barrier.detail,
     });
   } else {
     emitEntryCompleted(orgId, {
-      sessionId: transactionResult.session.id,
-      plateNumber: displayPlateNumber(transactionResult.session.plate_number),
+      sessionId: attachedSession.id,
+      plateNumber: displayPlateNumber(attachedSession.plate_number),
       barrierStatus: barrier.status,
     });
   }
@@ -448,13 +453,13 @@ export async function acceptEntryCandidate(
     candidateId,
     orgId,
     status: "accepted",
-    sessionId: transactionResult.session.id,
+    sessionId: attachedSession.id,
     barrierStatus: barrier.status,
-    plateNumber: displayPlateNumber(transactionResult.session.plate_number),
+    plateNumber: displayPlateNumber(attachedSession.plate_number),
   });
   return {
-    session_id: transactionResult.session.id,
-    plate: displayPlateNumber(transactionResult.session.plate_number),
+    session_id: attachedSession.id,
+    plate: displayPlateNumber(attachedSession.plate_number),
     barrier_status: barrier.status,
   };
 }
