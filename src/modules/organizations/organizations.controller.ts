@@ -7,6 +7,7 @@ import { parseId } from "@/utils/httpParams";
 import { assertValidLogin, assertValidPassword } from "@/utils/validation";
 import * as organizationsService from "./organizations.service";
 import { resetOrganizationTestData } from "./organizationTestDataReset.service";
+import { expirePendingExitCandidatesForOrganization } from "@/modules/exitCandidates/exitCandidatesExpiry.service";
 
 const DEFAULT_CAMERA_BRAND = "hikvision";
 const DEBUG_CAMERA_BRAND = "debug";
@@ -176,6 +177,12 @@ export async function resetTestDataHandler(req: Request, res: Response) {
     return;
   }
   res.json(await resetOrganizationTestData(id, req.user!.id));
+}
+
+export async function expireStaleExitCandidatesHandler(req: Request, res: Response) {
+  const id = parseId(req, res);
+  if (id === null) return;
+  res.json(await expirePendingExitCandidatesForOrganization(id, req.user!.id));
 }
 
 export async function statsHandler(req: Request, res: Response) {

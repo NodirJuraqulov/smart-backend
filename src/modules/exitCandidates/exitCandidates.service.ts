@@ -97,7 +97,7 @@ function serializeSessionSummary(session: SessionSummary) {
   };
 }
 
-const PENDING_COALESCE_SECONDS = 30;
+const NULL_PLATE_COALESCE_SECONDS = 60;
 const FORCE_OPEN_REASONS = new Set<ForceOpenReason>([
   "plate_not_found",
   "camera_misread",
@@ -374,6 +374,7 @@ export async function createExitCandidate(input: {
       .where({ id: input.webhookEventId, org_id: input.orgId, direction: "exit" })
       .first();
     if (!webhookEvent) throw new ApiError("Webhook exit hodisasi topilmadi", 404);
+    const cameraEventAt = resolveSafeCameraEventTime(webhookEvent.camera_event_at, webhookEvent.created_at);
     const matchingSession = input.detectedPlate
       ? await trx<SessionSummary>("tb_parking_sessions")
           .select("id", "status")
@@ -396,28 +397,40 @@ export async function createExitCandidate(input: {
       };
     }
     const matchedSession = matchingSession?.status === "active" ? matchingSession : null;
-    let pendingQuery = trx<CandidateRow>("tb_exit_candidates")
-      .where({ org_id: input.orgId, status: "pending" })
-      .andWhere("created_at", ">=", trx.raw(`NOW() - INTERVAL ${PENDING_COALESCE_SECONDS} SECOND`));
-    if (matchedSession || input.detectedPlate) {
-      pendingQuery = pendingQuery.andWhere((builder) => {
-        if (matchedSession) builder.where("matched_session_id", matchedSession.id);
-        if (input.detectedPlate) {
-          if (matchedSession) builder.orWhere("detected_plate", input.detectedPlate);
-          else builder.where("detected_plate", input.detectedPlate);
-        }
-      });
-      const pending = await pendingQuery.orderBy("created_at", "desc").first();
-      if (pending) {
-        await trx("tb_webhook_events").where({ id: input.webhookEventId }).update({
-          processing_result: "exit_candidate_coalesced",
-          processing_reason: "pending_candidate_exists",
-          session_id: matchedSession?.id ?? null,
-        });
-        return { candidateId: pending.id, created: false, coalesced: true, skipped: false as const };
-      }
+    let pendingQuery = trx<CandidateRow>("tb_exit_candidates").where({
+      org_id: input.orgId,
+      status: "pending",
+    });
+    if (input.detectedPlate) {
+      pendingQuery = pendingQuery.andWhere({ detected_plate: input.detectedPlate });
+    } else {
+      pendingQuery = pendingQuery
+        .whereNull("detected_plate")
+        .andWhere(
+          "camera_event_at",
+          ">=",
+          new Date(cameraEventAt.getTime() - NULL_PLATE_COALESCE_SECONDS * 1000)
+        )
+        .andWhere(
+          "camera_event_at",
+          "<=",
+          new Date(cameraEventAt.getTime() + NULL_PLATE_COALESCE_SECONDS * 1000)
+        );
     }
-    const cameraEventAt = resolveSafeCameraEventTime(webhookEvent.camera_event_at, webhookEvent.created_at);
+    const pending = await pendingQuery.orderBy("camera_event_at", "desc").forUpdate().first();
+    if (pending) {
+      await trx("tb_exit_candidates").where({ id: pending.id, org_id: input.orgId }).update({
+        camera_event_at: cameraEventAt,
+        confidence: input.confidence,
+        updated_at: trx.fn.now(),
+      });
+      await trx("tb_webhook_events").where({ id: input.webhookEventId, org_id: input.orgId }).update({
+        processing_result: "exit_candidate_coalesced",
+        processing_reason: "pending_candidate_exists",
+        session_id: matchedSession?.id ?? pending.matched_session_id ?? null,
+      });
+      return { candidateId: pending.id, created: false, coalesced: true, skipped: false as const };
+    }
     const [candidateId] = await trx("tb_exit_candidates").insert({
       org_id: input.orgId,
       webhook_event_id: input.webhookEventId,
@@ -426,7 +439,7 @@ export async function createExitCandidate(input: {
       confidence: input.confidence,
       camera_event_at: cameraEventAt,
     });
-    await trx("tb_webhook_events").where({ id: input.webhookEventId }).update({
+    await trx("tb_webhook_events").where({ id: input.webhookEventId, org_id: input.orgId }).update({
       processing_result: "exit_candidate_pending",
       processing_reason: matchedSession
         ? "exact_inside_session_found"

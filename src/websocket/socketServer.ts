@@ -33,8 +33,8 @@ export interface ExitCandidateCreatedPayload {
 export interface ExitCandidateResolvedPayload {
   candidateId: number;
   orgId: number;
-  status: "accepted" | "dismissed";
-  resolutionType: "exact" | "reassigned" | "dismissed" | "forced_open";
+  status: "accepted" | "dismissed" | "expired";
+  resolutionType: "exact" | "reassigned" | "dismissed" | "forced_open" | null;
   sessionId: number | null;
   barrierStatus: ExitBarrierStatus | null;
   plateNumber?: string | null;
@@ -274,6 +274,19 @@ export function emitExitCandidateCreated(orgId: number, payload: ExitCandidateCr
 
 export function emitExitCandidateResolved(orgId: number, payload: ExitCandidateResolvedPayload): void {
   getIO()?.to(`org_${orgId}`).emit("exit_candidate_resolved", payload);
+  if (payload.status === "expired") {
+    emitPublicExitStatusChanged(orgId, {
+      state: "idle",
+      plate: null,
+      session_source: null,
+      amount: null,
+      payment_method: null,
+      duration_minutes: null,
+      barrier_status: null,
+      updated_at: new Date().toISOString(),
+    });
+    return;
+  }
   const barrierState = publicDisplayStateForBarrier(payload.barrierStatus);
   emitPublicExitStatusChanged(orgId, {
     state:

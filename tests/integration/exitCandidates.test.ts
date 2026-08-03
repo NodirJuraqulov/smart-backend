@@ -99,25 +99,33 @@ app.use(express.json());
 app.use("/api/exit-candidates", exitCandidatesRouter);
 app.use(errorHandler);
 
-function dahuaPayload(plate: string) {
+function dahuaPayload(
+  plate: string | null,
+  confidence = 91,
+  snapTime = DateTime.now()
+) {
   return {
     Picture: {
       NormalPic: { Content: jpegBase64, PicName: "overview.jpg" },
       PlatePic: { Content: jpegBase64, PicName: "plate.jpg" },
     },
-    Plate: { IsExist: true, PlateNumber: plate, Confidence: 91 },
+    Plate: { IsExist: plate !== null, PlateNumber: plate ?? "", Confidence: confidence },
     SnapInfo: {
       DeviceID: "candidate-camera",
-      SnapTime: DateTime.now().toFormat("yyyy-MM-dd HH:mm:ss"),
+      SnapTime: snapTime.toFormat("yyyy-MM-dd HH:mm:ss"),
     },
   };
 }
 
-async function postExit(plate: string): Promise<request.Response> {
+async function postExit(
+  plate: string | null,
+  confidence = 91,
+  snapTime = DateTime.now()
+): Promise<request.Response> {
   return request(app)
     .post(`/api/webhook/camera/${webhookToken}/exit`)
     .set("Content-Type", "application/json")
-    .send(dahuaPayload(plate));
+    .send(dahuaPayload(plate, confidence, snapTime));
 }
 
 async function createSession(
@@ -178,8 +186,12 @@ function createOrganizationForTest(
   return createTestOrganization(overrides);
 }
 
-function postExitForTest(plate: string): Promise<request.Response> {
-  return postExit(plate);
+function postExitForTest(
+  plate: string | null,
+  confidence = 91,
+  snapTime = DateTime.now()
+): Promise<request.Response> {
+  return postExit(plate, confidence, snapTime);
 }
 
 function createSessionForTest(
@@ -650,5 +662,64 @@ describe("exit candidate completion workflow", () => {
       expect(retry.status).toBe(400);
       expect(retry.body.message).toBe("Shlagbaum konfiguratsiya qilinmagan, administrator bilan bog'laning");
     }
+  });
+
+  it("18. bir xil plate uchun pending candidate yangilanadi va yangisi yaratilmaydi", async () => {
+    await postExitForTest("01D100AA", 61);
+    const first = await findCandidateForTest("01D100AA");
+    await testDb("tb_webhook_events").where({ id: first.webhook_event_id }).update({
+      created_at: testDb.raw("DATE_SUB(NOW(), INTERVAL 20 SECOND)"),
+    });
+    const secondResponse = await postExitForTest("01D100AA", 87);
+    const candidates = await testDb("tb_exit_candidates").where({
+      org_id: orgId,
+      detected_plate: "01D100AA",
+    });
+    expect(secondResponse.body).toMatchObject({
+      candidate_created: false,
+      candidate_coalesced: true,
+      candidate_id: first.id,
+    });
+    expect(candidates).toHaveLength(1);
+    expect(Number(candidates[0].confidence)).toBe(87);
+  });
+
+  it("19. plate null webhooklar 60 soniya ichida bitta pending candidate'da birlashadi", async () => {
+    await postExitForTest(null, 42, DateTime.now().minus({ seconds: 30 }));
+    const secondResponse = await postExitForTest(null, 73);
+    const candidates = await testDb("tb_exit_candidates")
+      .where({ org_id: orgId, status: "pending" })
+      .whereNull("detected_plate");
+    expect(secondResponse.body).toMatchObject({
+      candidate_created: false,
+      candidate_coalesced: true,
+    });
+    expect(candidates).toHaveLength(1);
+    expect(Number(candidates[0].confidence)).toBe(73);
+  });
+
+  it("20. plate null webhook 60 soniyadan keyin yangi candidate yaratadi", async () => {
+    await postExitForTest(null, 44, DateTime.now().minus({ seconds: 75 }));
+    const secondResponse = await postExitForTest(null, 75);
+    const candidates = await testDb("tb_exit_candidates")
+      .where({ org_id: orgId, status: "pending" })
+      .whereNull("detected_plate");
+    expect(secondResponse.body).toMatchObject({
+      candidate_created: true,
+      candidate_coalesced: false,
+    });
+    expect(candidates).toHaveLength(2);
+  });
+
+  it("21. turli plate'lar uchun alohida pending candidate'lar yaratiladi", async () => {
+    await postExitForTest("01D201AA");
+    await postExitForTest("01D202AA");
+    const candidates = await testDb("tb_exit_candidates")
+      .where({ org_id: orgId, status: "pending" })
+      .whereIn("detected_plate", ["01D201AA", "01D202AA"]);
+    expect(candidates).toHaveLength(2);
+    expect(new Set(candidates.map((candidate) => candidate.detected_plate))).toEqual(
+      new Set(["01D201AA", "01D202AA"])
+    );
   });
 });
