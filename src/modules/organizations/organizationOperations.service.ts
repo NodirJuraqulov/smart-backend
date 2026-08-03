@@ -35,6 +35,16 @@ export async function emergencyBarrierOpen(
   return { barrier_status: result.status };
 }
 
+export async function getGateLayout(actor: AuthTokenPayload, orgId: number) {
+  const query = db<{ id: number; gate_layout: "shared" | "separate" }>("tb_organizations")
+    .select("gate_layout")
+    .where({ id: orgId });
+  if (actor.role !== "super_admin") query.andWhere({ id: actor.org_id ?? -1 });
+  const organization = await query.first();
+  if (!organization) throw new ApiError("Stoyanka topilmadi", 404);
+  return { gate_layout: organization.gate_layout };
+}
+
 export async function listStaleSessions(actor: AuthTokenPayload, orgId: number) {
   await assertOrganizationAccess(actor, orgId);
   const now = new Date();
