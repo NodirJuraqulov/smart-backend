@@ -6,7 +6,11 @@ const MAX_REQUESTS = 60;
 const PAYMENT_MAX_REQUESTS = 100;
 
 function tooManyRequestsHandler(req: Request, res: Response) {
-  res.status(429).json({ message: "Juda ko'p so'rov, birozdan keyin urinib ko'ring" });
+  res.status(429).json({ message: "Webhook so'rovlari limiti oshdi. Bir daqiqadan keyin qayta urining." });
+}
+
+function tooManyPaymentRequestsHandler(req: Request, res: Response) {
+  res.status(429).json({ message: "To'lov webhook so'rovlari limiti oshdi. Bir daqiqadan keyin qayta urining." });
 }
 
 export function createWebhookRateLimit(limit: number) {
@@ -15,7 +19,6 @@ export function createWebhookRateLimit(limit: number) {
     limit,
     standardHeaders: true,
     legacyHeaders: false,
-    keyGenerator: (req: Request): string => `webhook_token:${req.params.token}`,
     handler: tooManyRequestsHandler,
   });
 }
@@ -26,7 +29,7 @@ export function createPaymentWebhookRateLimit(limit: number) {
     limit,
     standardHeaders: true,
     legacyHeaders: false,
-    handler: tooManyRequestsHandler,
+    handler: tooManyPaymentRequestsHandler,
   });
 }
 

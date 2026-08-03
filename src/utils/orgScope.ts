@@ -6,6 +6,9 @@ export function resolveOrgIdRequired(actor: AuthTokenPayload, requestedOrgId?: n
     if (!actor.org_id) {
       throw new ApiError("Operator hech qanday stoyankaga biriktirilmagan", 400);
     }
+    if (requestedOrgId !== undefined && requestedOrgId !== actor.org_id) {
+      throw new ApiError("Stoyanka topilmadi", 404);
+    }
     return actor.org_id;
   }
   if (!requestedOrgId) {
@@ -18,6 +21,9 @@ export function resolveOrgIdFilter(actor: AuthTokenPayload, requestedOrgId?: num
   if (actor.role === "operator" || actor.role === "owner") {
     if (!actor.org_id) {
       throw new ApiError("Operator hech qanday stoyankaga biriktirilmagan", 400);
+    }
+    if (requestedOrgId !== undefined && requestedOrgId !== actor.org_id) {
+      throw new ApiError("Stoyanka topilmadi", 404);
     }
     return actor.org_id;
   }

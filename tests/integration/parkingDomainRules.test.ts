@@ -159,7 +159,7 @@ describe("parking fizik bandlik va statistik domen qoidalari", () => {
     expect(report.total_revenue).toBe(7000);
   });
 
-  it("clear-test faqat actor tashkilotidagi inside sessiyalarni transactionda yakunlaydi", async () => {
+  it("clear-test begona org_id'ni rad etib actor tashkilotidagi inside sessiyalarni yakunlaydi", async () => {
     const activeId = await insertSession({ plate: "CLEAR-ACTIVE", status: "active" });
     const waitingId = await insertSession({ plate: "CLEAR-WAITING", status: "awaiting_payment" });
     const otherId = await insertSession({
@@ -168,7 +168,10 @@ describe("parking fizik bandlik va statistik domen qoidalari", () => {
       status: "active",
     });
 
-    await expect(clearAllActiveSessions(operator, otherOrgId)).resolves.toEqual({ cleared: 2 });
+    await expect(clearAllActiveSessions(operator, otherOrgId)).rejects.toMatchObject({ statusCode: 404 });
+    expect((await db("tb_parking_sessions").where({ id: otherId }).first()).status).toBe("active");
+
+    await expect(clearAllActiveSessions(operator)).resolves.toEqual({ cleared: 2 });
 
     const cleared = await db("tb_parking_sessions").whereIn("id", [activeId, waitingId]).orderBy("id");
     expect(cleared.every((session) => session.status === "completed")).toBe(true);

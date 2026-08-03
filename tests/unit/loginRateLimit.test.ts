@@ -28,16 +28,19 @@ function buildServer(): http.Server {
 }
 
 describe("login rate limiting", () => {
-  it("5 marta muvaffaqiyatsiz urinish 401 qaytaradi, 6-chisi 429 bilan bloklanadi", async () => {
+  it("10 marta muvaffaqiyatsiz urinish 401 qaytaradi, 11-chisi 429 bilan bloklanadi", async () => {
     const server = buildServer();
 
-    for (let attempt = 1; attempt <= 5; attempt++) {
+    for (let attempt = 1; attempt <= 10; attempt++) {
       const res = await request(server).post("/login").send({ login: "rl_user", password: "wrong" });
       expect(res.status).toBe(401);
     }
 
     const blocked = await request(server).post("/login").send({ login: "rl_user", password: "wrong" });
     expect(blocked.status).toBe(429);
+    expect(blocked.body).toEqual({
+      message: "Login urinishlari limiti oshdi. Bir daqiqadan keyin qayta urining.",
+    });
 
     server.close();
   });

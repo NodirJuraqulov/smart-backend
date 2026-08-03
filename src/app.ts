@@ -3,10 +3,10 @@ import express from "express";
 import helmet from "helmet";
 import morgan from "morgan";
 import path from "path";
-import { db } from "./config/db";
 import { env } from "./config/env";
 import { errorHandler, notFoundHandler } from "./middleware/errorHandler";
 import { generalApiRateLimit } from "./middleware/generalRateLimit";
+import { healthHandler } from "./modules/health/health.controller";
 import authRouter from "./modules/auth/auth.routes";
 import organizationsRouter, { adminStatsRouter } from "./modules/organizations/organizations.routes";
 import usersRouter from "./modules/users/users.routes";
@@ -30,6 +30,7 @@ import parkingSessionsEntryBarrierRouter from "./modules/entryCandidates/parking
 
 const app = express();
 
+app.set("trust proxy", "loopback");
 app.use(
   helmet({
     contentSecurityPolicy: {
@@ -52,52 +53,7 @@ app.use("/api/payments", paymentRouter);
 app.use(express.json({ limit: "10mb" }));
 app.use(morgan(env.nodeEnv === "development" ? "dev" : "combined"));
 
-const HEALTH_CHECK_TIMEOUT_MS = 2000;
-
-function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(message)), ms);
-    promise.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (err) => {
-        clearTimeout(timer);
-        reject(err);
-      }
-    );
-  });
-}
-
-app.get("/health", async (req, res) => {
-  const pool = (db.client as unknown as { pool: Record<string, unknown> }).pool as {
-    min: number;
-    max: number;
-    numUsed: () => number;
-    numFree: () => number;
-    numPendingAcquires: () => number;
-  };
-  const poolStats = {
-    min: pool.min,
-    max: pool.max,
-    used: pool.numUsed(),
-    free: pool.numFree(),
-    pending_acquires: pool.numPendingAcquires(),
-  };
-
-  try {
-    await withTimeout(db.raw("SELECT 1"), HEALTH_CHECK_TIMEOUT_MS, "DB javob berish vaqti tugadi (2s)");
-    res.json({ status: "ok", database: "connected", pool: poolStats });
-  } catch (err) {
-    res.status(503).json({
-      status: "error",
-      database: "disconnected",
-      message: err instanceof Error ? err.message : "DB ulanishida noma'lum xato",
-      pool: poolStats,
-    });
-  }
-});
+app.get("/health", healthHandler);
 
 if (env.nodeEnv !== "production") {
   app.get("/api/dev/crash-test", (req, res) => {
