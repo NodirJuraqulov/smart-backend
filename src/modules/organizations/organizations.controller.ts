@@ -6,6 +6,7 @@ import { logActivity } from "@/utils/activityLog";
 import { parseId } from "@/utils/httpParams";
 import { assertValidLogin, assertValidPassword } from "@/utils/validation";
 import * as organizationsService from "./organizations.service";
+import { resetOrganizationTestData } from "./organizationTestDataReset.service";
 
 const DEFAULT_CAMERA_BRAND = "hikvision";
 const DEBUG_CAMERA_BRAND = "debug";
@@ -165,6 +166,16 @@ export async function capacityHandler(req: Request, res: Response) {
   await logActivity(req.user!.id, "organization.capacity_updated", "organization", id, { total_capacity });
 
   res.json({ organization });
+}
+
+export async function resetTestDataHandler(req: Request, res: Response) {
+  const id = parseId(req, res);
+  if (id === null) return;
+  if (req.body?.confirmation !== "RESET") {
+    res.status(400).json({ message: "Tasdiqlash uchun confirmation maydoni aniq 'RESET' bo'lishi kerak" });
+    return;
+  }
+  res.json(await resetOrganizationTestData(id, req.user!.id));
 }
 
 export async function statsHandler(req: Request, res: Response) {
