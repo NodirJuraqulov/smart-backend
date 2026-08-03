@@ -14,24 +14,49 @@ function requestBody(fetchMock: ReturnType<typeof vi.fn<typeof fetch>>, index: n
   return JSON.parse(body) as Record<string, unknown>;
 }
 
+function successfulRpcFetchMock(): ReturnType<typeof vi.fn<typeof fetch>> {
+  return vi
+    .fn<typeof fetch>()
+    .mockResolvedValueOnce(
+      rpcResponse({
+        result: false,
+        params: { random: "ABC123", realm: "Login to 192.168.1.50", encryption: "Default" },
+        session: "temporary-session",
+      })
+    )
+    .mockResolvedValueOnce(rpcResponse({ result: true, session: "authenticated-session" }))
+    .mockResolvedValueOnce(rpcResponse({ result: true }));
+}
+
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
 describe("Dahua RPC2 openRelay", () => {
+  it("login bosqichlari RPC2_Login endpointiga yuboriladi", async () => {
+    const fetchMock = successfulRpcFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+    await openRelay({ host: "192.168.1.50", username: "admin", password: "secret" });
+    expect(fetchMock.mock.calls.slice(0, 2).map((call) => String(call[0]))).toEqual([
+      "http://192.168.1.50/RPC2_Login",
+      "http://192.168.1.50/RPC2_Login",
+    ]);
+  });
+
+  it("openStrobe RPC2 endpointiga authenticated session bilan yuboriladi", async () => {
+    const fetchMock = successfulRpcFetchMock();
+    vi.stubGlobal("fetch", fetchMock);
+    await openRelay({ host: "192.168.1.50", username: "admin", password: "secret" });
+    expect(String(fetchMock.mock.calls[2]?.[0])).toBe("http://192.168.1.50/RPC2");
+    expect(requestBody(fetchMock, 2)).toMatchObject({
+      method: "trafficSnap.openStrobe",
+      session: "authenticated-session",
+    });
+  });
+
   it("login challenge, login va openStrobe muvaffaqiyatli bo'lsa opened qaytaradi", async () => {
-    const fetchMock = vi
-      .fn<typeof fetch>()
-      .mockResolvedValueOnce(
-        rpcResponse({
-          result: false,
-          params: { random: "ABC123", realm: "Login to 192.168.1.50", encryption: "Default" },
-          session: "temporary-session",
-        })
-      )
-      .mockResolvedValueOnce(rpcResponse({ result: true, session: "authenticated-session" }))
-      .mockResolvedValueOnce(rpcResponse({ result: true }));
+    const fetchMock = successfulRpcFetchMock();
     vi.stubGlobal("fetch", fetchMock);
 
     const result = await openRelay({
@@ -44,8 +69,12 @@ describe("Dahua RPC2 openRelay", () => {
 
     expect(result).toEqual({ status: "opened", detail: "Kamera shlagbaumni ochdi" });
     expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls.map((call) => String(call[0]))).toEqual([
+      "http://192.168.1.50/RPC2_Login",
+      "http://192.168.1.50/RPC2_Login",
+      "http://192.168.1.50/RPC2",
+    ]);
     for (const call of fetchMock.mock.calls) {
-      expect(String(call[0])).toBe("http://192.168.1.50/RPC2");
       expect(call[1]?.method).toBe("POST");
       expect(call[1]?.headers).toEqual({ "Content-Type": "application/json" });
     }

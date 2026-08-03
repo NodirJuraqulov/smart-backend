@@ -48,13 +48,16 @@ function normalizeHost(host: string): string {
   return value.includes(":") && !value.startsWith("[") ? `[${value}]` : value;
 }
 
-function buildRpcUrl(config: Pick<DahuaRelayConfig, "host" | "port">): URL {
+function buildRpcUrl(
+  config: Pick<DahuaRelayConfig, "host" | "port">,
+  endpoint: "RPC2_Login" | "RPC2"
+): URL {
   if (!config.host) throw new Error("Relay host konfiguratsiya qilinmagan");
   const port = config.port ?? 80;
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error("Kamera relay porti noto'g'ri");
   }
-  return new URL(`http://${normalizeHost(config.host)}:${port}/RPC2`);
+  return new URL(`http://${normalizeHost(config.host)}:${port}/${endpoint}`);
 }
 
 function sessionValue(value: string | number | undefined): string | null {
@@ -90,16 +93,18 @@ export async function openRelay(config: DahuaRelayConfig): Promise<DahuaRelayRes
     return { status: "not_configured", detail: "Kamera relay sozlamalari to'liq konfiguratsiya qilinmagan" };
   }
 
-  let url: URL;
+  let loginUrl: URL;
+  let commandUrl: URL;
   try {
-    url = buildRpcUrl(config);
+    loginUrl = buildRpcUrl(config, "RPC2_Login");
+    commandUrl = buildRpcUrl(config, "RPC2");
   } catch (err) {
     return { status: "failed", detail: err instanceof Error ? err.message : "Relay manzili noto'g'ri" };
   }
 
   let challenge: DahuaRpcResponse;
   try {
-    challenge = await postRpc(url, {
+    challenge = await postRpc(loginUrl, {
       method: "global.login",
       params: {
         userName: config.username,
@@ -122,7 +127,7 @@ export async function openRelay(config: DahuaRelayConfig): Promise<DahuaRelayRes
   const passwordHash = calculateDahuaLoginHash(config.username, realm, config.password, random);
   let login: DahuaRpcResponse;
   try {
-    login = await postRpc(url, {
+    login = await postRpc(loginUrl, {
       method: "global.login",
       params: {
         userName: config.username,
@@ -144,7 +149,7 @@ export async function openRelay(config: DahuaRelayConfig): Promise<DahuaRelayRes
 
   let openResult: DahuaRpcResponse;
   try {
-    openResult = await postRpc(url, {
+    openResult = await postRpc(commandUrl, {
       method: "trafficSnap.openStrobe",
       params: {
         info: {

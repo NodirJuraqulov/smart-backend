@@ -21,6 +21,11 @@ let orgId: number;
 let actor: AuthTokenPayload;
 let app: express.Express;
 
+interface RecordedRpcRequest {
+  path: string | undefined;
+  body: Record<string, unknown>;
+}
+
 async function readRpcBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
@@ -99,11 +104,11 @@ describe("exit candidate Dahua relay integration", () => {
   });
 
   it("host konfiguratsiya qilingan confirm RPC2 relayni haqiqiy HTTP stub orqali chaqiradi", async () => {
-    const requests: Record<string, unknown>[] = [];
+    const requests: RecordedRpcRequest[] = [];
     const relayServer = http.createServer(async (req, res) => {
       const body = await readRpcBody(req);
-      requests.push(body);
-      if (body.id === 1) {
+      requests.push({ path: req.url, body });
+      if (req.url === "/RPC2_Login" && body.id === 1) {
         sendRpc(res, {
           result: false,
           params: { random: "EXIT123", realm: "Dahua", encryption: "Default" },
@@ -111,11 +116,16 @@ describe("exit candidate Dahua relay integration", () => {
         });
         return;
       }
-      if (body.id === 2) {
+      if (req.url === "/RPC2_Login" && body.id === 2) {
         sendRpc(res, { result: true, session: "authenticated-exit-session" });
         return;
       }
-      sendRpc(res, { result: true });
+      if (req.url === "/RPC2" && body.id === 3) {
+        sendRpc(res, { result: true });
+        return;
+      }
+      res.statusCode = 404;
+      res.end();
     });
     await new Promise<void>((resolve) => relayServer.listen(0, "127.0.0.1", resolve));
     const port = (relayServer.address() as AddressInfo).port;
@@ -134,12 +144,13 @@ describe("exit candidate Dahua relay integration", () => {
         .send({ payment_method: "cash" });
       expect(response.status).toBe(200);
       expect(response.body.barrier_status).toBe("opened");
-      expect(requests.map((item) => item.method)).toEqual([
+      expect(requests.map((item) => item.path)).toEqual(["/RPC2_Login", "/RPC2_Login", "/RPC2"]);
+      expect(requests.map((item) => item.body.method)).toEqual([
         "global.login",
         "global.login",
         "trafficSnap.openStrobe",
       ]);
-      expect(requests[2]).toMatchObject({
+      expect(requests[2]?.body).toMatchObject({
         params: { info: { openType: "Test", plateNumber: "" } },
         session: "authenticated-exit-session",
       });
