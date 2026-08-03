@@ -426,7 +426,7 @@ export const dahuaParser: CameraParser = {
         vehicleFallbackReason: images.vehicleFallbackReason,
       },
       overviewImageFileName: result.overviewImageFileName,
-      vehicleImageFileName: images.vehicleSource === "normal_fallback" ? result.overviewImageFileName : null,
+      vehicleImageFileName: null,
       plateImageFileName:
         images.plateSource === "plate_pic"
           ? result.platePicFileName

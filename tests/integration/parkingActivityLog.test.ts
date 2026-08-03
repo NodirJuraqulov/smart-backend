@@ -1,5 +1,8 @@
+import { promises as fs } from "fs";
+import path from "path";
 import express from "express";
 import request from "supertest";
+import sharp from "sharp";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "@/config/db";
 import { errorHandler } from "@/middleware/errorHandler";
@@ -43,6 +46,7 @@ vi.mock("@/modules/printer/printer.service", () => ({
 let orgId: number;
 let webhookToken: string;
 let operator: AuthTokenPayload;
+let jpegBase64: string;
 
 function buildApp() {
   const app = express();
@@ -57,26 +61,20 @@ function authHeader(actor: AuthTokenPayload): string {
   return `Bearer ${signAccessToken(actor)}`;
 }
 
-function buildHikvisionBody(plateNumber: string, confidence = 92): { contentType: string; rawBody: Buffer } {
-  const boundary = `Boundary${Math.random().toString(36).slice(2)}`;
-  const xml =
-    '<?xml version="1.0" encoding="UTF-8"?>' +
-    "<EventNotificationAlert>" +
-    "<dateTime>2026-07-25T10:00:00+05:00</dateTime>" +
-    `<ANPR><licensePlate>${plateNumber}</licensePlate><confidenceLevel>${confidence}</confidenceLevel></ANPR>` +
-    "</EventNotificationAlert>";
-  const rawBody = Buffer.from(
-    `--${boundary}\r\nContent-Type: application/xml\r\n\r\n${xml}\r\n--${boundary}--\r\n`
-  );
-  return { contentType: `multipart/form-data; boundary=${boundary}`, rawBody };
+function buildDahuaBody(plateNumber: string) {
+  return {
+    Picture: { NormalPic: { Content: jpegBase64, PicName: `${plateNumber}.jpg` } },
+    Plate: { IsExist: true, PlateNumber: plateNumber, Confidence: 92 },
+    Vehicle: { VehicleBoundingBox: { Left: 20, Top: 20, Right: 180, Bottom: 130 } },
+    SnapInfo: { DeviceID: "activity-camera", SnapTime: new Date().toISOString() },
+  };
 }
 
 async function postWebhook(direction: "entry" | "exit", plateNumber: string) {
-  const { contentType, rawBody } = buildHikvisionBody(plateNumber);
   return request(buildApp())
-    .post(`/api/webhook/hikvision/${webhookToken}/${direction}`)
-    .set("Content-Type", contentType)
-    .send(rawBody);
+    .post(`/api/webhook/camera/${webhookToken}/${direction}`)
+    .set("Content-Type", "application/json")
+    .send(buildDahuaBody(plateNumber));
 }
 
 async function lastLogFor(action: string) {
@@ -85,18 +83,34 @@ async function lastLogFor(action: string) {
 
 beforeAll(async () => {
   await assertTestDatabase();
+  jpegBase64 = (
+    await sharp({ create: { width: 200, height: 150, channels: 3, background: "#555" } })
+      .jpeg()
+      .toBuffer()
+  ).toString("base64");
 });
 
 beforeEach(async () => {
   orgId = await createTestOrganization();
   webhookToken = `test-token-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  await db("tb_organizations").where({ id: orgId }).update({ webhook_token: webhookToken });
+  await db("tb_organizations").where({ id: orgId }).update({
+    webhook_token: webhookToken,
+    camera_brand: "dahua",
+  });
   await createTestTariff(orgId, { price_per_hour: 5000, grace_period_minutes: 0 });
   const operatorUser = await createTestUser(orgId, { role: "operator" });
   operator = { id: operatorUser.id, org_id: orgId, role: "operator" };
 });
 
 afterEach(async () => {
+  await fs.rm(path.join(process.cwd(), "uploads", "parking-events", String(orgId)), {
+    recursive: true,
+    force: true,
+  });
+  await fs.rm(path.join(process.cwd(), "uploads", "parking", String(orgId)), {
+    recursive: true,
+    force: true,
+  });
   await cleanupOrganization(orgId);
   vi.clearAllMocks();
 });

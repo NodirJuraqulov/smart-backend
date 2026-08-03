@@ -9,7 +9,7 @@ async function makeJpeg(width: number, height: number): Promise<Buffer> {
 }
 
 describe("buildDahuaEventImages", () => {
-  it("bbox mavjud bo'lmasa vehicle uchun NormalPic fallback ishlatadi", async () => {
+  it("bbox mavjud bo'lmasa vehicle region yaratmaydi", async () => {
     const overview = await makeJpeg(300, 200);
     const result = await buildDahuaEventImages({
       overviewImage: overview,
@@ -18,8 +18,8 @@ describe("buildDahuaEventImages", () => {
       vehicleBoundingBoxRaw: null,
       plateBoundingBoxRaw: null,
     });
-    expect(result.vehicleImage).toEqual(overview);
-    expect(result.vehicleSource).toBe("normal_fallback");
+    expect(result.vehicleImage).toBeNull();
+    expect(result.vehicleSource).toBe("none");
     expect(result.vehicleFallbackReason).toBe("missing_or_invalid_bbox");
     expect(result.plateSource).toBe("none");
     expect(result.plateImage).toBeNull();

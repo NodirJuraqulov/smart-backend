@@ -122,7 +122,7 @@ beforeEach(async () => {
 afterEach(async () => {
   await cleanupOrganization(orgId);
   await cleanupOrganization(otherOrgId);
-  await clearWebhookDedupeCache();
+  await clearWebhookDedupeCache(orgId);
   await fs.rm(path.join(process.cwd(), "uploads", "parking", String(orgId)), { recursive: true, force: true });
   await fs.rm(path.join(process.cwd(), "uploads", "parking-events", String(orgId)), { recursive: true, force: true });
 });
@@ -172,7 +172,7 @@ describe("Dahua rasmlari va exit hisobi", () => {
     await db("tb_parking_sessions")
       .where({ id: session.id })
       .update({ entered_at: new Date(Date.now() - 61 * 60 * 1000) });
-    await clearWebhookDedupeCache();
+    await clearWebhookDedupeCache(orgId);
 
     await postCamera("exit", dahuaPayload("50M094BB"));
     const exited = await db("tb_parking_sessions").where({ id: session.id }).first();
@@ -253,10 +253,9 @@ describe("Dahua rasmlari va exit hisobi", () => {
     expect(response.status).toBe(404);
   });
 
-  it("rasmsiz va yaroqsiz rasmli ANPR ham sessiya yaratadi", async () => {
+  it("rasmsiz va yaroqsiz rasmli ANPR sessiya yaratmaydi", async () => {
     const noImage = { Plate: { IsExist: true, PlateNumber: "50M096BB" }, SnapInfo: { DeviceID: "dahua-1" } };
     expect((await postCamera("entry", noImage)).body.parsed).toBe(true);
-    await clearWebhookDedupeCache();
     const invalid = {
       Picture: { NormalPic: { Content: "not-base64", PicName: "x.jpg" } },
       Plate: { IsExist: true, PlateNumber: "50M097BB" },
@@ -265,7 +264,12 @@ describe("Dahua rasmlari va exit hisobi", () => {
     const [{ count }] = await db("tb_parking_sessions")
       .where({ org_id: orgId })
       .count<{ count: string }[]>("id as count");
-    expect(Number(count)).toBe(2);
+    const events = await db("tb_webhook_events").where({ org_id: orgId }).orderBy("id");
+    expect(Number(count)).toBe(0);
+    expect(events.map((event) => event.processing_result)).toEqual([
+      "no_vehicle_detected_ignored",
+      "no_vehicle_detected_ignored",
+    ]);
   });
 
   it("event rasmlari webhook event ID bo'yicha uch xil faylda saqlanadi", async () => {

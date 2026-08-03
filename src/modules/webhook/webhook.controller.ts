@@ -8,6 +8,7 @@ import { logWebhookDebug } from "./webhookDebugLog.service";
 import {
   recordWebhookAuditEvent,
   registerWebhookEvent,
+  updateWebhookEventOutcome,
 } from "./webhookIdempotency";
 import { processEntryWebhook } from "@/modules/entryCandidates/entryCandidates.service";
 import { emitPlateNotRecognizedForExit, emitWebhookParseFailed } from "@/websocket/socketServer";
@@ -16,6 +17,7 @@ import {
   markDuplicateImagesSkipped,
   saveWebhookEventImages,
 } from "./webhookEventImage.service";
+import { hasDetectedVehicleRegion, normalizeDetectedPlate } from "./webhookRules";
 
 const DEFAULT_CAMERA_BRAND = "hikvision";
 
@@ -109,8 +111,7 @@ async function processCameraWebhook(
     throw err;
   }
 
-  const plateNumber =
-    event.plateNumber?.trim().toUpperCase().replace(/[^A-Z0-9]/g, "") || null;
+  const plateNumber = normalizeDetectedPlate(event.plateNumber);
   event = { ...event, plateNumber };
 
   console.log(
@@ -123,6 +124,34 @@ async function processCameraWebhook(
     deviceId: event.deviceId,
     cameraEventAt: event.timestamp,
   });
+  if (!hasDetectedVehicleRegion(event)) {
+    await saveWebhookEventImages({
+      orgId,
+      eventId: registration.eventId,
+      direction,
+      event,
+    }).catch((err) => {
+      console.warn(
+        `Webhook event rasmlari saqlanmadi: org_id=${orgId} event_id=${registration.eventId} ` +
+          `direction=${direction} error=${err instanceof Error ? err.message : String(err)}`
+      );
+    });
+    await updateWebhookEventOutcome(registration.eventId, {
+      processingResult: "no_vehicle_detected_ignored",
+      processingReason: "vehicle_region_missing",
+      processed: true,
+    });
+    res.status(200).json({
+      ok: true,
+      parsed: true,
+      ignored: true,
+      reason: "no_vehicle_detected_ignored",
+      plate_number: plateNumber,
+      confidence: event.confidence,
+      timestamp: event.timestamp,
+    });
+    return;
+  }
   if (registration.status === "same_direction_duplicate") {
     await markDuplicateImagesSkipped(orgId, registration.eventId).catch((err) => {
       console.warn(

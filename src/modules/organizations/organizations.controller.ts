@@ -8,6 +8,7 @@ import { assertValidLogin, assertValidPassword } from "@/utils/validation";
 import * as organizationsService from "./organizations.service";
 import { resetOrganizationTestData } from "./organizationTestDataReset.service";
 import { expirePendingExitCandidatesForOrganization } from "@/modules/exitCandidates/exitCandidatesExpiry.service";
+import { emergencyBarrierOpen, listStaleSessions } from "./organizationOperations.service";
 
 const DEFAULT_CAMERA_BRAND = "hikvision";
 const DEBUG_CAMERA_BRAND = "debug";
@@ -404,6 +405,27 @@ export async function updateCameraRelaySettingsHandler(req: Request, res: Respon
     exit: settings.exit,
   });
   res.json(settings);
+}
+
+export async function emergencyBarrierOpenHandler(req: Request, res: Response) {
+  const id = parseId(req, res);
+  if (id === null) return;
+  const { direction, reason } = req.body ?? {};
+  if (direction !== "entry" && direction !== "exit") {
+    res.status(400).json({ message: "direction 'entry' yoki 'exit' bo'lishi kerak" });
+    return;
+  }
+  if (reason !== undefined && typeof reason !== "string") {
+    res.status(400).json({ message: "reason matn bo'lishi kerak" });
+    return;
+  }
+  res.json(await emergencyBarrierOpen(req.user!, id, { direction, reason }));
+}
+
+export async function staleSessionsHandler(req: Request, res: Response) {
+  const id = parseId(req, res);
+  if (id === null) return;
+  res.json(await listStaleSessions(req.user!, id));
 }
 
 export async function printerTestHandler(req: Request, res: Response) {

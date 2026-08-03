@@ -13,6 +13,11 @@ import { INSIDE_SESSION_STATUSES } from "@/modules/parking/sessionStatus";
 import { BarrierStatus, openBarrier } from "@/modules/relay/relay.service";
 import { getWebhookEventImage } from "@/modules/webhook/webhookEventImage.service";
 import { resolveSafeCameraEventTime } from "@/modules/webhook/webhookIdempotency";
+import {
+  normalizeDetectedPlate,
+  NULL_PLATE_COALESCE_WINDOW_MS,
+  RESOLVED_EXIT_CANDIDATE_COOLDOWN_MS,
+} from "@/modules/webhook/webhookRules";
 import { getExitDisplayStatus } from "@/modules/publicDisplay/publicDisplay.service";
 import { ApiError } from "@/utils/ApiError";
 import { resolveOrgIdRequired } from "@/utils/orgScope";
@@ -97,7 +102,6 @@ function serializeSessionSummary(session: SessionSummary) {
   };
 }
 
-const NULL_PLATE_COALESCE_SECONDS = 60;
 const FORCE_OPEN_REASONS = new Set<ForceOpenReason>([
   "plate_not_found",
   "camera_misread",
@@ -361,6 +365,7 @@ export async function createExitCandidate(input: {
   detectedPlate: string | null;
   confidence: number | null;
 }) {
+  const detectedPlate = normalizeDetectedPlate(input.detectedPlate);
   const result = await db.transaction(async (trx) => {
     await trx("tb_organizations").where({ id: input.orgId }).forUpdate().first();
     const existingByEvent = await trx<CandidateRow>("tb_exit_candidates")
@@ -375,10 +380,10 @@ export async function createExitCandidate(input: {
       .first();
     if (!webhookEvent) throw new ApiError("Webhook exit hodisasi topilmadi", 404);
     const cameraEventAt = resolveSafeCameraEventTime(webhookEvent.camera_event_at, webhookEvent.created_at);
-    const matchingSession = input.detectedPlate
+    const matchingSession = detectedPlate
       ? await trx<SessionSummary>("tb_parking_sessions")
           .select("id", "status")
-          .where({ org_id: input.orgId, plate_number: input.detectedPlate })
+          .where({ org_id: input.orgId, plate_number: detectedPlate })
           .whereIn("status", [...INSIDE_SESSION_STATUSES])
           .orderByRaw("CASE WHEN status = 'active' THEN 0 ELSE 1 END")
           .orderBy("entered_at", "desc")
@@ -397,24 +402,47 @@ export async function createExitCandidate(input: {
       };
     }
     const matchedSession = matchingSession?.status === "active" ? matchingSession : null;
+    if (detectedPlate && !matchedSession) {
+      const resolvedCandidate = await trx<CandidateRow>("tb_exit_candidates")
+        .select("id", "resolved_session_id")
+        .where({ org_id: input.orgId, detected_plate: detectedPlate })
+        .whereIn("status", ["accepted", "dismissed"])
+        .whereNotNull("resolved_at")
+        .andWhere("resolved_at", ">=", new Date(Date.now() - RESOLVED_EXIT_CANDIDATE_COOLDOWN_MS))
+        .orderBy("resolved_at", "desc")
+        .first();
+      if (resolvedCandidate) {
+        await trx("tb_webhook_events").where({ id: input.webhookEventId, org_id: input.orgId }).update({
+          processing_result: "resolved_recently_ignored",
+          processing_reason: "resolved_candidate_cooldown",
+          session_id: resolvedCandidate.resolved_session_id,
+          processed_at: trx.fn.now(),
+        });
+        return {
+          skipped: true as const,
+          reason: "resolved_recently_ignored" as const,
+          sessionId: resolvedCandidate.resolved_session_id ?? undefined,
+        };
+      }
+    }
     let pendingQuery = trx<CandidateRow>("tb_exit_candidates").where({
       org_id: input.orgId,
       status: "pending",
     });
-    if (input.detectedPlate) {
-      pendingQuery = pendingQuery.andWhere({ detected_plate: input.detectedPlate });
+    if (detectedPlate) {
+      pendingQuery = pendingQuery.andWhere({ detected_plate: detectedPlate });
     } else {
       pendingQuery = pendingQuery
         .whereNull("detected_plate")
         .andWhere(
           "camera_event_at",
           ">=",
-          new Date(cameraEventAt.getTime() - NULL_PLATE_COALESCE_SECONDS * 1000)
+          new Date(cameraEventAt.getTime() - NULL_PLATE_COALESCE_WINDOW_MS)
         )
         .andWhere(
           "camera_event_at",
           "<=",
-          new Date(cameraEventAt.getTime() + NULL_PLATE_COALESCE_SECONDS * 1000)
+          new Date(cameraEventAt.getTime() + NULL_PLATE_COALESCE_WINDOW_MS)
         );
     }
     const pending = await pendingQuery.orderBy("camera_event_at", "desc").forUpdate().first();
@@ -434,7 +462,7 @@ export async function createExitCandidate(input: {
     const [candidateId] = await trx("tb_exit_candidates").insert({
       org_id: input.orgId,
       webhook_event_id: input.webhookEventId,
-      detected_plate: input.detectedPlate,
+      detected_plate: detectedPlate,
       matched_session_id: matchedSession?.id ?? null,
       confidence: input.confidence,
       camera_event_at: cameraEventAt,
@@ -443,7 +471,7 @@ export async function createExitCandidate(input: {
       processing_result: "exit_candidate_pending",
       processing_reason: matchedSession
         ? "exact_inside_session_found"
-        : input.detectedPlate
+        : detectedPlate
           ? "inside_session_not_found"
           : "camera_ocr_failed",
       session_id: matchedSession?.id ?? null,
@@ -456,7 +484,7 @@ export async function createExitCandidate(input: {
       details: JSON.stringify({
         orgId: input.orgId,
         candidateId,
-        detectedPlate: input.detectedPlate,
+        detectedPlate,
         matchedSessionId: matchedSession?.id ?? null,
         webhookEventId: input.webhookEventId,
         confidence: input.confidence,
@@ -661,7 +689,12 @@ export async function confirmExitCandidate(
       .where({ id: selectedSessionId, org_id: orgId })
       .forUpdate()
       .first();
-    if (!session || session.status !== "active") throw new ApiError("Tanlangan faol sessiya topilmadi", 409);
+    if (session?.status === "completed") {
+      throw new ApiError("Bu mashina allaqachon chiqib ketgan", 409);
+    }
+    if (!session || session.status !== "active") {
+      throw new ApiError("Tanlangan faol sessiya topilmadi", 409);
+    }
     if (
       session.session_source === "regular" &&
       input.paymentMethod !== "cash" &&

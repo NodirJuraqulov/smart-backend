@@ -68,6 +68,7 @@ function dahuaPayload(plate: string | null, confidence = 95) {
   return {
     Picture: { NormalPic: { Content: imageBase64, PicName: "overview.jpg" } },
     Plate: { IsExist: plate !== null, PlateNumber: plate ?? "", Confidence: confidence },
+    Vehicle: { VehicleBoundingBox: { Left: 10, Top: 5, Right: 90, Bottom: 55 } },
     SnapInfo: {
       DeviceID: "entry-identifier-camera",
       SnapTime: DateTime.now().toFormat("yyyy-MM-dd HH:mm:ss"),
@@ -140,7 +141,7 @@ async function expectCopiedEntryImages(sessionId: number, eventId: number) {
 beforeAll(async () => {
   await assertTestDatabase();
   imageBase64 = (await sharp({
-    create: { width: 40, height: 30, channels: 3, background: "#444444" },
+    create: { width: 200, height: 150, channels: 3, background: "#444444" },
   }).jpeg().toBuffer()).toString("base64");
 });
 
@@ -163,7 +164,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await clearWebhookDedupeCache();
+  await clearWebhookDedupeCache(orgId);
   await fs.rm(path.join(process.cwd(), "uploads", "parking-events", String(orgId)), {
     recursive: true,
     force: true,
@@ -224,7 +225,7 @@ describe("entry identifier production workflow", () => {
     expect(Number(rows[0].confidence)).toBe(88);
   });
 
-  it("6. plate null webhooklar 60 soniyada bitta candidate'da coalesce bo'ladi", async () => {
+  it("6. plate null webhooklar 5 daqiqada bitta candidate'da coalesce bo'ladi", async () => {
     await setOrgCapacity(orgId, 2);
     await postCamera("entry", null, 41);
     await postCamera("entry", null, 52);

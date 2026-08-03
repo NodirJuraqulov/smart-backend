@@ -1,6 +1,9 @@
 import http from "http";
+import { promises as fs } from "fs";
+import path from "path";
 import express from "express";
 import request from "supertest";
+import sharp from "sharp";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "@/config/db";
 import { errorHandler } from "@/middleware/errorHandler";
@@ -55,6 +58,7 @@ let orgId: number;
 let otherOrgId: number;
 let token: string;
 let owner: AuthTokenPayload;
+let jpegBase64: string;
 
 interface EntryCandidateRow {
   id: number;
@@ -74,16 +78,12 @@ interface CameraRelayPasswordRow {
 const testDb: typeof db = db;
 const testRequest: typeof request = request;
 
-function buildHikvisionBody(plate: string) {
-  const boundary = `Boundary${Math.random().toString(36).slice(2)}`;
-  const xml =
-    `<?xml version="1.0" encoding="UTF-8"?><EventNotificationAlert>` +
-    `<dateTime>${new Date().toISOString()}</dateTime><ANPR>` +
-    `<licensePlate>${plate}</licensePlate><confidenceLevel>93</confidenceLevel>` +
-    `</ANPR></EventNotificationAlert>`;
+function buildDahuaBody(plate: string) {
   return {
-    contentType: `multipart/form-data; boundary=${boundary}`,
-    body: Buffer.from(`--${boundary}\r\nContent-Type: application/xml\r\n\r\n${xml}\r\n--${boundary}--\r\n`),
+    Picture: { NormalPic: { Content: jpegBase64, PicName: `${plate}.jpg` } },
+    Plate: { IsExist: true, PlateNumber: plate, Confidence: 93 },
+    Vehicle: { VehicleBoundingBox: { Left: 20, Top: 20, Right: 180, Bottom: 130 } },
+    SnapInfo: { DeviceID: "entry-candidate-camera", SnapTime: new Date().toISOString() },
   };
 }
 
@@ -92,11 +92,10 @@ function authHeader(actor = owner): string {
 }
 
 async function postEntry(plate: string) {
-  const payload = buildHikvisionBody(plate);
   return request(server)
-    .post(`/api/webhook/hikvision/${token}/entry`)
-    .set("Content-Type", payload.contentType)
-    .send(payload.body);
+    .post(`/api/webhook/camera/${token}/entry`)
+    .set("Content-Type", "application/json")
+    .send(buildDahuaBody(plate));
 }
 
 async function pendingCandidate(): Promise<EntryCandidateRow> {
@@ -117,13 +116,21 @@ beforeAll(async () => {
   app.use("/api/organizations", cameraRelaySettingsRouter);
   app.use(errorHandler);
   server = http.createServer(app);
+  jpegBase64 = (
+    await sharp({ create: { width: 200, height: 150, channels: 3, background: "#555" } })
+      .jpeg()
+      .toBuffer()
+  ).toString("base64");
 });
 
 beforeEach(async () => {
   orgId = await createTestOrganization();
   otherOrgId = await createTestOrganization();
   token = `entry-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  await db("tb_organizations").where({ id: orgId }).update({ webhook_token: token });
+  await db("tb_organizations").where({ id: orgId }).update({
+    webhook_token: token,
+    camera_brand: "dahua",
+  });
   await createTestTariff(orgId);
   await createTestTariff(otherOrgId);
   const user = await createTestUser(orgId, { role: "owner" });
@@ -132,9 +139,17 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  await fs.rm(path.join(process.cwd(), "uploads", "parking-events", String(orgId)), {
+    recursive: true,
+    force: true,
+  });
+  await fs.rm(path.join(process.cwd(), "uploads", "parking", String(orgId)), {
+    recursive: true,
+    force: true,
+  });
   await cleanupOrganization(orgId);
   await cleanupOrganization(otherOrgId);
-  await clearWebhookDedupeCache();
+  await clearWebhookDedupeCache(orgId);
   vi.clearAllMocks();
 });
 
@@ -291,7 +306,11 @@ describe("entry capacity va candidate workflow", () => {
 
   it("boshqa organization candidate va sessionlariga kirishni bloklaydi", async () => {
     const foreignToken = `foreign-${Date.now()}`;
-    await db("tb_organizations").where({ id: otherOrgId }).update({ webhook_token: foreignToken, total_capacity: 0 });
+    await db("tb_organizations").where({ id: otherOrgId }).update({
+      webhook_token: foreignToken,
+      total_capacity: 0,
+      camera_brand: "dahua",
+    });
     const oldToken = token;
     token = foreignToken;
     await postEntry("01E108AA");
@@ -319,7 +338,11 @@ describe("entry capacity va candidate workflow", () => {
     expect(response.body).toMatchObject({
       detected_plate: "01E109AA",
       pending_count_for_org: 1,
-      entry_images: { overview_url: null, vehicle_url: null, image_available: false },
+      entry_images: {
+        overview_url: expect.any(String),
+        vehicle_url: null,
+        image_available: true,
+      },
     });
   });
 });

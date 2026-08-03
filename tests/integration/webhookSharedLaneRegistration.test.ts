@@ -46,7 +46,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await clearWebhookDedupeCache();
+  await clearWebhookDedupeCache(orgId);
   await cleanupOrganization(orgId);
 });
 

@@ -1,10 +1,17 @@
 import { Router } from "express";
 import { asyncHandler } from "@/middleware/asyncHandler";
-import { isAuth, isSuperAdmin, isSuperAdminOrOwner } from "@/middleware/auth.middleware";
 import {
+  isAuth,
+  isSuperAdmin,
+  isSuperAdminOrOperatorOrOwner,
+  isSuperAdminOrOwner,
+} from "@/middleware/auth.middleware";
+import {
+  emergencyBarrierOpenHandler,
   getCameraRelaySettingsHandler,
   expireStaleExitCandidatesHandler,
   resetTestDataHandler,
+  staleSessionsHandler,
   updateCameraRelaySettingsHandler,
 } from "./organizations.controller";
 
@@ -17,6 +24,12 @@ router.post(
   isSuperAdmin,
   asyncHandler(expireStaleExitCandidatesHandler)
 );
+router.post(
+  "/:id/emergency-barrier-open",
+  isSuperAdminOrOperatorOrOwner,
+  asyncHandler(emergencyBarrierOpenHandler)
+);
+router.get("/:id/stale-sessions", isSuperAdminOrOwner, asyncHandler(staleSessionsHandler));
 router.get("/:id/camera-relay-settings", isSuperAdminOrOwner, asyncHandler(getCameraRelaySettingsHandler));
 router.patch("/:id/camera-relay-settings", isSuperAdminOrOwner, asyncHandler(updateCameraRelaySettingsHandler));
 

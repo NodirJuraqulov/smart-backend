@@ -57,6 +57,7 @@ function dahuaPayload(plateNumber: string, confidence?: number | string) {
       PlateNumber: plateNumber,
       ...(confidence === undefined ? {} : { Confidence: confidence }),
     },
+    Vehicle: { VehicleBoundingBox: { Left: 20, Top: 20, Right: 180, Bottom: 130 } },
     SnapInfo: {
       DeviceID: "dahua-audit-camera",
       SnapTime: "2026-07-30 12:00:00",
@@ -94,7 +95,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await clearWebhookDedupeCache();
+  await clearWebhookDedupeCache(orgId);
   await fs.rm(path.join(process.cwd(), "uploads", "parking-events", String(orgId)), {
     recursive: true,
     force: true,

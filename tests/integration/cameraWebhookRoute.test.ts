@@ -1,6 +1,7 @@
 import http from "http";
 import express from "express";
 import request from "supertest";
+import sharp from "sharp";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "@/config/db";
 import webhookRouter from "@/modules/webhook/webhook.routes";
@@ -38,6 +39,7 @@ vi.mock("@/modules/relay/relay.service", () => ({
 let orgId: number;
 let webhookToken: string;
 let server: http.Server;
+let jpegBase64: string;
 
 function buildHikvisionBody(plateNumber: string, confidence = 92): { contentType: string; rawBody: Buffer } {
   const boundary = `Boundary${Math.random().toString(36).slice(2)}`;
@@ -79,11 +81,25 @@ async function postDahua(direction: "entry" | "exit", body: unknown) {
     .send(body);
 }
 
+function dahuaVehiclePayload(plateNumber: string) {
+  return {
+    Picture: { NormalPic: { Content: jpegBase64, PicName: `${plateNumber}.jpg` } },
+    Plate: { IsExist: true, PlateNumber: plateNumber, Confidence: 92 },
+    Vehicle: { VehicleBoundingBox: { Left: 20, Top: 20, Right: 180, Bottom: 130 } },
+    SnapInfo: { DeviceID: "camera-route", SnapTime: new Date().toISOString() },
+  };
+}
+
 beforeAll(async () => {
   await assertTestDatabase();
   const app = express();
   app.use("/api/webhook", webhookRouter);
   server = http.createServer(app);
+  jpegBase64 = (
+    await sharp({ create: { width: 200, height: 150, channels: 3, background: "#555" } })
+      .jpeg()
+      .toBuffer()
+  ).toString("base64");
 });
 
 beforeEach(async () => {
@@ -96,7 +112,7 @@ beforeEach(async () => {
 afterEach(async () => {
   await cleanupOrganization(orgId);
   vi.clearAllMocks();
-  await clearWebhookDedupeCache();
+  await clearWebhookDedupeCache(orgId);
 });
 
 afterAll(async () => {
@@ -105,15 +121,16 @@ afterAll(async () => {
 });
 
 describe("POST /api/webhook/camera/:token/:direction — organization.camera_brand asosida", () => {
-  it("camera_brand='hikvision' bo'lsa — Hikvision parser bilan sessiya yaratiladi", async () => {
+  it("camera_brand='hikvision' bo'lsa — vehicle regionsiz event ignored bo'ladi", async () => {
     await db("tb_organizations").where({ id: orgId }).update({ camera_brand: "hikvision" });
 
     const res = await postToRoute("camera", "entry", "01C111AA");
 
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ ok: true, parsed: true, plate_number: "01C111AA" });
-    expect(await activeSessionCount()).toBe(1);
-    expect(emitEntryDetected).toHaveBeenCalledWith(orgId, expect.objectContaining({ plateNumber: "01C111AA" }));
+    expect(res.body.reason).toBe("no_vehicle_detected_ignored");
+    expect(await activeSessionCount()).toBe(0);
+    expect(emitEntryDetected).not.toHaveBeenCalled();
   });
 
   it("camera_brand bo'sh/null bo'lsa — standart hikvision'ga tushadi", async () => {
@@ -123,7 +140,8 @@ describe("POST /api/webhook/camera/:token/:direction — organization.camera_bra
 
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ ok: true, parsed: true, plate_number: "01C222AA" });
-    expect(await activeSessionCount()).toBe(1);
+    expect(res.body.reason).toBe("no_vehicle_detected_ignored");
+    expect(await activeSessionCount()).toBe(0);
   });
 
   it("camera_brand='dahua' bo'lsa — Dahua skeleti ishga tushadi, parsed:false qaytadi", async () => {
@@ -154,6 +172,7 @@ describe("POST /api/webhook/camera/:token/:direction — organization.camera_bra
 
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ ok: true, parsed: true, plate_number: "01C555AA" });
+    expect(res.body.reason).toBe("no_vehicle_detected_ignored");
   });
 });
 
@@ -205,7 +224,8 @@ describe("POST /api/webhook/hikvision/:token/:direction — eski route buzilmaga
 
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ ok: true, parsed: true, plate_number: "01C666AA" });
-    expect(await activeSessionCount()).toBe(1);
+    expect(res.body.reason).toBe("no_vehicle_detected_ignored");
+    expect(await activeSessionCount()).toBe(0);
   });
 });
 
@@ -224,12 +244,12 @@ describe("POST /api/webhook/debug/:token/:direction — parser factoryga kirmayd
 
 describe("Entry/exit biznes logikasi — normalized event orqali ishlaydi", () => {
   it("exit — sessiyaga tegmasdan pending candidate yaratadi", async () => {
-    await db("tb_organizations").where({ id: orgId }).update({ camera_brand: "hikvision" });
+    await db("tb_organizations").where({ id: orgId }).update({ camera_brand: "dahua" });
 
-    await postToRoute("camera", "entry", "01C888AA");
-    await clearWebhookDedupeCache();
+    await postDahua("entry", dahuaVehiclePayload("01C888AA"));
+    await clearWebhookDedupeCache(orgId);
 
-    const res = await postToRoute("camera", "exit", "01C888AA");
+    const res = await postDahua("exit", dahuaVehiclePayload("01C888AA"));
 
     expect(res.status).toBe(200);
     const session = await db("tb_parking_sessions").where({ org_id: orgId, plate_number: "01C888AA" }).first();

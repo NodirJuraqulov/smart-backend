@@ -324,7 +324,7 @@ describe("dahuaParser (CameraParser) — rasm semantikasi", () => {
     expect(meta.height).toBeGreaterThan(0);
   });
 
-  it("bbox yo'q yoki yaroqsiz bo'lsa vehicleImage NormalPic fallback bo'ladi", async () => {
+  it("bbox yo'q yoki yaroqsiz bo'lsa vehicleImage yaratilmaydi", async () => {
     const overview = await makeJpeg(200, 150);
     const missingBbox = buildFixture({
       NormalPic: { Content: overview.toString("base64"), PicName: NORMAL_PIC_NAME },
@@ -333,8 +333,8 @@ describe("dahuaParser (CameraParser) — rasm semantikasi", () => {
       PlatePic: undefined,
     });
     const missing = await dahuaParser.parse(buildInput(missingBbox));
-    expect(missing.vehicleImage).toEqual(missing.overviewImage);
-    expect(missing.metadata?.vehicleImageSource).toBe("normal_fallback");
+    expect(missing.vehicleImage).toBeNull();
+    expect(missing.metadata?.vehicleImageSource).toBe("none");
     expect(missing.metadata?.vehicleFallbackReason).toBe("missing_or_invalid_bbox");
 
     const invalidBbox = buildFixture({
@@ -344,8 +344,8 @@ describe("dahuaParser (CameraParser) — rasm semantikasi", () => {
       PlatePic: undefined,
     });
     const invalid = await dahuaParser.parse(buildInput(invalidBbox));
-    expect(invalid.vehicleImage).toEqual(invalid.overviewImage);
-    expect(invalid.metadata?.vehicleImageSource).toBe("normal_fallback");
+    expect(invalid.vehicleImage).toBeNull();
+    expect(invalid.metadata?.vehicleImageSource).toBe("none");
   });
 
   it("invalid va bo'sh rasmlar null bo'ladi, webhook qulamaydi", async () => {

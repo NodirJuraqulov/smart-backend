@@ -13,6 +13,10 @@ import { BarrierStatus, openBarrier } from "@/modules/relay/relay.service";
 import { NormalizedCameraEvent } from "@/modules/webhook/parsers/normalizedCameraEvent";
 import { getWebhookEventImage } from "@/modules/webhook/webhookEventImage.service";
 import { resolveSafeCameraEventTime } from "@/modules/webhook/webhookIdempotency";
+import {
+  normalizeDetectedPlate,
+  NULL_PLATE_COALESCE_WINDOW_MS,
+} from "@/modules/webhook/webhookRules";
 import { ApiError } from "@/utils/ApiError";
 import { resolveOrgIdRequired } from "@/utils/orgScope";
 import {
@@ -177,7 +181,7 @@ export async function processEntryWebhook(input: {
       .first();
     if (!webhookEvent) throw new ApiError("Webhook kirish hodisasi topilmadi", 404);
     const cameraEventAt = resolveSafeCameraEventTime(webhookEvent.camera_event_at, webhookEvent.created_at);
-    const plateNumber = input.event.plateNumber || null;
+    const plateNumber = normalizeDetectedPlate(input.event.plateNumber);
     const existingCandidate = await trx<EntryCandidateRow>("tb_entry_candidates")
       .where({ org_id: input.orgId, webhook_event_id: input.webhookEventId })
       .first();
@@ -189,6 +193,22 @@ export async function processEntryWebhook(input: {
         reason: existingCandidate.reason,
       };
     }
+    if (plateNumber) {
+      const activeSession = await trx("tb_parking_sessions")
+        .select("id")
+        .where({ org_id: input.orgId, plate_number: plateNumber, status: "active" })
+        .forUpdate()
+        .first();
+      if (activeSession) {
+        await trx("tb_webhook_events").where({ id: input.webhookEventId, org_id: input.orgId }).update({
+          processing_result: "active_entry_already_exists",
+          processing_reason: "already_active",
+          session_id: activeSession.id,
+          processed_at: trx.fn.now(),
+        });
+        return { type: "rejected" as const, reason: "already_active" as const };
+      }
+    }
     let pendingQuery = trx<EntryCandidateRow>("tb_entry_candidates")
       .where({ org_id: input.orgId, status: "pending" });
     if (plateNumber) {
@@ -197,8 +217,8 @@ export async function processEntryWebhook(input: {
       pendingQuery = pendingQuery
         .whereNull("detected_plate")
         .whereIn("reason", ["plate_not_detected", "capacity_full_and_plate_not_detected"])
-        .andWhere("camera_event_at", ">=", new Date(cameraEventAt.getTime() - 60_000))
-        .andWhere("camera_event_at", "<=", new Date(cameraEventAt.getTime() + 60_000));
+        .andWhere("camera_event_at", ">=", new Date(cameraEventAt.getTime() - NULL_PLATE_COALESCE_WINDOW_MS))
+        .andWhere("camera_event_at", "<=", new Date(cameraEventAt.getTime() + NULL_PLATE_COALESCE_WINDOW_MS));
     }
     const pendingCandidate = await pendingQuery.orderBy("camera_event_at", "desc").forUpdate().first();
     if (pendingCandidate) {

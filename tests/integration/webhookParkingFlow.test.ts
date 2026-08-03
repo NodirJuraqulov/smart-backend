@@ -1,6 +1,7 @@
 import http from "http";
 import express from "express";
 import request from "supertest";
+import sharp from "sharp";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, type MockedFunction, vi } from "vitest";
 import { db } from "@/config/db";
 import webhookRouter from "@/modules/webhook/webhook.routes";
@@ -54,19 +55,18 @@ const openBarrierMock = openBarrier as MockedFunction<typeof openBarrier>;
 let orgId: number;
 let webhookToken: string;
 let server: http.Server;
+let vehicleImageBase64: string;
 
-function buildHikvisionBody(plateNumber: string, confidence = 92): { contentType: string; rawBody: Buffer } {
-  const boundary = `Boundary${Math.random().toString(36).slice(2)}`;
-  const xml =
-    '<?xml version="1.0" encoding="UTF-8"?>' +
-    "<EventNotificationAlert>" +
-    "<dateTime>2026-07-25T10:00:00+05:00</dateTime>" +
-    `<ANPR><licensePlate>${plateNumber}</licensePlate><confidenceLevel>${confidence}</confidenceLevel></ANPR>` +
-    "</EventNotificationAlert>";
-  const rawBody = Buffer.from(
-    `--${boundary}\r\nContent-Type: application/xml\r\n\r\n${xml}\r\n--${boundary}--\r\n`
-  );
-  return { contentType: `multipart/form-data; boundary=${boundary}`, rawBody };
+function buildCameraBody(plateNumber: string, confidence = 92) {
+  const body = {
+    Picture: {
+      NormalPic: { Content: vehicleImageBase64, PicName: `${plateNumber}-${Date.now()}.jpg` },
+    },
+    Plate: { IsExist: true, PlateNumber: plateNumber, Confidence: confidence },
+    Vehicle: { VehicleBoundingBox: { Left: 20, Top: 20, Right: 180, Bottom: 130 } },
+    SnapInfo: { DeviceID: "parking-flow-camera", SnapTime: new Date().toISOString() },
+  };
+  return { contentType: "application/json", body };
 }
 
 async function postWebhook(
@@ -75,11 +75,11 @@ async function postWebhook(
   confidence = 92,
   token = webhookToken
 ) {
-  const { contentType, rawBody } = buildHikvisionBody(plateNumber, confidence);
+  const { contentType, body } = buildCameraBody(plateNumber, confidence);
   return request(server)
-    .post(`/api/webhook/hikvision/${token}/${direction}`)
+    .post(`/api/webhook/camera/${token}/${direction}`)
     .set("Content-Type", contentType)
-    .send(rawBody);
+    .send(body);
 }
 
 async function postMalformedWebhook() {
@@ -101,19 +101,27 @@ beforeAll(async () => {
   const app = express();
   app.use("/api/webhook", webhookRouter);
   server = http.createServer(app);
+  vehicleImageBase64 = (
+    await sharp({ create: { width: 200, height: 150, channels: 3, background: "#555" } })
+      .jpeg()
+      .toBuffer()
+  ).toString("base64");
 });
 
 beforeEach(async () => {
   orgId = await createTestOrganization();
   webhookToken = `test-token-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  await db("tb_organizations").where({ id: orgId }).update({ webhook_token: webhookToken });
+  await db("tb_organizations").where({ id: orgId }).update({
+    webhook_token: webhookToken,
+    camera_brand: "dahua",
+  });
   await createTestTariff(orgId, { price_per_hour: 5000, grace_period_minutes: 0 });
 });
 
 afterEach(async () => {
   await cleanupOrganization(orgId);
   vi.clearAllMocks();
-  await clearWebhookDedupeCache();
+  await clearWebhookDedupeCache(orgId);
 });
 
 afterAll(async () => {
@@ -171,7 +179,7 @@ describe("Kirish webhook", () => {
   it("mashina allaqachon ichkarida bo'lsa — yangi sessiya yaratilmaydi", async () => {
     await postWebhook("entry", "01A444AA");
     expect(await activeSessionCount()).toBe(1);
-    await clearWebhookDedupeCache();
+    await clearWebhookDedupeCache(orgId);
 
     const res = await postWebhook("entry", "01A444AA");
 
@@ -183,7 +191,7 @@ describe("Kirish webhook", () => {
 describe("Chiqish webhook", () => {
   it("faol sessiya topilsa — pending candidate yaratadi va sessiyaga tegmaydi", async () => {
     await postWebhook("entry", "01A555AA");
-    await clearWebhookDedupeCache();
+    await clearWebhookDedupeCache(orgId);
 
     const res = await postWebhook("exit", "01A555AA");
 
@@ -220,7 +228,7 @@ describe("Chiqish webhook", () => {
   it("VIP mashina uchun — pending candidate yaratadi", async () => {
     await createTestVipVehicle(orgId, "01A777AA");
     await postWebhook("entry", "01A777AA");
-    await clearWebhookDedupeCache();
+    await clearWebhookDedupeCache(orgId);
 
     const res = await postWebhook("exit", "01A777AA");
 
@@ -239,7 +247,7 @@ describe("Chiqish webhook", () => {
   it("obuna mashina uchun — pending candidate yaratadi", async () => {
     await createTestSubscription(orgId, "01A888AA");
     await postWebhook("entry", "01A888AA");
-    await clearWebhookDedupeCache();
+    await clearWebhookDedupeCache(orgId);
 
     const res = await postWebhook("exit", "01A888AA");
 
@@ -377,7 +385,7 @@ describe("Idempotentlik", () => {
 
   it("10 soniya ichida takroriy chiqish webhooki ikkinchi marta yangilanmaydi", async () => {
     await postWebhook("entry", "01B111AA");
-    await clearWebhookDedupeCache();
+    await clearWebhookDedupeCache(orgId);
     await postWebhook("exit", "01B111AA");
 
     const beforeSecond = await db("tb_parking_sessions").where({ org_id: orgId, plate_number: "01B111AA" }).first();

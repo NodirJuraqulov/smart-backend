@@ -110,6 +110,7 @@ function dahuaPayload(
       PlatePic: { Content: jpegBase64, PicName: "plate.jpg" },
     },
     Plate: { IsExist: plate !== null, PlateNumber: plate ?? "", Confidence: confidence },
+    Vehicle: { VehicleBoundingBox: { Left: 10, Top: 5, Right: 90, Bottom: 55 } },
     SnapInfo: {
       DeviceID: "candidate-camera",
       SnapTime: snapTime.toFormat("yyyy-MM-dd HH:mm:ss"),
@@ -249,7 +250,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await clearWebhookDedupeCache();
+  await clearWebhookDedupeCache(orgId);
   await fs.rm(path.join(process.cwd(), "uploads", "parking-events", String(orgId)), {
     recursive: true,
     force: true,
@@ -684,7 +685,7 @@ describe("exit candidate completion workflow", () => {
     expect(Number(candidates[0].confidence)).toBe(87);
   });
 
-  it("19. plate null webhooklar 60 soniya ichida bitta pending candidate'da birlashadi", async () => {
+  it("19. plate null webhooklar 5 daqiqa ichida bitta pending candidate'da birlashadi", async () => {
     await postExitForTest(null, 42, DateTime.now().minus({ seconds: 30 }));
     const secondResponse = await postExitForTest(null, 73);
     const candidates = await testDb("tb_exit_candidates")
@@ -698,8 +699,12 @@ describe("exit candidate completion workflow", () => {
     expect(Number(candidates[0].confidence)).toBe(73);
   });
 
-  it("20. plate null webhook 60 soniyadan keyin yangi candidate yaratadi", async () => {
-    await postExitForTest(null, 44, DateTime.now().minus({ seconds: 75 }));
+  it("20. plate null webhook 5 daqiqadan keyin yangi candidate yaratadi", async () => {
+    await postExitForTest(null, 44);
+    await testDb("tb_exit_candidates")
+      .where({ org_id: orgId, status: "pending" })
+      .whereNull("detected_plate")
+      .update({ camera_event_at: new Date(Date.now() - 6 * 60_000) });
     const secondResponse = await postExitForTest(null, 75);
     const candidates = await testDb("tb_exit_candidates")
       .where({ org_id: orgId, status: "pending" })

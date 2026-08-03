@@ -17,7 +17,7 @@ const PLATE_PADDING_RATIO = 0.025;
 
 const CROP_JPEG_QUALITY = 90;
 
-export type VehicleImageSource = "normal_vehicle_bbox_crop" | "normal_fallback" | "none";
+export type VehicleImageSource = "normal_vehicle_bbox_crop" | "none";
 export type PlateImageSource = "plate_pic" | "cutout_pic" | "normal_plate_bbox_crop" | "none";
 
 export interface DahuaImageCropInput {
@@ -110,10 +110,6 @@ export async function buildDahuaEventImages(input: DahuaImageCropInput): Promise
     });
 
     if (!vehicleBox) {
-      result.vehicleImage = result.overviewImage;
-      result.vehicleWidth = overviewMeta.width;
-      result.vehicleHeight = overviewMeta.height;
-      result.vehicleSource = "normal_fallback";
       result.vehicleFallbackReason = "missing_or_invalid_bbox";
     } else {
       const padded = padBoundingBox(vehicleBox, overviewMeta.width, overviewMeta.height, VEHICLE_PADDING_RATIO);
@@ -125,10 +121,6 @@ export async function buildDahuaEventImages(input: DahuaImageCropInput): Promise
         result.vehicleSource = "normal_vehicle_bbox_crop";
         result.normalizedVehicleBoundingBox = padded;
       } else {
-        result.vehicleImage = result.overviewImage;
-        result.vehicleWidth = overviewMeta.width;
-        result.vehicleHeight = overviewMeta.height;
-        result.vehicleSource = "normal_fallback";
         result.vehicleFallbackReason = "crop_failed";
       }
     }

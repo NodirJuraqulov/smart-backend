@@ -314,6 +314,8 @@ export async function isDuplicateWebhookEvent(
   return registration.status === "same_direction_duplicate";
 }
 
-export async function clearWebhookDedupeCache(): Promise<void> {
-  await db("tb_webhook_events").del();
+export async function clearWebhookDedupeCache(orgId?: number): Promise<void> {
+  const query = db("tb_webhook_events");
+  if (orgId !== undefined) query.where({ org_id: orgId });
+  await query.del();
 }
