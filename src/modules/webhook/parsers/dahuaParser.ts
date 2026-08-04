@@ -388,6 +388,7 @@ export const dahuaParser: CameraParser = {
     const overviewImage = decodeImageBase64(result.overviewImageBase64);
     const cutoutImage = decodeImageBase64(result.cutoutImageBase64);
     const platePicImage = decodeImageBase64(result.platePicImageBase64);
+    if (input.timing) input.timing.t1 = Date.now();
 
     const images = await buildDahuaEventImages({
       overviewImage,
@@ -395,6 +396,7 @@ export const dahuaParser: CameraParser = {
       cutoutImage,
       vehicleBoundingBoxRaw: result.vehicleBoundingBoxRaw,
       plateBoundingBoxRaw: result.plateBoundingBoxRaw,
+      timing: input.timing,
     });
 
     return {

@@ -5,6 +5,16 @@ export interface CameraParserOrganization {
   cameraBrand: string | null;
 }
 
+export interface WebhookTiming {
+  t0: number;
+  t1?: number;
+  t2?: number;
+  t3?: number;
+  t4?: number;
+  t5?: number;
+  t6?: number;
+}
+
 export interface CameraParserInput {
   rawBody: Buffer;
   parsedBody?: unknown;
@@ -14,6 +24,7 @@ export interface CameraParserInput {
   contentType: string;
   direction: "entry" | "exit";
   organization: CameraParserOrganization;
+  timing?: WebhookTiming;
 }
 
 export interface CameraParser {

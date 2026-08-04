@@ -3,6 +3,7 @@ import path from "path";
 import { db } from "@/config/db";
 import { AuthTokenPayload } from "@/modules/auth/auth.service";
 import { NormalizedCameraEvent } from "./parsers/normalizedCameraEvent";
+import type { WebhookTiming } from "./parsers/cameraParser.interface";
 import { ApiError } from "@/utils/ApiError";
 
 export type WebhookEventImageKind = "overview" | "vehicle" | "plate";
@@ -71,6 +72,7 @@ export async function saveWebhookEventImages(input: {
   eventId: number;
   direction: "entry" | "exit";
   event: NormalizedCameraEvent;
+  timing?: WebhookTiming;
 }): Promise<void> {
   const now = new Date();
   const relativeParts = [
@@ -96,6 +98,7 @@ export async function saveWebhookEventImages(input: {
       image_processing_result: "no_images",
       image_processing_reason: "camera_images_missing_or_invalid",
     });
+    if (input.timing) input.timing.t4 = Date.now();
     return;
   }
 
@@ -115,6 +118,7 @@ export async function saveWebhookEventImages(input: {
     image_processing_result: result,
     image_processing_reason: result === "saved" ? null : "invalid_or_write_failed",
   });
+  if (input.timing) input.timing.t4 = Date.now();
 
   console.log(
     `Webhook event images: org_id=${input.orgId} event_id=${input.eventId} direction=${input.direction} ` +
