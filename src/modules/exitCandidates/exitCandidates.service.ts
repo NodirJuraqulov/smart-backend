@@ -831,12 +831,12 @@ export async function forceOpenExitCandidate(
   actor: AuthTokenPayload,
   requestedOrgId: number | undefined,
   candidateId: number,
-  input: { reason: ForceOpenReason; note?: string; enteredPlate?: string }
+  input: { reason?: ForceOpenReason; note?: string; enteredPlate?: string }
 ) {
   const orgId = resolveOrgIdRequired(actor, requestedOrgId);
-  if (!FORCE_OPEN_REASONS.has(input.reason)) throw new ApiError("Majburiy ochish sababi noto'g'ri", 400);
+  const reason = input.reason ?? "other";
+  if (!FORCE_OPEN_REASONS.has(reason)) throw new ApiError("Majburiy ochish sababi noto'g'ri", 400);
   const note = input.note?.trim().slice(0, 500) || null;
-  if (input.reason === "other" && !note) throw new ApiError("other sababi uchun note majburiy", 400);
   const enteredPlate = input.enteredPlate ? normalizePlate(input.enteredPlate) || null : null;
   await db.transaction(async (trx) => {
     const candidate = await trx<CandidateRow>("tb_exit_candidates")
@@ -860,7 +860,7 @@ export async function forceOpenExitCandidate(
     });
     await trx("tb_webhook_events").where({ id: candidate.webhook_event_id, org_id: orgId }).update({
       processing_result: "exit_candidate_forced_open",
-      processing_reason: input.reason,
+      processing_reason: reason,
     });
     await trx("tb_activity_logs").insert({
       actor_id: actor.id,
@@ -870,7 +870,7 @@ export async function forceOpenExitCandidate(
       details: JSON.stringify({
         operatorId: actor.id,
         orgId,
-        reason: input.reason,
+        reason,
         note,
         enteredPlate,
         candidateId,

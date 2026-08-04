@@ -439,6 +439,33 @@ describe("exit candidate completion workflow", () => {
     });
   });
 
+  it("force-open reason berilmasa other bilan muvaffaqiyatli bajariladi", async () => {
+    await postExitForTest("UNKNOWNDEFAULT");
+    const candidate = await findCandidateForTest("UNKNOWNDEFAULT");
+    const response = await testRequest(app)
+      .post(`/api/exit-candidates/${candidate.id}/force-open`)
+      .set("Authorization", authorizationHeader);
+    expect(response.status).toBe(200);
+    expect(response.body.barrier_status).toBe("opened");
+    const forcedCandidate = await testDb<CandidateStateRow>("tb_exit_candidates")
+      .where({ id: candidate.id })
+      .first();
+    expect(forcedCandidate).toMatchObject({
+      status: "dismissed",
+      resolution_type: "forced_open",
+      resolution_note: null,
+    });
+    const event = await testDb("tb_webhook_events").where({ id: candidate.webhook_event_id }).first();
+    expect(event).toMatchObject({
+      processing_result: "exit_candidate_forced_open",
+      processing_reason: "other",
+    });
+    const audit = await testDb<ActivityLogRow>("tb_activity_logs")
+      .where({ action: "exit_candidate.forced_open", target_id: candidate.id })
+      .first();
+    expect(audit?.details).toMatchObject({ reason: "other", note: null });
+  });
+
   it("8. force-open session va paymentga tegmaydi, to'liq audit va barrier yaratadi", async () => {
     const sessionId = await createSessionForTest("01A300AA");
     const before = await testDb<CompletionSessionRow>("tb_parking_sessions").where({ id: sessionId }).first();

@@ -91,23 +91,24 @@ export async function forceOpenHandler(req: Request, res: Response) {
   if (id === null) return;
   const orgId = requestScope(req, res);
   if (orgId === null) return;
-  if (typeof req.body?.reason !== "string") {
-    res.status(400).json({ message: "reason majburiy" });
+  const body = req.body ?? {};
+  if (body.reason !== undefined && typeof body.reason !== "string") {
+    res.status(400).json({ message: "reason matn bo'lishi kerak" });
     return;
   }
-  if (req.body.note !== undefined && typeof req.body.note !== "string") {
+  if (body.note !== undefined && typeof body.note !== "string") {
     res.status(400).json({ message: "note matn bo'lishi kerak" });
     return;
   }
-  if (req.body.entered_plate !== undefined && typeof req.body.entered_plate !== "string") {
+  if (body.entered_plate !== undefined && typeof body.entered_plate !== "string") {
     res.status(400).json({ message: "entered_plate matn bo'lishi kerak" });
     return;
   }
   res.json(
     await service.forceOpenExitCandidate(req.user!, orgId, id, {
-      reason: req.body.reason as service.ForceOpenReason,
-      note: req.body.note,
-      enteredPlate: req.body.entered_plate,
+      reason: body.reason as service.ForceOpenReason | undefined,
+      note: body.note,
+      enteredPlate: body.entered_plate,
     })
   );
 }
