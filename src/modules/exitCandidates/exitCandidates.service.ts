@@ -19,6 +19,13 @@ import {
   RESOLVED_EXIT_CANDIDATE_COOLDOWN_MS,
 } from "@/modules/webhook/webhookRules";
 import { getExitDisplayStatus } from "@/modules/publicDisplay/publicDisplay.service";
+import {
+  findActiveInpatientVehicleForExit,
+  findPendingClinicDiscountForExit,
+  getOrgTodayDate,
+  getOrgTodayRange,
+  markClinicDiscountUsed,
+} from "@/modules/medplus/medplus.service";
 import { ApiError } from "@/utils/ApiError";
 import { resolveOrgIdRequired } from "@/utils/orgScope";
 import {
@@ -682,7 +689,7 @@ export async function confirmExitCandidate(
       .first();
     if (!candidate) throw new ApiError("Chiqish nomzodi topilmadi", 404);
     if (candidate.status !== "pending") throw new ApiError("Bu chiqish allaqachon hal qilingan", 409);
-    await trx("tb_organizations").where({ id: orgId }).forUpdate().first();
+    const organization = await trx("tb_organizations").where({ id: orgId }).forUpdate().first();
     const selectedSessionId = input.sessionId ?? candidate.matched_session_id;
     if (!selectedSessionId) throw new ApiError("Sessiya tanlanmagan", 400);
     const session = await sessionSummaryQuery(trx)
@@ -708,10 +715,39 @@ export async function confirmExitCandidate(
     if (session.session_source === "regular" && snapshotAmount === null) {
       throw new ApiError("Sessiyaning kirish vaqtidagi tarif snapshoti topilmadi", 409);
     }
-    const amount = session.session_source === "regular" ? snapshotAmount! : 0;
+    let amount = session.session_source === "regular" ? snapshotAmount! : 0;
     const paymentMethod = session.session_source === "regular" ? input.paymentMethod! : session.payment_method;
+
+    let inpatientFreeExit = false;
+    let appliedClinicDiscount: { id: number; discountPercent: number; originalAmount: number } | null = null;
+    if (session.session_source === "regular" && session.plate_number) {
+      const todayDate = getOrgTodayDate(organization?.timezone);
+      const inpatientVehicle = await findActiveInpatientVehicleForExit(
+        orgId,
+        session.plate_number,
+        todayDate,
+        trx
+      );
+      if (inpatientVehicle) {
+        inpatientFreeExit = true;
+        amount = 0;
+      } else {
+        const todayRange = getOrgTodayRange(organization?.timezone);
+        const discount = await findPendingClinicDiscountForExit(orgId, session.plate_number, todayRange, trx);
+        if (discount) {
+          const originalAmount = amount;
+          amount = Math.round((amount * (100 - discount.discount_percent)) / 100 * 100) / 100;
+          appliedClinicDiscount = {
+            id: discount.id,
+            discountPercent: discount.discount_percent,
+            originalAmount,
+          };
+        }
+      }
+    }
+
     let payment: { id: number; amount: number; payment_method: PaymentMethod; paid_at: Date } | null = null;
-    if (session.session_source === "regular") {
+    if (session.session_source === "regular" && !inpatientFreeExit) {
       const [paymentId] = await trx("tb_payments").insert({
         org_id: orgId,
         session_id: session.id,
@@ -763,6 +799,36 @@ export async function confirmExitCandidate(
         paymentMethod: session.session_source === "regular" ? paymentMethod : null,
       }),
     });
+    if (inpatientFreeExit) {
+      await trx("tb_activity_logs").insert({
+        actor_id: actor.id,
+        action: "inpatient_free_exit",
+        target_type: "exit_candidate",
+        target_id: candidate.id,
+        details: JSON.stringify({
+          orgId,
+          sessionId: session.id,
+          plateNumber: session.plate_number,
+        }),
+      });
+    }
+    if (appliedClinicDiscount) {
+      await markClinicDiscountUsed(appliedClinicDiscount.id, session.id, exitedAt, trx);
+      await trx("tb_activity_logs").insert({
+        actor_id: actor.id,
+        action: "clinic_discount_applied",
+        target_type: "exit_candidate",
+        target_id: candidate.id,
+        details: JSON.stringify({
+          orgId,
+          sessionId: session.id,
+          discountId: appliedClinicDiscount.id,
+          discountPercent: appliedClinicDiscount.discountPercent,
+          originalAmount: appliedClinicDiscount.originalAmount,
+          discountedAmount: amount,
+        }),
+      });
+    }
     return {
       session: {
         ...session,

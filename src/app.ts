@@ -27,6 +27,8 @@ import exitCandidatesRouter from "./modules/exitCandidates/exitCandidates.routes
 import cameraRelaySettingsRouter from "./modules/organizations/cameraRelaySettings.routes";
 import entryCandidatesRouter from "./modules/entryCandidates/entryCandidates.routes";
 import parkingSessionsEntryBarrierRouter from "./modules/entryCandidates/parkingSessionsEntryBarrier.routes";
+import medplusWebhookRouter from "./modules/medplus/medplusWebhook.routes";
+import medplusAdminRouter from "./modules/medplus/medplusAdmin.routes";
 
 const app = express();
 
@@ -97,6 +99,8 @@ app.use("/api/webhook-events", webhookEventsRouter);
 app.use("/api/exit-candidates", exitCandidatesRouter);
 app.use("/api/entry-candidates", entryCandidatesRouter);
 app.use("/api/parking-sessions", parkingSessionsEntryBarrierRouter);
+app.use("/api/medplus/webhook", medplusWebhookRouter);
+app.use("/api/organizations", medplusAdminRouter);
 app.use("/api/parking", parkingRouter);
 app.use("/api/reports", reportsRouter);
 app.use("/api/admin/activity-logs", activityLogsRouter);

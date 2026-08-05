@@ -5,6 +5,7 @@ declare global {
     interface Request {
       user?: AuthTokenPayload;
       webhookOrgId?: number;
+      medplusOrgId?: number;
     }
   }
 }

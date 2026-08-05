@@ -9,6 +9,8 @@ import { scheduleWebhookDebugLogsCleanupJob } from "./jobs/webhookDebugLogsClean
 import { scheduleWebhookEventsCleanupJob } from "./jobs/webhookEventsCleanupJob";
 import { scheduleEntryCandidatesExpiryJob } from "./jobs/entryCandidatesExpiryJob";
 import { scheduleExitCandidatesExpiryJob } from "./jobs/exitCandidatesExpiryJob";
+import { scheduleClinicDiscountsExpiryJob } from "./jobs/clinicDiscountsExpiryJob";
+import { scheduleInpatientVehiclesExpiryJob } from "./jobs/inpatientVehiclesExpiryJob";
 import { initSocketServer } from "./websocket/socketServer";
 
 process.on("uncaughtException", (error) => {
@@ -30,6 +32,8 @@ scheduleWebhookEventsCleanupJob();
 scheduleWebhookDebugLogsCleanupJob();
 scheduleEntryCandidatesExpiryJob();
 scheduleExitCandidatesExpiryJob();
+scheduleClinicDiscountsExpiryJob();
+scheduleInpatientVehiclesExpiryJob();
 
 httpServer.listen(env.port, () => {
   console.log(`Server running on port ${env.port} [${env.nodeEnv}]`);
