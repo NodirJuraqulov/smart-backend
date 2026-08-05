@@ -1,6 +1,5 @@
 import sharp from "sharp";
 import { normalizeBoundingBox, padBoundingBox, NormalizedBoundingBox } from "@/utils/boundingBox";
-import type { WebhookTiming } from "./parsers/cameraParser.interface";
 
 // Dahua ITC413 overview frames are typically 2688x1584 (~4.3MP); 25MP gives
 // generous headroom while still rejecting decompression-bomb-style inputs.
@@ -27,7 +26,6 @@ export interface DahuaImageCropInput {
   cutoutImage: Buffer | null;
   vehicleBoundingBoxRaw: unknown;
   plateBoundingBoxRaw: unknown;
-  timing?: WebhookTiming;
 }
 
 export interface DahuaImageCropResult {
@@ -158,6 +156,5 @@ export async function buildDahuaEventImages(input: DahuaImageCropInput): Promise
     }
   }
 
-  if (input.timing) input.timing.t2 = Date.now();
   return result;
 }

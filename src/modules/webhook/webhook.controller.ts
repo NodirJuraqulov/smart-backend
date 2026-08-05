@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import { db } from "@/config/db";
 import { cameraParserFactory } from "./parsers/cameraParserFactory";
-import { CameraParserInput, WebhookTiming } from "./parsers/cameraParser.interface";
+import { CameraParserInput } from "./parsers/cameraParser.interface";
 import { NormalizedCameraEvent } from "./parsers/normalizedCameraEvent";
 import { IgnoredCameraSignalError, UnsupportedCameraBrandError, WebhookError } from "./webhookErrors";
 import { logWebhookDebug } from "./webhookDebugLog.service";
@@ -37,8 +37,7 @@ export async function debugHandler(req: Request, res: Response) {
 function buildParserInput(
   req: Request,
   direction: "entry" | "exit",
-  organization: { id: number; cameraBrand: string | null },
-  timing: WebhookTiming
+  organization: { id: number; cameraBrand: string | null }
 ): CameraParserInput {
   return {
     rawBody: Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0),
@@ -47,7 +46,6 @@ function buildParserInput(
     contentType: (req.headers["content-type"] as string | undefined) ?? "",
     direction,
     organization,
-    timing,
   };
 }
 
@@ -55,8 +53,7 @@ async function processCameraWebhook(
   req: Request,
   res: Response,
   cameraBrand: string,
-  organizationCameraBrand: string | null,
-  timing: WebhookTiming
+  organizationCameraBrand: string | null
 ) {
   const direction = req.params.direction as "entry" | "exit";
   const orgId = req.webhookOrgId!;
@@ -75,7 +72,7 @@ async function processCameraWebhook(
     throw err;
   }
 
-  const input = buildParserInput(req, direction, { id: orgId, cameraBrand: organizationCameraBrand }, timing);
+  const input = buildParserInput(req, direction, { id: orgId, cameraBrand: organizationCameraBrand });
 
   let event: NormalizedCameraEvent;
   try {
@@ -113,10 +110,6 @@ async function processCameraWebhook(
     }
     throw err;
   }
-  const parserCompletedAt = Date.now();
-  timing.t1 ??= parserCompletedAt;
-  timing.t2 ??= parserCompletedAt;
-
   const plateNumber = normalizeDetectedPlate(event.plateNumber);
   event = { ...event, plateNumber };
 
@@ -130,14 +123,12 @@ async function processCameraWebhook(
     deviceId: event.deviceId,
     cameraEventAt: event.timestamp,
   });
-  timing.t3 = Date.now();
   if (!hasDetectedVehicleRegion(event)) {
     await saveWebhookEventImages({
       orgId,
       eventId: registration.eventId,
       direction,
       event,
-      timing,
     }).catch((err) => {
       console.warn(
         `Webhook event rasmlari saqlanmadi: org_id=${orgId} event_id=${registration.eventId} ` +
@@ -179,14 +170,12 @@ async function processCameraWebhook(
     eventId: registration.eventId,
     direction,
     event,
-    timing,
   }).catch((err) => {
     console.warn(
       `Webhook event rasmlari saqlanmadi: org_id=${orgId} event_id=${registration.eventId} ` +
         `direction=${direction} error=${err instanceof Error ? err.message : String(err)}`
     );
   });
-  timing.t4 ??= Date.now();
 
   if (registration.status === "opposite_camera_echo") {
     console.log(
@@ -222,7 +211,6 @@ async function processCameraWebhook(
       webhookEventId: registration.eventId,
       detectedPlate: plateNumber,
       confidence: event.confidence,
-      timing,
     });
     if (result.skipped) {
       res.status(200).json({
@@ -277,14 +265,13 @@ async function processCameraWebhook(
 }
 
 export async function hikvisionHandler(req: Request, res: Response) {
-  await processCameraWebhook(req, res, DEFAULT_CAMERA_BRAND, null, { t0: Date.now() });
+  await processCameraWebhook(req, res, DEFAULT_CAMERA_BRAND, null);
 }
 
 export async function cameraHandler(req: Request, res: Response) {
-  const timing = { t0: Date.now() };
   const orgId = req.webhookOrgId!;
   const organization = await db("tb_organizations").select("camera_brand").where({ id: orgId }).first();
   const cameraBrand = organization?.camera_brand || DEFAULT_CAMERA_BRAND;
 
-  await processCameraWebhook(req, res, cameraBrand, organization?.camera_brand ?? null, timing);
+  await processCameraWebhook(req, res, cameraBrand, organization?.camera_brand ?? null);
 }

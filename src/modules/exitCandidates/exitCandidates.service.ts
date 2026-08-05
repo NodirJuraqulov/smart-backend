@@ -21,7 +21,6 @@ import {
 import { getExitDisplayStatus } from "@/modules/publicDisplay/publicDisplay.service";
 import { ApiError } from "@/utils/ApiError";
 import { resolveOrgIdRequired } from "@/utils/orgScope";
-import type { WebhookTiming } from "@/modules/webhook/parsers/cameraParser.interface";
 import {
   emitExitCandidateCreated,
   emitExitCandidateResolved,
@@ -365,7 +364,6 @@ export async function createExitCandidate(input: {
   webhookEventId: number;
   detectedPlate: string | null;
   confidence: number | null;
-  timing?: WebhookTiming;
 }) {
   const detectedPlate = normalizeDetectedPlate(input.detectedPlate);
   const result = await db.transaction(async (trx) => {
@@ -494,7 +492,6 @@ export async function createExitCandidate(input: {
     });
     return { candidateId, created: true, coalesced: false, skipped: false as const };
   });
-  if (input.timing) input.timing.t5 = Date.now();
   if (result.skipped) return result;
   const candidate = await getCandidateByInternalId(input.orgId, result.candidateId);
   if (result.created) {
@@ -513,20 +510,6 @@ export async function createExitCandidate(input: {
         plateUrl: candidate.plateImageUrl,
       },
     });
-  }
-  if (input.timing) {
-    input.timing.t6 = Date.now();
-    const { t0, t1 = t0, t2 = t1, t3 = t2, t4 = t3, t5 = t4, t6 = t5 } = input.timing;
-    console.log(
-      `[EXIT_TIMING] event=${input.webhookEventId} T0=${t0} T1=${t1 - t0}ms T2=${t2 - t1}ms ` +
-        `T3=${t3 - t2}ms T4=${t4 - t3}ms T5=${t5 - t4}ms T6=${t6 - t5}ms TOTAL=${t6 - t0}ms`
-    );
-    if (result.coalesced) {
-      console.log(
-        `[EXIT_TIMING] event=${input.webhookEventId} COALESCED=true ` +
-          `existingCandidateId=${candidate.id} noNewEmit=true`
-      );
-    }
   }
   return { ...result, candidate };
 }
