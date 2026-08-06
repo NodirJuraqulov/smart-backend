@@ -402,4 +402,48 @@ describe("Dahua rasmlari va exit hisobi", () => {
       .set("Authorization", authHeader());
     expect(response.status).toBe(404);
   });
+
+  it("event image endpoint to'g'ri Content-Type va Content-Length bilan buferdan qaytaradi", async () => {
+    await postCamera("entry", dahuaPayload("50M105BB"));
+    const event = await db("tb_webhook_events")
+      .where({ org_id: orgId, plate_number: "50M105BB" })
+      .first();
+    const response = await request(server)
+      .get(`/api/webhook-events/${event.id}/images/vehicle`)
+      .set("Authorization", authHeader());
+    expect(response.status).toBe(200);
+    expect(response.headers["content-type"]).toBe("image/jpeg");
+    expect(Number(response.headers["content-length"])).toBe(response.body.length);
+    expect(response.body[0]).toBe(0xff);
+    expect(response.body[1]).toBe(0xd8);
+    expect(response.body[2]).toBe(0xff);
+  });
+
+  it("event image endpoint faylning magic-byte turi mos kelmasa 404 qaytaradi", async () => {
+    await postCamera("entry", dahuaPayload("50M106BB"));
+    const event = await db("tb_webhook_events")
+      .where({ org_id: orgId, plate_number: "50M106BB" })
+      .first();
+    const absolutePath = path.resolve(event.vehicle_image_path);
+    await fs.writeFile(absolutePath, Buffer.from("not-an-image"));
+
+    const response = await request(server)
+      .get(`/api/webhook-events/${event.id}/images/vehicle`)
+      .set("Authorization", authHeader());
+    expect(response.status).toBe(404);
+  });
+
+  it("event image endpoint fayl diskdan o'chirilgan bo'lsa 404 qaytaradi", async () => {
+    await postCamera("entry", dahuaPayload("50M107BB"));
+    const event = await db("tb_webhook_events")
+      .where({ org_id: orgId, plate_number: "50M107BB" })
+      .first();
+    const absolutePath = path.resolve(event.vehicle_image_path);
+    await fs.unlink(absolutePath);
+
+    const response = await request(server)
+      .get(`/api/webhook-events/${event.id}/images/vehicle`)
+      .set("Authorization", authHeader());
+    expect(response.status).toBe(404);
+  });
 });

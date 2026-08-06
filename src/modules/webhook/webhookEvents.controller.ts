@@ -12,6 +12,7 @@ export async function webhookEventImageHandler(req: Request, res: Response): Pro
   }
   const image = await getWebhookEventImage(req.user!, eventId, kind);
   res.setHeader("Content-Type", image.contentType);
+  res.setHeader("Content-Length", image.buffer.length);
   res.setHeader("Cache-Control", "private, max-age=86400");
-  res.sendFile(image.absolutePath);
+  res.send(image.buffer);
 }

@@ -190,7 +190,7 @@ export async function getWebhookEventImage(
   actor: AuthTokenPayload,
   eventId: number,
   kind: WebhookEventImageKind
-): Promise<{ absolutePath: string; contentType: string }> {
+): Promise<{ buffer: Buffer; contentType: string }> {
   const column = `${kind}_image_path`;
   const event = await db("tb_webhook_events")
     .select("org_id", column)
@@ -207,5 +207,5 @@ export async function getWebhookEventImage(
   if (!buffer) throw new ApiError("Rasm topilmadi", 404);
   const imageType = detectImage(buffer);
   if (!imageType) throw new ApiError("Rasm topilmadi", 404);
-  return { absolutePath, contentType: imageType.contentType };
+  return { buffer, contentType: imageType.contentType };
 }
