@@ -266,11 +266,17 @@ describe("entry identifier production workflow", () => {
     expect(response.body.message).toBe("Davlat raqami kiritilishi kerak");
   });
 
-  it("10. acceptdagi plate allaqachon active bo'lsa 409 qaytaradi", async () => {
+  it("10. acceptdagi plate allaqachon active bo'lsa eskisi yopilib yangi sessiya ochiladi", async () => {
     await setOrgCapacity(orgId, 2);
-    await createTestActiveSession(orgId, "01P110AA");
+    const staleId = await createTestActiveSession(orgId, "01P110AA");
     await postCamera("entry", null);
-    expect((await acceptCandidate((await entryCandidate()).id, "01P110AA")).status).toBe(409);
+    const response = await acceptCandidate((await entryCandidate()).id, "01P110AA");
+    expect(response.status).toBe(200);
+    expect(response.body.session_id).not.toBe(staleId);
+    expect(await db("tb_parking_sessions").where({ id: staleId }).first()).toMatchObject({
+      status: "completed",
+      exit_method: "auto_closed_on_reentry",
+    });
   });
 
   it("11. decline sessiya va relay yaratmaydi, audit yozadi", async () => {
@@ -299,9 +305,15 @@ describe("entry identifier production workflow", () => {
     expect(await db("tb_activity_logs").where({ action: "parking.manual_entry", target_id: response.body.session_id }).first()).toBeTruthy();
   });
 
-  it("13. manual entry active plate uchun 409 qaytaradi", async () => {
-    await createTestActiveSession(orgId, "01P113AA");
-    expect((await manualEntry({ plate_number: "01P113AA", reason: "Takror" })).status).toBe(409);
+  it("13. manual entry active plate uchun eskisini yopib yangi sessiya ochadi", async () => {
+    const staleId = await createTestActiveSession(orgId, "01P113AA");
+    const response = await manualEntry({ plate_number: "01P113AA", reason: "Takror" });
+    expect(response.status).toBe(200);
+    expect(response.body.session_id).not.toBe(staleId);
+    expect(await db("tb_parking_sessions").where({ id: staleId }).first()).toMatchObject({
+      status: "completed",
+      exit_method: "auto_closed_on_reentry",
+    });
   });
 
   it("14. manual entry plate bo'sh bo'lsa 400 qaytaradi", async () => {

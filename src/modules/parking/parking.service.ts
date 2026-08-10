@@ -45,7 +45,7 @@ export interface SessionRecord {
   amount: string | null;
   status: "active" | "completed" | "awaiting_payment";
   entry_method: "auto" | "manual";
-  exit_method: "auto" | "manual" | "forced" | null;
+  exit_method: "auto" | "manual" | "forced" | "auto_closed_on_reentry" | null;
   image_entry: string | null;
   image_exit: string | null;
   entry_overview_image_path: string | null;
@@ -353,6 +353,47 @@ async function assertNoActiveSessionForPlate(orgId: number, plateNumber: string,
   }
 }
 
+export async function closeStaleActiveSessionOnReentry(
+  orgId: number,
+  plateNumber: string,
+  executor: Knex
+): Promise<boolean> {
+  const staleSession = await executor<SessionRecord>("tb_parking_sessions")
+    .select("id", "entered_at")
+    .where({ org_id: orgId, plate_number: plateNumber, status: "active" })
+    .forUpdate()
+    .first();
+  if (!staleSession) return false;
+
+  const closedAt = new Date();
+  const enteredAt = new Date(staleSession.entered_at);
+
+  await executor("tb_parking_sessions").where({ id: staleSession.id, org_id: orgId }).update({
+    status: "completed",
+    exited_at: closedAt,
+    duration_minutes: calculateDurationMinutes(enteredAt, closedAt),
+    amount: 0,
+    exit_method: "auto_closed_on_reentry",
+    active_plate_key: null,
+  });
+
+  await executor("tb_activity_logs").insert({
+    actor_id: null,
+    action: "session_auto_closed_on_reentry",
+    target_type: "session",
+    target_id: staleSession.id,
+    details: JSON.stringify({
+      orgId,
+      sessionId: staleSession.id,
+      plateNumber,
+      originalEnteredAt: enteredAt.toISOString(),
+      hoursOpen: Math.round((closedAt.getTime() - enteredAt.getTime()) / 36000) / 100,
+    }),
+  });
+
+  return true;
+}
+
 async function insertActiveSession(input: {
   org_id: number;
   plate_number: string;
@@ -597,9 +638,10 @@ export async function createEntrySessionInTransaction(
   }
 ): Promise<SessionRecord> {
   if (!input.skipWorkHours) await assertWithinWorkHours(input.orgId, trx);
-  if (!input.skipCapacity) await assertCapacityAvailable(input.orgId, trx);
   const plateNumber = input.plateNumber;
   if (!plateNumber) throw new ApiError("Davlat raqami kiritilishi kerak", 400);
+  await closeStaleActiveSessionOnReentry(input.orgId, plateNumber, trx);
+  if (!input.skipCapacity) await assertCapacityAvailable(input.orgId, trx);
   await assertNoActiveSessionForPlate(input.orgId, plateNumber, trx);
   const sessionSource = await resolveSessionSource(input.orgId, plateNumber, trx);
   const pricing = await resolveEntryPricing(input.orgId, sessionSource, trx);
@@ -658,6 +700,7 @@ export async function entryManual(
   const orgId = resolveOrgIdRequired(actor, input.org_id);
 
   await assertWithinWorkHours(orgId);
+  await db.transaction((trx) => closeStaleActiveSessionOnReentry(orgId, input.plate_number, trx));
   await assertCapacityAvailable(orgId);
   await assertNoActiveSessionForPlate(orgId, input.plate_number);
   const sessionSource = await resolveSessionSource(orgId, input.plate_number);

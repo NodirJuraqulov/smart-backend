@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { db } from "@/config/db";
 import { entryManual, exitManual } from "@/modules/parking/parking.service";
 import { AuthTokenPayload } from "@/modules/auth/auth.service";
 import { ApiError } from "@/utils/ApiError";
@@ -6,6 +7,7 @@ import {
   assertTestDatabase,
   cleanupOrganization,
   closeDb,
+  createTestAwaitingPaymentSession,
   createTestOrganization,
   createTestSettings,
   createTestTariff,
@@ -36,20 +38,34 @@ afterAll(async () => {
 });
 
 describe("entryManual — duplicate himoyasi", () => {
-  it("bir xil nomer, hali chiqmagan holda — rad etiladi (409)", async () => {
+  it("bir xil nomer, hali chiqmagan holda — eski sessiya avtomatik yopiladi, yangisi ochiladi", async () => {
     const plate = "01A123AA";
-    await entryManual(operator, { plate_number: plate });
+    const first = await entryManual(operator, { plate_number: plate });
 
+    const second = await entryManual(operator, { plate_number: plate });
+
+    const closed = await db("tb_parking_sessions").where({ id: first!.id }).first();
+    expect(closed).toMatchObject({
+      status: "completed",
+      exit_method: "auto_closed_on_reentry",
+      active_plate_key: null,
+    });
+    expect(Number(closed.amount)).toBe(0);
+    expect(await db("tb_payments").where({ session_id: first!.id })).toHaveLength(0);
+    expect(second!.id).not.toBe(first!.id);
+    expect(second!.status).toBe("active");
+  });
+
+  it("to'lov kutayotgan sessiya uchun kirish hamon ApiError 409 bilan rad etiladi", async () => {
+    const plate = "01A124AA";
+    const awaitingId = await createTestAwaitingPaymentSession(orgId, plate);
+
+    await expect(entryManual(operator, { plate_number: plate })).rejects.toBeInstanceOf(ApiError);
     await expect(entryManual(operator, { plate_number: plate })).rejects.toMatchObject({
       statusCode: 409,
     });
-  });
-
-  it("rad etish xatosi ApiError instansiyasi bo'lishi kerak", async () => {
-    const plate = "01A124AA";
-    await entryManual(operator, { plate_number: plate });
-
-    await expect(entryManual(operator, { plate_number: plate })).rejects.toBeInstanceOf(ApiError);
+    const untouched = await db("tb_parking_sessions").where({ id: awaitingId }).first();
+    expect(untouched.status).toBe("awaiting_payment");
   });
 
   it("bir xil nomer, chiqqandan keyin — YANGI kirish RUXSAT etiladi", async () => {

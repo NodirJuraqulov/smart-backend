@@ -172,20 +172,26 @@ describe("candidate spam himoyasi", () => {
     expect(audit.processing_result).toBe("resolved_recently_ignored");
   });
 
-  it("entry active session mavjud bo'lsa candidate va sessiya yaratmaydi", async () => {
+  it("entry active session mavjud bo'lsa eskisini yopib yangi sessiya ochadi", async () => {
     const sessionId = await createTestActiveSession(orgId, "01A200AA");
 
     const response = await postWebhook("entry", "01A200AA");
-    const sessions = await db("tb_parking_sessions").where({ org_id: orgId });
+    const sessions = await db("tb_parking_sessions").where({ org_id: orgId }).orderBy("id", "asc");
     const candidates = await db("tb_entry_candidates").where({ org_id: orgId });
     const audit = await db("tb_webhook_events").where({ org_id: orgId }).first();
 
-    expect(response.body.reason).toBe("already_active");
-    expect(sessions.map((session) => session.id)).toEqual([sessionId]);
+    expect(response.body.reason).toBeUndefined();
+    expect(sessions).toHaveLength(2);
+    expect(sessions[0]).toMatchObject({
+      id: sessionId,
+      status: "completed",
+      exit_method: "auto_closed_on_reentry",
+    });
+    expect(sessions[1].status).toBe("active");
     expect(candidates).toHaveLength(0);
     expect(audit).toMatchObject({
-      processing_result: "active_entry_already_exists",
-      session_id: sessionId,
+      processing_result: "entry_created",
+      session_id: sessions[1].id,
     });
   });
 

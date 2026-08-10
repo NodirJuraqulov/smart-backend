@@ -4,6 +4,7 @@ import { AuthTokenPayload } from "@/modules/auth/auth.service";
 import {
   attachWebhookEntryImages,
   attachWebhookEventEntryImages,
+  closeStaleActiveSessionOnReentry,
   createEntrySessionInTransaction,
   displayPlateNumber,
   hasAvailableCapacity,
@@ -194,6 +195,7 @@ export async function processEntryWebhook(input: {
       };
     }
     if (plateNumber) {
+      await closeStaleActiveSessionOnReentry(input.orgId, plateNumber, trx);
       const activeSession = await trx("tb_parking_sessions")
         .select("id")
         .where({ org_id: input.orgId, plate_number: plateNumber, status: "active" })
