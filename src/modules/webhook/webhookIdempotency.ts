@@ -84,7 +84,7 @@ function isPlausiblePlate(value: string): boolean {
   return value.length >= 5 && value.length <= 20 && /^[A-Z0-9]+$/.test(value);
 }
 
-function editDistanceAtMostOne(left: string, right: string): boolean {
+export function editDistanceAtMostOne(left: string, right: string): boolean {
   if (Math.abs(left.length - right.length) > 1) return false;
   let leftIndex = 0;
   let rightIndex = 0;

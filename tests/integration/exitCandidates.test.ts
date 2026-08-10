@@ -673,7 +673,7 @@ describe("exit candidate completion workflow", () => {
 
   it("17. retry disabled va not_configured auditdan keyin konfiguratsiya xabari bilan 400 qaytaradi", async () => {
     for (const status of ["disabled", "not_configured"] as const) {
-      const plate = status === "disabled" ? "UNKNOWN3" : "UNKNOWN4";
+      const plate = status === "disabled" ? "UNKNOWN3" : "MISSING7";
       await postExitForTest(plate);
       const candidate = await findCandidateForTest(plate);
       openBarrierMock.mockResolvedValueOnce({ status, success: false });
@@ -745,13 +745,13 @@ describe("exit candidate completion workflow", () => {
 
   it("21. turli plate'lar uchun alohida pending candidate'lar yaratiladi", async () => {
     await postExitForTest("01D201AA");
-    await postExitForTest("01D202AA");
+    await postExitForTest("01D299BB");
     const candidates = await testDb("tb_exit_candidates")
       .where({ org_id: orgId, status: "pending" })
-      .whereIn("detected_plate", ["01D201AA", "01D202AA"]);
+      .whereIn("detected_plate", ["01D201AA", "01D299BB"]);
     expect(candidates).toHaveLength(2);
     expect(new Set(candidates.map((candidate) => candidate.detected_plate))).toEqual(
-      new Set(["01D201AA", "01D202AA"])
+      new Set(["01D201AA", "01D299BB"])
     );
   });
 });

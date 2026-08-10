@@ -1,4 +1,5 @@
 import { promises as fs } from "fs";
+import type { Knex } from "knex";
 import { db } from "@/config/db";
 import { env } from "@/config/env";
 import { AuthTokenPayload } from "@/modules/auth/auth.service";
@@ -12,7 +13,10 @@ import {
 import { INSIDE_SESSION_STATUSES } from "@/modules/parking/sessionStatus";
 import { BarrierStatus, openBarrier } from "@/modules/relay/relay.service";
 import { getWebhookEventImage } from "@/modules/webhook/webhookEventImage.service";
-import { resolveSafeCameraEventTime } from "@/modules/webhook/webhookIdempotency";
+import {
+  editDistanceAtMostOne,
+  resolveSafeCameraEventTime,
+} from "@/modules/webhook/webhookIdempotency";
 import {
   normalizeDetectedPlate,
   NULL_PLATE_COALESCE_WINDOW_MS,
@@ -273,6 +277,63 @@ function normalizePlate(value: string): string {
   return value.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
 }
 
+const MIN_FUZZY_PLATE_LENGTH = 6;
+
+function isFuzzyPlateMatch(detectedPlate: string, candidatePlate: string | null): boolean {
+  if (!candidatePlate) return false;
+  if (
+    detectedPlate.length < MIN_FUZZY_PLATE_LENGTH ||
+    candidatePlate.length < MIN_FUZZY_PLATE_LENGTH
+  ) {
+    return false;
+  }
+  return editDistanceAtMostOne(detectedPlate, candidatePlate);
+}
+
+async function findFuzzyActiveSession(trx: Knex.Transaction, orgId: number, detectedPlate: string) {
+  const sessions = await trx<SessionSummary>("tb_parking_sessions")
+    .select("id", "status", "plate_number")
+    .where({ org_id: orgId, status: "active" })
+    .whereNotNull("plate_number");
+  const matches = sessions.filter((session) => isFuzzyPlateMatch(detectedPlate, session.plate_number));
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+async function findFuzzyResolvedCandidate(
+  trx: Knex.Transaction,
+  orgId: number,
+  detectedPlate: string,
+  cooldownStart: Date
+) {
+  const candidates = await trx<CandidateRow>("tb_exit_candidates")
+    .select("id", "detected_plate", "resolved_session_id")
+    .where({ org_id: orgId })
+    .whereIn("status", ["accepted", "dismissed"])
+    .whereNotNull("resolved_at")
+    .andWhere("resolved_at", ">=", cooldownStart)
+    .orderBy("resolved_at", "desc");
+  const matches = candidates.filter((candidate) =>
+    isFuzzyPlateMatch(detectedPlate, candidate.detected_plate)
+  );
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+async function findFuzzyPendingCandidate(
+  trx: Knex.Transaction,
+  orgId: number,
+  detectedPlate: string
+) {
+  const candidates = await trx<CandidateRow>("tb_exit_candidates")
+    .where({ org_id: orgId, status: "pending" })
+    .whereNotNull("detected_plate")
+    .orderBy("camera_event_at", "desc")
+    .forUpdate();
+  const matches = candidates.filter((candidate) =>
+    isFuzzyPlateMatch(detectedPlate, candidate.detected_plate)
+  );
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
 function canonicalPlate(value: string): string {
   const mapping: Record<string, string> = { O: "0", I: "1", B: "8", S: "5", Z: "2", G: "6" };
   return [...value].map((char) => mapping[char] ?? char).join("");
@@ -387,7 +448,7 @@ export async function createExitCandidate(input: {
       .first();
     if (!webhookEvent) throw new ApiError("Webhook exit hodisasi topilmadi", 404);
     const cameraEventAt = resolveSafeCameraEventTime(webhookEvent.camera_event_at, webhookEvent.created_at);
-    const matchingSession = detectedPlate
+    let matchingSession = detectedPlate
       ? await trx<SessionSummary>("tb_parking_sessions")
           .select("id", "status")
           .where({ org_id: input.orgId, plate_number: detectedPlate })
@@ -395,7 +456,10 @@ export async function createExitCandidate(input: {
           .orderByRaw("CASE WHEN status = 'active' THEN 0 ELSE 1 END")
           .orderBy("entered_at", "desc")
           .first()
-      : null;
+      : undefined;
+    if (detectedPlate && !matchingSession) {
+      matchingSession = await findFuzzyActiveSession(trx, input.orgId, detectedPlate);
+    }
     if (matchingSession?.status === "awaiting_payment") {
       await trx("tb_webhook_events").where({ id: input.webhookEventId, org_id: input.orgId }).update({
         processing_result: "already_awaiting_payment",
@@ -410,14 +474,23 @@ export async function createExitCandidate(input: {
     }
     const matchedSession = matchingSession?.status === "active" ? matchingSession : null;
     if (detectedPlate && !matchedSession) {
-      const resolvedCandidate = await trx<CandidateRow>("tb_exit_candidates")
+      const cooldownStart = new Date(Date.now() - RESOLVED_EXIT_CANDIDATE_COOLDOWN_MS);
+      let resolvedCandidate = await trx<CandidateRow>("tb_exit_candidates")
         .select("id", "resolved_session_id")
         .where({ org_id: input.orgId, detected_plate: detectedPlate })
         .whereIn("status", ["accepted", "dismissed"])
         .whereNotNull("resolved_at")
-        .andWhere("resolved_at", ">=", new Date(Date.now() - RESOLVED_EXIT_CANDIDATE_COOLDOWN_MS))
+        .andWhere("resolved_at", ">=", cooldownStart)
         .orderBy("resolved_at", "desc")
         .first();
+      if (!resolvedCandidate) {
+        resolvedCandidate = await findFuzzyResolvedCandidate(
+          trx,
+          input.orgId,
+          detectedPlate,
+          cooldownStart
+        );
+      }
       if (resolvedCandidate) {
         await trx("tb_webhook_events").where({ id: input.webhookEventId, org_id: input.orgId }).update({
           processing_result: "resolved_recently_ignored",
@@ -452,7 +525,10 @@ export async function createExitCandidate(input: {
           new Date(cameraEventAt.getTime() + NULL_PLATE_COALESCE_WINDOW_MS)
         );
     }
-    const pending = await pendingQuery.orderBy("camera_event_at", "desc").forUpdate().first();
+    let pending = await pendingQuery.orderBy("camera_event_at", "desc").forUpdate().first();
+    if (!pending && detectedPlate) {
+      pending = await findFuzzyPendingCandidate(trx, input.orgId, detectedPlate);
+    }
     if (pending) {
       await trx("tb_exit_candidates").where({ id: pending.id, org_id: input.orgId }).update({
         camera_event_at: cameraEventAt,
