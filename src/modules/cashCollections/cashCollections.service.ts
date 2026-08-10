@@ -9,6 +9,7 @@ import { resolveOrgIdRequired } from "@/utils/orgScope";
 export interface CashCollectionRow {
   id: number;
   org_id: number;
+  operator_id: number | null;
   collected_by: number | null;
   expected_amount: string;
   collected_amount: string;
@@ -21,9 +22,11 @@ export interface CashCollectionRow {
 
 export interface CashCollectionListRow extends CashCollectionRow {
   collected_by_name: string | null;
+  operator_id_name: string | null;
 }
 
 interface PendingSummary {
+  operator_id: number;
   expected_cash_amount: number;
   online_amount: number;
   period_start: Date;
@@ -35,36 +38,65 @@ function safeAmount(value: string | number | null | undefined): number {
   return Number.isFinite(amount) && amount > 0 ? amount : 0;
 }
 
-export async function findLastCollectionPeriodEnd(
-  orgId: number,
-  executor: Knex = db
-): Promise<Date | null> {
-  const last = await executor<CashCollectionRow>("tb_cash_collections")
+function latestDate(dates: Date[]): Date {
+  return new Date(Math.max(...dates.map((date) => date.getTime())));
+}
+
+async function findLegacyOrgPeriodEnd(orgId: number, executor: Knex): Promise<Date | null> {
+  const legacy = await executor("tb_cash_collections")
     .select("period_end")
     .where({ org_id: orgId })
+    .whereNull("operator_id")
     .orderBy("period_end", "desc")
     .orderBy("id", "desc")
     .first();
-  return last ? new Date(last.period_end) : null;
+  return legacy ? new Date(legacy.period_end) : null;
 }
 
-export async function resolveCurrentPeriodStart(orgId: number, executor: Knex = db): Promise<Date> {
-  const lastPeriodEnd = await findLastCollectionPeriodEnd(orgId, executor);
-  if (lastPeriodEnd) return lastPeriodEnd;
-
-  const organization = await executor("tb_organizations").select("created_at").where({ id: orgId }).first();
-  if (!organization) throw new ApiError("Stoyanka topilmadi", 404);
-  return new Date(organization.created_at);
-}
-
-async function sumPaymentsByMethod(
+export async function assertOperatorInOrganization(
   orgId: number,
+  operatorId: number,
+  executor: Knex = db
+): Promise<{ id: number; created_at: Date }> {
+  const operator = await executor("tb_users")
+    .select("id", "created_at")
+    .where({ id: operatorId, org_id: orgId, role: "operator" })
+    .first();
+  if (!operator) throw new ApiError("Operator topilmadi", 404);
+  return operator;
+}
+
+async function resolveOperatorPeriodStart(
+  orgId: number,
+  operatorId: number,
+  executor: Knex
+): Promise<Date> {
+  const operator = await assertOperatorInOrganization(orgId, operatorId, executor);
+
+  const personal = await executor("tb_cash_collections")
+    .select("period_end")
+    .where({ org_id: orgId, operator_id: operatorId })
+    .orderBy("period_end", "desc")
+    .orderBy("id", "desc")
+    .first();
+
+  const legacyPeriodEnd = await findLegacyOrgPeriodEnd(orgId, executor);
+
+  const boundaries = [new Date(operator.created_at)];
+  if (personal) boundaries.push(new Date(personal.period_end));
+  if (legacyPeriodEnd) boundaries.push(legacyPeriodEnd);
+  return latestDate(boundaries);
+}
+
+async function sumOperatorPaymentsByMethod(
+  orgId: number,
+  operatorId: number,
   periodStart: Date,
   periodEnd: Date,
-  executor: Knex = db
+  executor: Knex
 ): Promise<{ cash: number; online: number }> {
   const rows = await executor("tb_payments")
-    .where({ org_id: orgId })
+    .where({ org_id: orgId, operator_id: operatorId })
     .andWhere("paid_at", ">=", periodStart)
     .andWhere("paid_at", "<", periodEnd)
     .groupBy("payment_method")
@@ -82,12 +114,14 @@ async function sumPaymentsByMethod(
 
 async function buildPendingSummary(
   orgId: number,
+  operatorId: number,
   periodEnd: Date,
-  executor: Knex = db
+  executor: Knex
 ): Promise<PendingSummary> {
-  const periodStart = await resolveCurrentPeriodStart(orgId, executor);
-  const totals = await sumPaymentsByMethod(orgId, periodStart, periodEnd, executor);
+  const periodStart = await resolveOperatorPeriodStart(orgId, operatorId, executor);
+  const totals = await sumOperatorPaymentsByMethod(orgId, operatorId, periodStart, periodEnd, executor);
   return {
+    operator_id: operatorId,
     expected_cash_amount: totals.cash,
     online_amount: totals.online,
     period_start: periodStart,
@@ -95,25 +129,62 @@ async function buildPendingSummary(
   };
 }
 
-export async function getUncollectedRevenue(orgId: number, executor: Knex = db): Promise<number> {
-  const periodStart = await resolveCurrentPeriodStart(orgId, executor);
-  const totals = await sumPaymentsByMethod(orgId, periodStart, new Date(), executor);
-  return totals.cash + totals.online;
+export async function getOrgUncollectedRevenue(orgId: number, executor: Knex = db): Promise<number> {
+  const organization = await executor("tb_organizations").select("created_at").where({ id: orgId }).first();
+  if (!organization) throw new ApiError("Stoyanka topilmadi", 404);
+
+  const legacyPeriodEnd = await findLegacyOrgPeriodEnd(orgId, executor);
+  const baseline = legacyPeriodEnd ?? new Date(organization.created_at);
+
+  const [{ total }] = await executor("tb_payments as p")
+    .leftJoin(
+      executor("tb_cash_collections")
+        .select("operator_id")
+        .max("period_end as last_end")
+        .where({ org_id: orgId })
+        .whereNotNull("operator_id")
+        .groupBy("operator_id")
+        .as("c"),
+      "c.operator_id",
+      "p.operator_id"
+    )
+    .where({ "p.org_id": orgId })
+    .andWhere("p.paid_at", ">=", baseline)
+    .andWhere((builder) => {
+      builder.whereNull("c.last_end").orWhere("p.paid_at", ">=", executor.ref("c.last_end"));
+    })
+    .sum<{ total: string | null }[]>("p.amount as total");
+
+  return safeAmount(total);
+}
+
+export async function listOrganizationOperators(
+  actor: AuthTokenPayload,
+  requestedOrgId: number | undefined
+) {
+  const orgId = resolveOrgIdRequired(actor, requestedOrgId);
+  await assertOrganizationExists(orgId);
+
+  return db("tb_users")
+    .select("id", "name")
+    .where({ org_id: orgId, role: "operator" })
+    .orderBy("name", "asc");
 }
 
 export async function getPendingSummary(
   actor: AuthTokenPayload,
-  requestedOrgId: number | undefined
+  requestedOrgId: number | undefined,
+  operatorId: number
 ): Promise<PendingSummary> {
   const orgId = resolveOrgIdRequired(actor, requestedOrgId);
   await assertOrganizationExists(orgId);
-  return buildPendingSummary(orgId, new Date());
+  return buildPendingSummary(orgId, operatorId, new Date(), db);
 }
 
 export async function createCashCollection(
   actor: AuthTokenPayload,
   requestedOrgId: number | undefined,
-  input: { collectedAmount: unknown; note?: unknown }
+  input: { operatorId: number; collectedAmount: unknown; note?: unknown }
 ): Promise<CashCollectionRow> {
   const orgId = resolveOrgIdRequired(actor, requestedOrgId);
   await assertOrganizationExists(orgId);
@@ -133,10 +204,11 @@ export async function createCashCollection(
   const collection = await db.transaction(async (trx) => {
     await trx("tb_organizations").where({ id: orgId }).forUpdate().first();
     const periodEnd = new Date();
-    const summary = await buildPendingSummary(orgId, periodEnd, trx);
+    const summary = await buildPendingSummary(orgId, input.operatorId, periodEnd, trx);
 
     const [id] = await trx("tb_cash_collections").insert({
       org_id: orgId,
+      operator_id: input.operatorId,
       collected_by: actor.id,
       expected_amount: summary.expected_cash_amount,
       collected_amount: collectedAmount,
@@ -153,6 +225,7 @@ export async function createCashCollection(
 
   await logActivity(actor.id, "cash_collection.created", "cash_collection", collection.id, {
     orgId,
+    operatorId: input.operatorId,
     expectedAmount: Number(collection.expected_amount),
     collectedAmount: Number(collection.collected_amount),
     onlineAmountSnapshot: Number(collection.online_amount_snapshot),
@@ -176,9 +249,14 @@ export async function listCashCollections(
     .count<{ count: string }[]>("id as count");
 
   const collections = await db<CashCollectionListRow>("tb_cash_collections")
-    .leftJoin("tb_users", "tb_users.id", "tb_cash_collections.collected_by")
+    .leftJoin("tb_users as collector", "collector.id", "tb_cash_collections.collected_by")
+    .leftJoin("tb_users as shift_operator", "shift_operator.id", "tb_cash_collections.operator_id")
     .where({ "tb_cash_collections.org_id": orgId })
-    .select("tb_cash_collections.*", "tb_users.name as collected_by_name")
+    .select(
+      "tb_cash_collections.*",
+      "collector.name as collected_by_name",
+      "shift_operator.name as operator_id_name"
+    )
     .orderBy("tb_cash_collections.period_end", "desc")
     .orderBy("tb_cash_collections.id", "desc")
     .limit(input.limit)

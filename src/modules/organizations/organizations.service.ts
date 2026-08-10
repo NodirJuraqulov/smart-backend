@@ -4,7 +4,7 @@ import { DateTime } from "luxon";
 import { db } from "@/config/db";
 import { env } from "@/config/env";
 import { seedDefaultPermissions } from "@/modules/operatorPermissions/operatorPermissions.service";
-import { resolveCurrentPeriodStart } from "@/modules/cashCollections/cashCollections.service";
+import { getOrgUncollectedRevenue } from "@/modules/cashCollections/cashCollections.service";
 import { ApiError } from "@/utils/ApiError";
 import { isDuplicateKeyError } from "@/utils/dbErrors";
 import { applyCompletedExitFilter, applyInsideSessionsFilter } from "@/modules/parking/sessionStatus";
@@ -470,12 +470,11 @@ export async function getOrganizationStats(id: number) {
   const todayStart = now.startOf("day").toJSDate();
   const todayEnd = now.endOf("day").toJSDate();
 
-  const currentPeriodStart = await resolveCurrentPeriodStart(id);
+  const uncollectedRevenue = await getOrgUncollectedRevenue(id);
 
   const [
     [todayEntries],
     [todayExits],
-    [uncollectedRevenue],
     [currentlyParked],
     [totalSessions],
     [totalRevenue],
@@ -490,10 +489,6 @@ export async function getOrganizationStats(id: number) {
     )
       .whereBetween("exited_at", [todayStart, todayEnd])
       .count<{ count: string }[]>("id as count"),
-    db("tb_payments")
-      .where({ org_id: id })
-      .andWhere("paid_at", ">=", currentPeriodStart)
-      .sum<{ total: string | null }[]>("amount as total"),
     applyInsideSessionsFilter(
       db("tb_parking_sessions").where({ org_id: id })
     )
@@ -509,8 +504,7 @@ export async function getOrganizationStats(id: number) {
     organization_id: id,
     today_entries: Number(todayEntries.count),
     today_exits: Number(todayExits.count),
-    today_revenue: Number(uncollectedRevenue.total ?? 0),
-    current_period_start: currentPeriodStart,
+    today_revenue: uncollectedRevenue,
     currently_parked: Number(currentlyParked.count),
     total_sessions: Number(totalSessions.count),
     total_revenue: Number(totalRevenue.total ?? 0) + Number(totalSubscriptionRevenue.total ?? 0),

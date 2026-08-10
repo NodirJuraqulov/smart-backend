@@ -14,11 +14,31 @@ function parsePagination(req: Request): { page: number; limit: number } {
   };
 }
 
+function parseRequiredOperatorId(value: unknown, res: Response): number | null {
+  const operatorId = Number(value);
+  if (value === undefined || value === null || value === "" || !Number.isInteger(operatorId) || operatorId <= 0) {
+    res.status(400).json({ message: "operator_id majburiy va musbat butun son bo'lishi kerak" });
+    return null;
+  }
+  return operatorId;
+}
+
+export async function operatorsListHandler(req: Request, res: Response) {
+  const orgId = parseId(req, res);
+  if (orgId === null) return;
+
+  const operators = await cashCollectionsService.listOrganizationOperators(req.user!, orgId);
+  res.json({ operators });
+}
+
 export async function pendingSummaryHandler(req: Request, res: Response) {
   const orgId = parseId(req, res);
   if (orgId === null) return;
 
-  const summary = await cashCollectionsService.getPendingSummary(req.user!, orgId);
+  const operatorId = parseRequiredOperatorId(req.query.operator_id, res);
+  if (operatorId === null) return;
+
+  const summary = await cashCollectionsService.getPendingSummary(req.user!, orgId, operatorId);
   res.json(summary);
 }
 
@@ -26,7 +46,11 @@ export async function createHandler(req: Request, res: Response) {
   const orgId = parseId(req, res);
   if (orgId === null) return;
 
+  const operatorId = parseRequiredOperatorId(req.body?.operator_id, res);
+  if (operatorId === null) return;
+
   const collection = await cashCollectionsService.createCashCollection(req.user!, orgId, {
+    operatorId,
     collectedAmount: req.body?.collected_amount,
     note: req.body?.note,
   });
