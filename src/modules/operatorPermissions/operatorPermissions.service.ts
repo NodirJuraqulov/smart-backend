@@ -16,11 +16,24 @@ export const SECTION_KEYS = [
 
 export type SectionKey = (typeof SECTION_KEYS)[number];
 
-export const KASSIR_SECTION_KEYS: readonly SectionKey[] = ["reports"];
+export const PERMISSION_ROLES = ["operator", "kassir"] as const;
+
+export type PermissionRole = (typeof PERMISSION_ROLES)[number];
+
+export const KASSIR_DEFAULT_VISIBLE_SECTIONS: readonly SectionKey[] = ["reports"];
+
+export function isPermissionRole(value: unknown): value is PermissionRole {
+  return (PERMISSION_ROLES as readonly unknown[]).includes(value);
+}
+
+function defaultCanView(role: PermissionRole, sectionKey: SectionKey): boolean {
+  return role === "operator" || KASSIR_DEFAULT_VISIBLE_SECTIONS.includes(sectionKey);
+}
 
 interface PermissionRecord {
   id: number;
   org_id: number;
+  role: PermissionRole;
   section_key: string;
   can_view: boolean;
 }
@@ -32,20 +45,31 @@ interface PermissionInput {
 
 export async function seedDefaultPermissions(trx: Knex, orgId: number): Promise<void> {
   await trx("tb_operator_permissions").insert(
-    SECTION_KEYS.map((sectionKey) => ({ org_id: orgId, section_key: sectionKey, can_view: true }))
+    PERMISSION_ROLES.flatMap((role) =>
+      SECTION_KEYS.map((sectionKey) => ({
+        org_id: orgId,
+        role,
+        section_key: sectionKey,
+        can_view: defaultCanView(role, sectionKey),
+      }))
+    )
   );
 }
 
-export async function listPermissions(orgId: number) {
+export async function listPermissions(orgId: number, role: PermissionRole = "operator") {
   await assertOrganizationExists(orgId);
   const rows = await db<PermissionRecord>("tb_operator_permissions")
-    .where({ org_id: orgId })
+    .where({ org_id: orgId, role })
     .select("section_key", "can_view")
     .orderBy("section_key", "asc");
   return rows.map((row) => ({ section_key: row.section_key, can_view: !!row.can_view }));
 }
 
-export async function updatePermissions(orgId: number, permissions: PermissionInput[]) {
+export async function updatePermissions(
+  orgId: number,
+  permissions: PermissionInput[],
+  role: PermissionRole = "operator"
+) {
   await assertOrganizationExists(orgId);
 
   for (const permission of permissions) {
@@ -59,23 +83,35 @@ export async function updatePermissions(orgId: number, permissions: PermissionIn
 
   await db.transaction(async (trx) => {
     for (const permission of permissions) {
-      await trx("tb_operator_permissions")
-        .where({ org_id: orgId, section_key: permission.section_key })
+      const updated = await trx("tb_operator_permissions")
+        .where({ org_id: orgId, role, section_key: permission.section_key })
         .update({ can_view: permission.can_view });
+      if (updated === 0) {
+        await trx("tb_operator_permissions").insert({
+          org_id: orgId,
+          role,
+          section_key: permission.section_key,
+          can_view: permission.can_view,
+        });
+      }
     }
   });
 
-  return listPermissions(orgId);
+  return listPermissions(orgId, role);
 }
 
-export async function hasPermission(orgId: number | null, sectionKey: string): Promise<boolean> {
+export async function hasPermission(
+  orgId: number | null,
+  sectionKey: string,
+  role: PermissionRole = "operator"
+): Promise<boolean> {
   if (!orgId) return true;
 
   const permission = await db<PermissionRecord>("tb_operator_permissions")
-    .where({ org_id: orgId, section_key: sectionKey })
+    .where({ org_id: orgId, role, section_key: sectionKey })
     .first();
 
-  return permission ? !!permission.can_view : true;
+  return permission ? !!permission.can_view : defaultCanView(role, sectionKey as SectionKey);
 }
 
 export async function canAccessSection(
@@ -83,31 +119,24 @@ export async function canAccessSection(
   orgId: number | null,
   sectionKey: string
 ): Promise<boolean> {
-  if (role === "kassir") {
-    return (KASSIR_SECTION_KEYS as readonly string[]).includes(sectionKey);
-  }
-  if (role !== "operator") return true;
-  return hasPermission(orgId, sectionKey);
+  if (!isPermissionRole(role)) return true;
+  return hasPermission(orgId, sectionKey, role);
 }
 
 export async function getPermissionsMap(
   orgId: number | null,
   role: UserRole
 ): Promise<Record<string, boolean>> {
-  const map = Object.fromEntries(SECTION_KEYS.map((key) => [key, true])) as Record<string, boolean>;
-
-  if (role === "kassir") {
-    return Object.fromEntries(
-      SECTION_KEYS.map((key) => [key, (KASSIR_SECTION_KEYS as readonly string[]).includes(key)])
-    ) as Record<string, boolean>;
+  if (!isPermissionRole(role) || !orgId) {
+    return Object.fromEntries(SECTION_KEYS.map((key) => [key, true])) as Record<string, boolean>;
   }
 
-  if (role === "super_admin" || role === "owner" || !orgId) {
-    return map;
-  }
+  const map = Object.fromEntries(
+    SECTION_KEYS.map((key) => [key, defaultCanView(role, key)])
+  ) as Record<string, boolean>;
 
   const rows = await db<PermissionRecord>("tb_operator_permissions")
-    .where({ org_id: orgId })
+    .where({ org_id: orgId, role })
     .select("section_key", "can_view");
 
   for (const row of rows) {

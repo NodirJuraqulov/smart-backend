@@ -6,5 +6,6 @@ const router = Router({ mergeParams: true });
 
 router.get("/", asyncHandler(listHandler));
 router.put("/", asyncHandler(updateHandler));
+router.patch("/", asyncHandler(updateHandler));
 
 export default router;

@@ -1,6 +1,6 @@
 import { NextFunction, Request, Response } from "express";
 import { asyncHandler } from "@/middleware/asyncHandler";
-import { hasPermission } from "@/modules/operatorPermissions/operatorPermissions.service";
+import { hasPermission, isPermissionRole } from "@/modules/operatorPermissions/operatorPermissions.service";
 
 const PERMISSION_DENIED = { message: "Ruxsat yo'q — bu bo'limga kirish cheklangan" };
 
@@ -9,18 +9,19 @@ async function checkDailyReportAccessHandler(
   res: Response,
   next: NextFunction
 ): Promise<void> {
-  if (req.user?.role !== "operator") {
+  if (!req.user || !isPermissionRole(req.user.role)) {
     next();
     return;
   }
 
-  const canViewReports = await hasPermission(req.user.org_id, "reports");
+  const role = req.user.role;
+  const canViewReports = await hasPermission(req.user.org_id, "reports", role);
   if (canViewReports) {
     next();
     return;
   }
 
-  const canViewDashboard = await hasPermission(req.user.org_id, "dashboard");
+  const canViewDashboard = await hasPermission(req.user.org_id, "dashboard", role);
   if (canViewDashboard && Object.keys(req.query).length === 0) {
     next();
     return;
