@@ -10,19 +10,24 @@ export async function listHandler(req: Request, res: Response) {
 }
 
 export async function createHandler(req: Request, res: Response) {
-  const { org_id, name, login, password } = req.body ?? {};
+  const { org_id, name, login, password, role } = req.body ?? {};
 
   if (!org_id || !name || !login || !password) {
     res.status(400).json({ message: "org_id, name, login, password majburiy" });
     return;
   }
 
+  if (role !== undefined && role !== "operator" && role !== "kassir") {
+    res.status(400).json({ message: "role 'operator' yoki 'kassir' bo'lishi kerak" });
+    return;
+  }
+
   assertValidLogin(login);
   assertValidPassword(password);
 
-  const operator = await usersService.createOperator({ org_id, name, login, password });
+  const operator = await usersService.createOperator({ org_id, name, login, password, role });
 
-  await logActivity(req.user!.id, "user.created", "user", operator.id, { org_id, name, login });
+  await logActivity(req.user!.id, "user.created", "user", operator.id, { org_id, name, login, role });
 
   res.status(201).json({ operator });
 }

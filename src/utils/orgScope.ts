@@ -1,8 +1,14 @@
 import { AuthTokenPayload } from "@/modules/auth/auth.service";
 import { ApiError } from "@/utils/ApiError";
 
+const ORG_SCOPED_ROLES = ["operator", "owner", "kassir"] as const;
+
+export function isOrgScopedRole(role: AuthTokenPayload["role"]): boolean {
+  return (ORG_SCOPED_ROLES as readonly string[]).includes(role);
+}
+
 export function resolveOrgIdRequired(actor: AuthTokenPayload, requestedOrgId?: number): number {
-  if (actor.role === "operator" || actor.role === "owner") {
+  if (isOrgScopedRole(actor.role)) {
     if (!actor.org_id) {
       throw new ApiError("Operator hech qanday stoyankaga biriktirilmagan", 400);
     }
@@ -18,7 +24,7 @@ export function resolveOrgIdRequired(actor: AuthTokenPayload, requestedOrgId?: n
 }
 
 export function resolveOrgIdFilter(actor: AuthTokenPayload, requestedOrgId?: number): number | undefined {
-  if (actor.role === "operator" || actor.role === "owner") {
+  if (isOrgScopedRole(actor.role)) {
     if (!actor.org_id) {
       throw new ApiError("Operator hech qanday stoyankaga biriktirilmagan", 400);
     }

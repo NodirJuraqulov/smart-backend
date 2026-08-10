@@ -4,7 +4,7 @@ import { asyncHandler } from "@/middleware/asyncHandler";
 import { db } from "@/config/db";
 import { env } from "@/config/env";
 import { AuthTokenPayload } from "@/modules/auth/auth.service";
-import { hasPermission } from "@/modules/operatorPermissions/operatorPermissions.service";
+import { canAccessSection } from "@/modules/operatorPermissions/operatorPermissions.service";
 
 async function isAuthHandler(req: Request, res: Response, next: NextFunction) {
   const header = req.headers.authorization;
@@ -87,6 +87,18 @@ export function isSuperAdminOrOperatorOrOwner(req: Request, res: Response, next:
   next();
 }
 
+export function isSuperAdminOrOwnerOrKassir(req: Request, res: Response, next: NextFunction) {
+  if (
+    req.user?.role !== "super_admin" &&
+    req.user?.role !== "owner" &&
+    req.user?.role !== "kassir"
+  ) {
+    res.status(403).json({ message: "Ruxsat yo'q — faqat Super Admin, stoyanka egasi yoki kassir uchun" });
+    return;
+  }
+  next();
+}
+
 export function isSuperAdminOrOwner(req: Request, res: Response, next: NextFunction) {
   if (req.user?.role !== "super_admin" && req.user?.role !== "owner") {
     res.status(403).json({ message: "Ruxsat yo'q — faqat Super Admin yoki stoyanka egasi uchun" });
@@ -97,12 +109,12 @@ export function isSuperAdminOrOwner(req: Request, res: Response, next: NextFunct
 
 export function checkPermission(sectionKey: string) {
   return asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
-    if (req.user?.role !== "operator") {
+    if (!req.user) {
       next();
       return;
     }
 
-    const allowed = await hasPermission(req.user.org_id, sectionKey);
+    const allowed = await canAccessSection(req.user.role, req.user.org_id, sectionKey);
     if (!allowed) {
       res.status(403).json({ message: "Ruxsat yo'q — bu bo'limga kirish cheklangan" });
       return;

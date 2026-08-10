@@ -830,6 +830,7 @@ export async function confirmExitCandidate(
         amount,
         payment_method: paymentMethod,
         paid_at: exitedAt,
+        operator_id: actor.id,
       });
       payment = { id: paymentId, amount, payment_method: paymentMethod, paid_at: exitedAt };
     }

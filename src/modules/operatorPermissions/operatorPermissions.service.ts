@@ -16,6 +16,8 @@ export const SECTION_KEYS = [
 
 export type SectionKey = (typeof SECTION_KEYS)[number];
 
+export const KASSIR_SECTION_KEYS: readonly SectionKey[] = ["reports"];
+
 interface PermissionRecord {
   id: number;
   org_id: number;
@@ -76,11 +78,29 @@ export async function hasPermission(orgId: number | null, sectionKey: string): P
   return permission ? !!permission.can_view : true;
 }
 
+export async function canAccessSection(
+  role: UserRole,
+  orgId: number | null,
+  sectionKey: string
+): Promise<boolean> {
+  if (role === "kassir") {
+    return (KASSIR_SECTION_KEYS as readonly string[]).includes(sectionKey);
+  }
+  if (role !== "operator") return true;
+  return hasPermission(orgId, sectionKey);
+}
+
 export async function getPermissionsMap(
   orgId: number | null,
   role: UserRole
 ): Promise<Record<string, boolean>> {
   const map = Object.fromEntries(SECTION_KEYS.map((key) => [key, true])) as Record<string, boolean>;
+
+  if (role === "kassir") {
+    return Object.fromEntries(
+      SECTION_KEYS.map((key) => [key, (KASSIR_SECTION_KEYS as readonly string[]).includes(key)])
+    ) as Record<string, boolean>;
+  }
 
   if (role === "super_admin" || role === "owner" || !orgId) {
     return map;

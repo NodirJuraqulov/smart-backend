@@ -10,16 +10,21 @@ interface UserRow {
   name: string;
   login: string;
   password: string;
-  role: "super_admin" | "operator" | "owner";
+  role: "super_admin" | "operator" | "owner" | "kassir";
   is_active: boolean;
   created_at: Date;
 }
+
+export type ManagedUserRole = "operator" | "kassir";
+
+const MANAGED_ROLES = ["operator", "owner", "kassir"] as const;
 
 interface CreateOperatorInput {
   org_id: number;
   name: string;
   login: string;
   password: string;
+  role?: ManagedUserRole;
 }
 
 interface UpdateOperatorInput {
@@ -42,7 +47,7 @@ function toPublicOperator(row: UserRow) {
 }
 
 async function findManagedUserRowOrFail(id: number) {
-  const user = await db<UserRow>("tb_users").where({ id }).whereIn("role", ["operator", "owner"]).first();
+  const user = await db<UserRow>("tb_users").where({ id }).whereIn("role", [...MANAGED_ROLES]).first();
   if (!user) {
     throw new ApiError("Foydalanuvchi topilmadi", 404);
   }
@@ -62,7 +67,7 @@ async function assertLoginAvailable(login: string, excludeId?: number) {
 
 export async function listOperators() {
   const rows = await db<UserRow>("tb_users")
-    .whereIn("role", ["operator", "owner"])
+    .whereIn("role", [...MANAGED_ROLES])
     .orderBy("created_at", "desc");
   return rows.map(toPublicOperator);
 }
@@ -80,7 +85,7 @@ export async function createOperator(input: CreateOperatorInput) {
       name: input.name,
       login: input.login,
       password: passwordHash,
-      role: "operator",
+      role: input.role ?? "operator",
       is_active: true,
     });
   } catch (err) {

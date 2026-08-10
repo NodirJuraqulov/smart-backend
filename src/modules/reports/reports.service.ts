@@ -66,11 +66,21 @@ function timestampRange(column: string, start: Date, endExclusive: Date) {
   ]);
 }
 
-function paymentLedgerQuery(orgId: number, start: Date, endExclusive: Date) {
-  return db<PaymentRow>("tb_payments")
-    .where({ org_id: orgId })
-    .where(timestampRange("paid_at", start, endExclusive))
-    .select("paid_at", "amount", "payment_method");
+function applyOperatorFilter<T extends Knex.QueryBuilder>(query: T, operatorId?: number): T {
+  if (operatorId !== undefined) {
+    query.andWhere("operator_id", operatorId);
+  }
+  return query;
+}
+
+function paymentLedgerQuery(orgId: number, start: Date, endExclusive: Date, operatorId?: number) {
+  return applyOperatorFilter(
+    db<PaymentRow>("tb_payments")
+      .where({ org_id: orgId })
+      .where(timestampRange("paid_at", start, endExclusive))
+      .select("paid_at", "amount", "payment_method"),
+    operatorId
+  );
 }
 
 function safeAmount(value: string | number | null | undefined): number {
@@ -115,7 +125,8 @@ async function getSubscriptionRevenue(
 export async function getDailyReport(
   actor: AuthTokenPayload,
   requestedOrgId: number | undefined,
-  dateParam: string | undefined
+  dateParam: string | undefined,
+  operatorId?: number
 ) {
   const orgId = resolveOrgIdRequired(actor, requestedOrgId);
   await assertOrganizationExists(orgId);
@@ -144,7 +155,7 @@ export async function getDailyReport(
       )
         .where(timestampRange("exited_at", dayStart, dayEndExclusive))
         .select("exited_at"),
-      paymentLedgerQuery(orgId, dayStart, dayEndExclusive),
+      paymentLedgerQuery(orgId, dayStart, dayEndExclusive, operatorId),
       applyInsideSessionsFilter(
         db("tb_parking_sessions").where({ org_id: orgId })
       )
@@ -199,7 +210,8 @@ export async function getMonthlyReport(
   actor: AuthTokenPayload,
   requestedOrgId: number | undefined,
   yearParam: number | undefined,
-  monthParam: number | undefined
+  monthParam: number | undefined,
+  operatorId?: number
 ) {
   const orgId = resolveOrgIdRequired(actor, requestedOrgId);
   await assertOrganizationExists(orgId);
@@ -236,7 +248,7 @@ export async function getMonthlyReport(
     )
       .where(timestampRange("exited_at", monthStart, monthEndExclusive))
       .select("exited_at"),
-    paymentLedgerQuery(orgId, monthStart, monthEndExclusive),
+    paymentLedgerQuery(orgId, monthStart, monthEndExclusive, operatorId),
     getSubscriptionRevenue(orgId, monthStart, monthEndExclusive, monthStartDate, monthEndDate),
   ]);
 
@@ -287,7 +299,8 @@ export async function getMonthlyReport(
 export async function getYearlyReport(
   actor: AuthTokenPayload,
   requestedOrgId: number | undefined,
-  yearParam: number | undefined
+  yearParam: number | undefined,
+  operatorId?: number
 ) {
   const orgId = resolveOrgIdRequired(actor, requestedOrgId);
   await assertOrganizationExists(orgId);
@@ -318,7 +331,7 @@ export async function getYearlyReport(
     )
       .where(timestampRange("exited_at", yearStart, yearEndExclusive))
       .select("exited_at"),
-    paymentLedgerQuery(orgId, yearStart, yearEndExclusive),
+    paymentLedgerQuery(orgId, yearStart, yearEndExclusive, operatorId),
     getSubscriptionRevenue(orgId, yearStart, yearEndExclusive, yearStartDate, yearEndDate),
   ]);
 
@@ -438,7 +451,8 @@ async function getRangeReport(
   requestedOrgId: number | undefined,
   granularity: RangeGranularity,
   start: DateTime,
-  end: DateTime
+  end: DateTime,
+  operatorId?: number
 ) {
   const orgId = resolveOrgIdRequired(actor, requestedOrgId);
   await assertOrganizationExists(orgId);
@@ -467,9 +481,12 @@ async function getRangeReport(
       .select(bucketExpression("exited_at", buckets))
       .count<GroupedCountRow[]>("id as count")
       .groupBy("bucket"),
-    db("tb_payments")
-      .where("org_id", orgId)
-      .where(timestampRange("paid_at", startDate, endExclusive))
+    applyOperatorFilter(
+      db("tb_payments")
+        .where("org_id", orgId)
+        .where(timestampRange("paid_at", startDate, endExclusive)),
+      operatorId
+    )
       .select(bucketExpression("paid_at", buckets), "payment_method")
       .sum<GroupedPaymentRow[]>("amount as total")
       .groupBy("bucket", "payment_method"),
@@ -577,7 +594,8 @@ export async function getDailyRangeReport(
   actor: AuthTokenPayload,
   requestedOrgId: number | undefined,
   fromParam: string | undefined,
-  toParam: string | undefined
+  toParam: string | undefined,
+  operatorId?: number
 ) {
   const [from, to] = requireCompleteRange(fromParam, toParam, "Kunlik diapazon");
   const orgId = resolveOrgIdRequired(actor, requestedOrgId);
@@ -591,14 +609,15 @@ export async function getDailyRangeReport(
   if (days < 1) throw new ApiError("from_date to_date dan keyin bo'lishi mumkin emas", 400);
   if (days > 366) throw new ApiError("Kunlik diapazon 366 kundan oshmasligi kerak", 400);
   if (isFutureDate(to, timezone)) throw new ApiError("Kelajakdagi sana uchun hisobot bo'lishi mumkin emas", 400);
-  return getRangeReport(actor, requestedOrgId, "daily", start, end);
+  return getRangeReport(actor, requestedOrgId, "daily", start, end, operatorId);
 }
 
 export async function getMonthlyRangeReport(
   actor: AuthTokenPayload,
   requestedOrgId: number | undefined,
   fromParam: string | undefined,
-  toParam: string | undefined
+  toParam: string | undefined,
+  operatorId?: number
 ) {
   const [from, to] = requireCompleteRange(fromParam, toParam, "Oylik diapazon");
   if (!/^\d{4}-\d{2}$/.test(from) || !/^\d{4}-\d{2}$/.test(to)) {
@@ -617,14 +636,15 @@ export async function getMonthlyRangeReport(
   if (isFutureMonth(end.year, end.month, timezone)) {
     throw new ApiError("Kelajakdagi oy uchun hisobot bo'lishi mumkin emas", 400);
   }
-  return getRangeReport(actor, requestedOrgId, "monthly", start, end);
+  return getRangeReport(actor, requestedOrgId, "monthly", start, end, operatorId);
 }
 
 export async function getYearlyRangeReport(
   actor: AuthTokenPayload,
   requestedOrgId: number | undefined,
   fromParam: string | undefined,
-  toParam: string | undefined
+  toParam: string | undefined,
+  operatorId?: number
 ) {
   const [from, to] = requireCompleteRange(fromParam, toParam, "Yillik diapazon");
   if (!/^\d{4}$/.test(from) || !/^\d{4}$/.test(to)) {
@@ -643,6 +663,7 @@ export async function getYearlyRangeReport(
     requestedOrgId,
     "yearly",
     DateTime.fromObject({ year: fromYear, month: 1, day: 1 }),
-    DateTime.fromObject({ year: toYear, month: 1, day: 1 })
+    DateTime.fromObject({ year: toYear, month: 1, day: 1 }),
+    operatorId
   );
 }

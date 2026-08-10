@@ -29,6 +29,7 @@ import entryCandidatesRouter from "./modules/entryCandidates/entryCandidates.rou
 import parkingSessionsEntryBarrierRouter from "./modules/entryCandidates/parkingSessionsEntryBarrier.routes";
 import medplusWebhookRouter from "./modules/medplus/medplusWebhook.routes";
 import medplusAdminRouter from "./modules/medplus/medplusAdmin.routes";
+import cashCollectionsRouter from "./modules/cashCollections/cashCollections.routes";
 
 const app = express();
 
@@ -101,6 +102,7 @@ app.use("/api/entry-candidates", entryCandidatesRouter);
 app.use("/api/parking-sessions", parkingSessionsEntryBarrierRouter);
 app.use("/api/medplus/webhook", medplusWebhookRouter);
 app.use("/api/organizations", medplusAdminRouter);
+app.use("/api/organizations", cashCollectionsRouter);
 app.use("/api/parking", parkingRouter);
 app.use("/api/reports", reportsRouter);
 app.use("/api/admin/activity-logs", activityLogsRouter);

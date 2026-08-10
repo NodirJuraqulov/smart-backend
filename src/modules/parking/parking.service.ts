@@ -4,7 +4,7 @@ import { db } from "@/config/db";
 import { AuthTokenPayload } from "@/modules/auth/auth.service";
 import { ApiError } from "@/utils/ApiError";
 import { isDuplicateKeyError } from "@/utils/dbErrors";
-import { resolveOrgIdFilter, resolveOrgIdRequired } from "@/utils/orgScope";
+import { isOrgScopedRole, resolveOrgIdFilter, resolveOrgIdRequired } from "@/utils/orgScope";
 import {
   emitEntryDetected,
   emitExitCompleted,
@@ -522,7 +522,7 @@ async function findSessionOrFail(id: number) {
 }
 
 function assertInScope(actor: AuthTokenPayload, session: SessionRecord) {
-  if ((actor.role === "operator" || actor.role === "owner") && session.org_id !== actor.org_id) {
+  if (isOrgScopedRole(actor.role) && session.org_id !== actor.org_id) {
     throw new ApiError("Sessiya topilmadi", 404);
   }
 }
@@ -599,6 +599,7 @@ async function completeSession(
       session_id: session.id,
       amount,
       payment_method: persistedPaymentMethod,
+      operator_id: operatorId,
     });
 
     return {
@@ -711,7 +712,7 @@ export async function entryManual(
     plate_number: input.plate_number,
     entry_method: "manual",
     image_entry: null,
-    operator_id: actor.role === "operator" || actor.role === "owner" ? actor.id : null,
+    operator_id: isOrgScopedRole(actor.role) ? actor.id : null,
     entered_at: new Date(),
     session_source: sessionSource,
     tariff_price_per_hour: pricing.tariff_price_per_hour,
@@ -730,7 +731,7 @@ export async function exitManual(
   input: { org_id?: number; plate_number: string; payment_method?: "cash" | "online" }
 ) {
   const orgId = resolveOrgIdRequired(actor, input.org_id);
-  const operatorId = actor.role === "operator" || actor.role === "owner" ? actor.id : null;
+  const operatorId = isOrgScopedRole(actor.role) ? actor.id : null;
   const result = await completeSession(
     orgId,
     input.plate_number,
@@ -947,7 +948,7 @@ export async function confirmCashPayment(actor: AuthTokenPayload, id: number) {
     throw new ApiError("Sessiya to'lov kutish holatida emas", 400);
   }
 
-  const operatorId = actor.role === "operator" || actor.role === "owner" ? actor.id : null;
+  const operatorId = isOrgScopedRole(actor.role) ? actor.id : null;
 
   const result = await db.transaction(async (trx) => {
     const session = await sessionsBaseQuery(trx).where({ id }).forUpdate().first();
@@ -970,6 +971,7 @@ export async function confirmCashPayment(actor: AuthTokenPayload, id: number) {
       session_id: id,
       amount: session.amount ?? 0,
       payment_method: "cash",
+      operator_id: operatorId,
     });
 
     return {
@@ -1077,7 +1079,7 @@ export async function forceCloseSession(
     throw new ApiError("payment_method 'cash' yoki 'online' bo'lishi kerak", 400);
   }
 
-  const operatorId = actor.role === "operator" || actor.role === "owner" ? actor.id : null;
+  const operatorId = isOrgScopedRole(actor.role) ? actor.id : null;
 
   const result = await db.transaction(async (trx) => {
     const lockedSession = await sessionsBaseQuery(trx).where({ id }).forUpdate().first();
@@ -1131,6 +1133,7 @@ export async function forceCloseSession(
       session_id: id,
       amount,
       payment_method: persistedPaymentMethod,
+      operator_id: operatorId,
     });
 
     const updatedSession = await sessionsBaseQuery(trx).where({ id }).first();
