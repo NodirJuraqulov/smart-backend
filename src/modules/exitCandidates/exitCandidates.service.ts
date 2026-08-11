@@ -12,11 +12,9 @@ import {
 import { INSIDE_SESSION_STATUSES } from "@/modules/parking/sessionStatus";
 import { BarrierStatus, openBarrier } from "@/modules/relay/relay.service";
 import { getWebhookEventImage } from "@/modules/webhook/webhookEventImage.service";
+import { resolveSafeCameraEventTime } from "@/modules/webhook/webhookIdempotency";
 import {
-  editDistanceAtMostOne,
-  resolveSafeCameraEventTime,
-} from "@/modules/webhook/webhookIdempotency";
-import {
+  isFuzzyPlateMatch,
   normalizeDetectedPlate,
   NULL_PLATE_COALESCE_WINDOW_MS,
   RESOLVED_EXIT_CANDIDATE_COOLDOWN_MS,
@@ -274,19 +272,6 @@ async function entryImages(actor: AuthTokenPayload, session: SessionSummary) {
 
 function normalizePlate(value: string): string {
   return value.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
-}
-
-const MIN_FUZZY_PLATE_LENGTH = 6;
-
-function isFuzzyPlateMatch(detectedPlate: string, candidatePlate: string | null): boolean {
-  if (!candidatePlate) return false;
-  if (
-    detectedPlate.length < MIN_FUZZY_PLATE_LENGTH ||
-    candidatePlate.length < MIN_FUZZY_PLATE_LENGTH
-  ) {
-    return false;
-  }
-  return editDistanceAtMostOne(detectedPlate, candidatePlate);
 }
 
 async function findFuzzyActiveSession(trx: Knex.Transaction, orgId: number, detectedPlate: string) {

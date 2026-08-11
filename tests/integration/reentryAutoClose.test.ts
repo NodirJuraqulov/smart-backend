@@ -289,6 +289,7 @@ describe("qayta kirishda eskirgan sessiyani avtomatik yopish", () => {
     const staleId = await createStaleActiveSession("01R600AA");
     const response = await postCameraEntry("01R600AB");
     expect(response.status).toBe(200);
+    expect(response.body.reason).toBeUndefined();
 
     const stale = await sessionById(staleId);
     expect(stale.status).toBe("active");

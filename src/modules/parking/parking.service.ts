@@ -14,6 +14,10 @@ import { BarrierStatus, openBarrier } from "@/modules/relay/relay.service";
 import { printReceipt } from "@/modules/printer/printer.service";
 import { logActivity } from "@/utils/activityLog";
 import { NormalizedCameraEvent } from "@/modules/webhook/parsers/normalizedCameraEvent";
+import {
+  FUZZY_ENTRY_DUPLICATE_WINDOW_SECONDS,
+  isFuzzyPlateMatch,
+} from "@/modules/webhook/webhookRules";
 import { readWebhookEventImages } from "@/modules/webhook/webhookEventImage.service";
 import {
   ParkingImageInput,
@@ -342,6 +346,20 @@ async function assertCapacityAvailable(orgId: number, executor: Knex = db): Prom
   }
 }
 
+export async function findFuzzyActiveSessionForPlate(
+  orgId: number,
+  plateNumber: string,
+  executor: Knex = db
+): Promise<SessionRecord | undefined> {
+  const windowStart = new Date(Date.now() - FUZZY_ENTRY_DUPLICATE_WINDOW_SECONDS * 1000);
+  const sessions = await sessionsBaseQuery(executor)
+    .where({ org_id: orgId, status: "active" })
+    .whereNotNull("plate_number")
+    .andWhere("entered_at", ">=", windowStart);
+  const matches = sessions.filter((session) => isFuzzyPlateMatch(plateNumber, session.plate_number));
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
 async function assertNoActiveSessionForPlate(orgId: number, plateNumber: string, executor: Knex = db) {
   const existing = await sessionsBaseQuery(executor)
     .where({ org_id: orgId, plate_number: plateNumber })
@@ -349,6 +367,11 @@ async function assertNoActiveSessionForPlate(orgId: number, plateNumber: string,
     .first();
   if (existing) {
     throw new ApiError("Bu mashina hali stoyankada!", 409, { existing_session: existing });
+  }
+
+  const fuzzyMatch = await findFuzzyActiveSessionForPlate(orgId, plateNumber, executor);
+  if (fuzzyMatch) {
+    throw new ApiError("Bu mashina hali stoyankada!", 409, { existing_session: fuzzyMatch });
   }
 }
 

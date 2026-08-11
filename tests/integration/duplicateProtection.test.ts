@@ -82,7 +82,7 @@ describe("entryManual — duplicate himoyasi", () => {
 
   it("boshqa nomer bilan parallel faol sessiya — muammosiz ruxsat etiladi", async () => {
     await entryManual(operator, { plate_number: "01A200AA" });
-    const other = await entryManual(operator, { plate_number: "01A201AA" });
+    const other = await entryManual(operator, { plate_number: "77B399CC" });
     expect(other).toBeTruthy();
   });
 });

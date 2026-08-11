@@ -6,6 +6,7 @@ import {
   closeStaleActiveSessionOnReentry,
   createEntrySessionInTransaction,
   displayPlateNumber,
+  findFuzzyActiveSessionForPlate,
   hasAvailableCapacity,
   SessionRecord,
 } from "@/modules/parking/parking.service";
@@ -208,6 +209,17 @@ export async function processEntryWebhook(input: {
           processed_at: trx.fn.now(),
         });
         return { type: "rejected" as const, reason: "already_active" as const };
+      }
+
+      const fuzzyDuplicate = await findFuzzyActiveSessionForPlate(input.orgId, plateNumber, trx);
+      if (fuzzyDuplicate) {
+        await trx("tb_webhook_events").where({ id: input.webhookEventId, org_id: input.orgId }).update({
+          processing_result: "fuzzy_duplicate_entry_ignored",
+          processing_reason: "fuzzy_active_session_match",
+          session_id: fuzzyDuplicate.id,
+          processed_at: trx.fn.now(),
+        });
+        return { type: "rejected" as const, reason: "fuzzy_duplicate_entry_ignored" as const };
       }
     }
     let pendingQuery = trx<EntryCandidateRow>("tb_entry_candidates")
