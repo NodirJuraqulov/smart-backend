@@ -1,7 +1,6 @@
 import { promises as fs } from "fs";
 import type { Knex } from "knex";
 import { db } from "@/config/db";
-import { env } from "@/config/env";
 import { AuthTokenPayload } from "@/modules/auth/auth.service";
 import {
   calculateDurationMinutes,
@@ -92,7 +91,7 @@ interface SessionSummary {
 
 interface BarrierAuditDetails {
   orgId: number;
-  candidateId: number;
+  candidateId: number | null;
   barrierStatus: BarrierStatus;
   retryAttempt: boolean;
   detail: string;
@@ -128,11 +127,11 @@ const BARRIER_AUDIT_ACTIONS = [
 ];
 
 function eventImageUrl(eventId: number, kind: "overview" | "vehicle" | "plate", imagePath?: string | null) {
-  return imagePath ? `${env.publicBaseUrl}/api/webhook-events/${eventId}/images/${kind}` : null;
+  return imagePath ? `/api/webhook-events/${eventId}/images/${kind}` : null;
 }
 
 function sessionImageUrl(sessionId: number, kind: "entry-overview" | "entry-vehicle", imagePath?: string | null) {
-  return imagePath ? `${env.publicBaseUrl}/api/parking/sessions/${sessionId}/images/${kind}` : null;
+  return imagePath ? `/api/parking/sessions/${sessionId}/images/${kind}` : null;
 }
 
 function serializeCandidate(candidate: CandidateRow, session: SessionSummary | null = null) {
@@ -388,10 +387,11 @@ function parseActivityDetails(value: unknown): Record<string, unknown> {
   return typeof value === "object" ? (value as Record<string, unknown>) : {};
 }
 
-async function recordBarrierAttempt(input: {
-  actorId: number;
+export async function recordBarrierAttempt(input: {
+  actorId: number | null;
   orgId: number;
-  candidateId: number;
+  candidateId: number | null;
+  sessionId?: number;
   retryAttempt: boolean;
 }): Promise<BarrierStatus> {
   let status: BarrierStatus;
@@ -420,9 +420,9 @@ async function recordBarrierAttempt(input: {
   await db("tb_activity_logs").insert({
     actor_id: input.actorId,
     action,
-    target_type: "exit_candidate",
-    target_id: input.candidateId,
-    details: JSON.stringify(details),
+    target_type: input.candidateId === null ? "session" : "exit_candidate",
+    target_id: input.candidateId ?? input.sessionId!,
+    details: JSON.stringify({ ...details, sessionId: input.sessionId ?? null }),
   });
   return status;
 }

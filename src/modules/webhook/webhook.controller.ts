@@ -13,6 +13,7 @@ import {
 import { processEntryWebhook } from "@/modules/entryCandidates/entryCandidates.service";
 import { emitPlateNotRecognizedForExit, emitWebhookParseFailed } from "@/websocket/socketServer";
 import { createExitCandidate } from "@/modules/exitCandidates/exitCandidates.service";
+import { tryAutoExit, wasRecentlyAutoExited } from "@/modules/exitCandidates/autoExit.service";
 import {
   markDuplicateImagesSkipped,
   saveWebhookEventImages,
@@ -206,6 +207,51 @@ async function processCameraWebhook(
   }
 
   if (direction === "exit") {
+    const autoExit = await tryAutoExit({
+      orgId,
+      webhookEventId: registration.eventId,
+      plateNumber,
+    });
+    if (autoExit) {
+      console.log(
+        `Auto exit: org_id=${orgId} plate=${autoExit.plateNumber} reason=${autoExit.reason} ` +
+          `session_id=${autoExit.sessionId} barrier=${autoExit.barrierStatus}`
+      );
+      res.status(200).json({
+        ok: true,
+        parsed: true,
+        auto_exit: true,
+        reason: autoExit.reason,
+        session_id: autoExit.sessionId,
+        barrier_status: autoExit.barrierStatus,
+        plate_number: plateNumber,
+        confidence: event.confidence,
+        timestamp: event.timestamp,
+      });
+      return;
+    }
+
+    if (plateNumber && (await wasRecentlyAutoExited(orgId, plateNumber))) {
+      await updateWebhookEventOutcome(registration.eventId, {
+        processingResult: "duplicate_after_auto_exit",
+        processingReason: "auto_exit_cooldown",
+        processed: true,
+      });
+      console.log(
+        `Duplicate after auto exit ignored: org_id=${orgId} plate=${plateNumber} event_id=${registration.eventId}`
+      );
+      res.status(200).json({
+        ok: true,
+        parsed: true,
+        ignored: true,
+        reason: "duplicate_after_auto_exit",
+        plate_number: plateNumber,
+        confidence: event.confidence,
+        timestamp: event.timestamp,
+      });
+      return;
+    }
+
     const result = await createExitCandidate({
       orgId,
       webhookEventId: registration.eventId,

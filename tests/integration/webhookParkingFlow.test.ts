@@ -225,7 +225,7 @@ describe("Chiqish webhook", () => {
     expect(emitPlateNotRecognizedForExit).not.toHaveBeenCalled();
   });
 
-  it("VIP mashina uchun — pending candidate yaratadi", async () => {
+  it("VIP mashina uchun — operatorsiz avtomatik chiqadi, candidate yaratilmaydi", async () => {
     await createTestVipVehicle(orgId, "01A777AA");
     await postWebhook("entry", "01A777AA");
     await clearWebhookDedupeCache(orgId);
@@ -233,15 +233,17 @@ describe("Chiqish webhook", () => {
     const res = await postWebhook("exit", "01A777AA");
 
     expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ auto_exit: true, reason: "vip" });
 
     const session = await db("tb_parking_sessions").where({ org_id: orgId, plate_number: "01A777AA" }).first();
-    expect(session.status).toBe("active");
-    expect(session.exited_at).toBeNull();
-    const candidate = await db("tb_exit_candidates").where({ matched_session_id: session.id }).first();
-    expect(candidate).toBeTruthy();
-    expect(emitExitCompleted).not.toHaveBeenCalled();
+    expect(session.status).toBe("completed");
+    expect(session.exited_at).not.toBeNull();
+    expect(Number(session.amount)).toBe(0);
+    expect(await db("tb_exit_candidates").where({ org_id: orgId })).toHaveLength(0);
+    expect(await db("tb_payments").where({ session_id: session.id })).toHaveLength(0);
+    expect(emitExitCompleted).toHaveBeenCalled();
     expect(emitExitAwaitingPayment).not.toHaveBeenCalled();
-    expect(openBarrier).not.toHaveBeenCalledWith(orgId, "exit");
+    expect(openBarrier).toHaveBeenCalledWith(orgId, "exit");
   });
 
   it("obuna mashina uchun — pending candidate yaratadi", async () => {

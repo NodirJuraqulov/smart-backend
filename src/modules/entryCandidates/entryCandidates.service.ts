@@ -1,5 +1,4 @@
 import { db } from "@/config/db";
-import { env } from "@/config/env";
 import { AuthTokenPayload } from "@/modules/auth/auth.service";
 import {
   attachWebhookEntryImages,
@@ -83,7 +82,7 @@ function candidateQuery() {
 }
 
 function eventImageUrl(eventId: number, kind: "overview" | "vehicle", path: string | null | undefined) {
-  return path ? `${env.publicBaseUrl}/api/webhook-events/${eventId}/images/${kind}` : null;
+  return path ? `/api/webhook-events/${eventId}/images/${kind}` : null;
 }
 
 async function accessibleEventImageUrl(

@@ -13,7 +13,6 @@ import {
 import { BarrierStatus, openBarrier } from "@/modules/relay/relay.service";
 import { printReceipt } from "@/modules/printer/printer.service";
 import { logActivity } from "@/utils/activityLog";
-import { env } from "@/config/env";
 import { NormalizedCameraEvent } from "@/modules/webhook/parsers/normalizedCameraEvent";
 import { readWebhookEventImages } from "@/modules/webhook/webhookEventImage.service";
 import {
@@ -193,7 +192,7 @@ export function calculateTariffSnapshotAmount(
 }
 
 function imageUrl(sessionId: number, kind: string, imagePath: string | null): string | null {
-  return imagePath ? `${env.publicBaseUrl}/api/parking/sessions/${sessionId}/images/${kind}` : null;
+  return imagePath ? `/api/parking/sessions/${sessionId}/images/${kind}` : null;
 }
 
 function withImageUrls(session: SessionRecord) {
