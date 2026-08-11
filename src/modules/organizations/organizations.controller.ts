@@ -8,7 +8,13 @@ import { assertValidLogin, assertValidPassword } from "@/utils/validation";
 import * as organizationsService from "./organizations.service";
 import { resetOrganizationTestData } from "./organizationTestDataReset.service";
 import { expirePendingExitCandidatesForOrganization } from "@/modules/exitCandidates/exitCandidatesExpiry.service";
-import { emergencyBarrierOpen, getGateLayout, listStaleSessions } from "./organizationOperations.service";
+import {
+  emergencyBarrierOpen,
+  getEmergencyBarrierSettings,
+  getGateLayout,
+  listStaleSessions,
+  updateEmergencyBarrierSettings,
+} from "./organizationOperations.service";
 
 const DEFAULT_CAMERA_BRAND = "hikvision";
 const DEBUG_CAMERA_BRAND = "debug";
@@ -426,6 +432,20 @@ export async function gateLayoutHandler(req: Request, res: Response) {
   const id = parseId(req, res);
   if (id === null) return;
   res.json(await getGateLayout(req.user!, id));
+}
+
+export async function getEmergencyBarrierSettingsHandler(req: Request, res: Response) {
+  const id = parseId(req, res);
+  if (id === null) return;
+  res.json(await getEmergencyBarrierSettings(req.user!, id));
+}
+
+export async function updateEmergencyBarrierSettingsHandler(req: Request, res: Response) {
+  const id = parseId(req, res);
+  if (id === null) return;
+  res.json(
+    await updateEmergencyBarrierSettings(req.user!, id, req.body?.emergency_barrier_button_enabled)
+  );
 }
 
 export async function staleSessionsHandler(req: Request, res: Response) {

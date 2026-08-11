@@ -45,6 +45,41 @@ export async function getGateLayout(actor: AuthTokenPayload, orgId: number) {
   return { gate_layout: organization.gate_layout };
 }
 
+export async function getEmergencyBarrierSettings(actor: AuthTokenPayload, orgId: number) {
+  await assertOrganizationAccess(actor, orgId);
+  const organization = await db("tb_organizations")
+    .select("emergency_barrier_button_enabled")
+    .where({ id: orgId })
+    .first();
+  if (!organization) throw new ApiError("Stoyanka topilmadi", 404);
+  return { emergency_barrier_button_enabled: !!organization.emergency_barrier_button_enabled };
+}
+
+export async function updateEmergencyBarrierSettings(
+  actor: AuthTokenPayload,
+  orgId: number,
+  enabled: unknown
+) {
+  await assertOrganizationAccess(actor, orgId);
+  if (typeof enabled !== "boolean") {
+    throw new ApiError("emergency_barrier_button_enabled boolean bo'lishi kerak", 400);
+  }
+
+  await db("tb_organizations")
+    .where({ id: orgId })
+    .update({ emergency_barrier_button_enabled: enabled });
+
+  await db("tb_activity_logs").insert({
+    actor_id: actor.id,
+    action: "organization.emergency_barrier_button_updated",
+    target_type: "organization",
+    target_id: orgId,
+    details: JSON.stringify({ orgId, emergencyBarrierButtonEnabled: enabled }),
+  });
+
+  return { emergency_barrier_button_enabled: enabled };
+}
+
 export async function listStaleSessions(actor: AuthTokenPayload, orgId: number) {
   await assertOrganizationAccess(actor, orgId);
   const now = new Date();

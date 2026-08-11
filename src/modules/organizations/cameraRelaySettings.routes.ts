@@ -9,6 +9,8 @@ import {
 import {
   emergencyBarrierOpenHandler,
   gateLayoutHandler,
+  getEmergencyBarrierSettingsHandler,
+  updateEmergencyBarrierSettingsHandler,
   getCameraRelaySettingsHandler,
   expireStaleExitCandidatesHandler,
   resetTestDataHandler,
@@ -31,6 +33,16 @@ router.post(
   asyncHandler(emergencyBarrierOpenHandler)
 );
 router.get("/:id/gate-layout", isSuperAdminOrOperatorOrOwner, asyncHandler(gateLayoutHandler));
+router.get(
+  "/:id/emergency-barrier-settings",
+  isSuperAdminOrOperatorOrOwner,
+  asyncHandler(getEmergencyBarrierSettingsHandler)
+);
+router.patch(
+  "/:id/emergency-barrier-settings",
+  isSuperAdminOrOwner,
+  asyncHandler(updateEmergencyBarrierSettingsHandler)
+);
 router.get("/:id/stale-sessions", isSuperAdminOrOwner, asyncHandler(staleSessionsHandler));
 router.get("/:id/camera-relay-settings", isSuperAdminOrOwner, asyncHandler(getCameraRelaySettingsHandler));
 router.patch("/:id/camera-relay-settings", isSuperAdminOrOwner, asyncHandler(updateCameraRelaySettingsHandler));
