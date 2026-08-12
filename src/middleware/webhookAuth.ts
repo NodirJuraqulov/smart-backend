@@ -12,6 +12,7 @@ async function resolveOrgByWebhookTokenHandler(req: Request, res: Response, next
   }
 
   req.webhookOrgId = organization.id;
+  req.webhookPlateFormatValidationEnabled = !!organization.plate_format_validation_enabled;
   next();
 }
 

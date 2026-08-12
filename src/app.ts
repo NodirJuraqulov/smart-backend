@@ -30,6 +30,7 @@ import parkingSessionsEntryBarrierRouter from "./modules/entryCandidates/parking
 import medplusWebhookRouter from "./modules/medplus/medplusWebhook.routes";
 import medplusAdminRouter from "./modules/medplus/medplusAdmin.routes";
 import cashCollectionsRouter from "./modules/cashCollections/cashCollections.routes";
+import plateFormatsRouter from "./modules/plateFormats/plateFormats.routes";
 
 const app = express();
 
@@ -103,6 +104,7 @@ app.use("/api/parking-sessions", parkingSessionsEntryBarrierRouter);
 app.use("/api/medplus/webhook", medplusWebhookRouter);
 app.use("/api/organizations", medplusAdminRouter);
 app.use("/api/organizations", cashCollectionsRouter);
+app.use("/api/organizations", plateFormatsRouter);
 app.use("/api/parking", parkingRouter);
 app.use("/api/reports", reportsRouter);
 app.use("/api/admin/activity-logs", activityLogsRouter);

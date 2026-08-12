@@ -9,6 +9,8 @@ const SUPPRESSED_RESULTS = [
   "duplicate_same_direction",
   "opposite_camera_echo",
   "shared_lane_conflict",
+  "plate_format_waiting",
+  "plate_format_received",
 ] as const;
 
 export type WebhookEventRegistration =

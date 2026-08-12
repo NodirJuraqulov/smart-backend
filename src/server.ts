@@ -12,6 +12,7 @@ import { scheduleExitCandidatesExpiryJob } from "./jobs/exitCandidatesExpiryJob"
 import { scheduleClinicDiscountsExpiryJob } from "./jobs/clinicDiscountsExpiryJob";
 import { scheduleInpatientVehiclesExpiryJob } from "./jobs/inpatientVehiclesExpiryJob";
 import { initSocketServer } from "./websocket/socketServer";
+import { resumePlateFormatChecks } from "./modules/plateFormats/plateFormatCheck.service";
 
 process.on("uncaughtException", (error) => {
   console.error("KUTILMAGAN XATO:", error);
@@ -37,6 +38,9 @@ scheduleInpatientVehiclesExpiryJob();
 
 httpServer.listen(env.port, () => {
   console.log(`Server running on port ${env.port} [${env.nodeEnv}]`);
+  resumePlateFormatChecks().catch((err) => {
+    console.error("Davlat raqami format tekshiruvlarini tiklashda xato:", err);
+  });
 });
 
 const SHUTDOWN_TIMEOUT_MS = 10_000;

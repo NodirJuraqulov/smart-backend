@@ -19,6 +19,7 @@ export interface ExitCandidateCreatedPayload {
   orgId: number;
   webhookEventId: number;
   detectedPlate: string | null;
+  suggestedPlate: string | null;
   matchedSessionId: number | null;
   confidence: number | null;
   cameraEventAt: string;
@@ -59,6 +60,7 @@ export interface EntryCandidateCreatedPayload {
   candidateId: number;
   orgId: number;
   detectedPlate: string | null;
+  suggestedPlate: string | null;
   cameraEventAt: string;
   confidence: number | null;
   entryImages: {

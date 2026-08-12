@@ -19,6 +19,10 @@ import {
   saveWebhookEventImages,
 } from "./webhookEventImage.service";
 import { hasDetectedVehicleRegion, normalizeDetectedPlate } from "./webhookRules";
+import {
+  getPlateFormatValidationDecision,
+  validateOrTrackPlateFormat,
+} from "@/modules/plateFormats/plateFormatCheck.service";
 
 const DEFAULT_CAMERA_BRAND = "hikvision";
 
@@ -119,11 +123,29 @@ async function processCameraWebhook(
       `confidence=${event.confidence ?? "null"} device_id=${event.deviceId ?? "unknown"}`
   );
 
-  const registration = await registerWebhookEvent(orgId, plateNumber, direction, {
-    confidence: event.confidence,
-    deviceId: event.deviceId,
-    cameraEventAt: event.timestamp,
-  });
+  const deviceId = event.deviceId?.trim() || `${cameraBrand}:${direction}`;
+  const formatDecision = req.webhookPlateFormatValidationEnabled
+    ? await getPlateFormatValidationDecision(orgId, plateNumber)
+    : { enabled: false, valid: true };
+  const registration = formatDecision.enabled && !formatDecision.valid
+    ? {
+        status: "accepted" as const,
+        eventId: await recordWebhookAuditEvent({
+          orgId,
+          direction,
+          plateNumber,
+          confidence: event.confidence,
+          deviceId: event.deviceId,
+          cameraEventAt: event.timestamp,
+          processingResult: "plate_format_received",
+          processingReason: "validation_pending",
+        }),
+      }
+    : await registerWebhookEvent(orgId, plateNumber, direction, {
+        confidence: event.confidence,
+        deviceId: event.deviceId,
+        cameraEventAt: event.timestamp,
+      });
   if (!hasDetectedVehicleRegion(event)) {
     await saveWebhookEventImages({
       orgId,
@@ -203,6 +225,48 @@ async function processCameraWebhook(
       ignored: true,
       reason: "shared_lane_conflict",
     });
+    return;
+  }
+
+  const formatValidation = formatDecision.enabled
+    ? await validateOrTrackPlateFormat({
+        orgId,
+        direction,
+        deviceId,
+        detectedPlate: plateNumber,
+        webhookEventId: registration.eventId,
+        decision: formatDecision,
+      })
+    : { status: "proceed" as const };
+  if (formatValidation.status === "waiting") {
+    res.status(200).json({
+      ok: true,
+      parsed: true,
+      plate_format_waiting: true,
+      attempts: formatValidation.attempts,
+      deadline_at: formatValidation.deadlineAt.toISOString(),
+      plate_number: plateNumber,
+      confidence: event.confidence,
+      timestamp: event.timestamp,
+    });
+    return;
+  }
+  if (formatValidation.status === "finalized") {
+    res.status(200).json({
+      ok: true,
+      parsed: true,
+      candidate_created: formatValidation.candidateCreated,
+      candidate_coalesced: formatValidation.candidateCoalesced,
+      candidate_id: formatValidation.candidateId,
+      plate_number: null,
+      suggested_plate: formatValidation.suggestedPlate,
+      confidence: event.confidence,
+      timestamp: event.timestamp,
+    });
+    return;
+  }
+  if (formatValidation.status === "cancelled") {
+    res.status(200).json({ ok: true, parsed: true, ignored: true });
     return;
   }
 

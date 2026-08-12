@@ -118,6 +118,7 @@ describe("Public display Socket.IO ulanishi", () => {
       orgId: 6161,
       webhookEventId: 2,
       detectedPlate: "01F222AA",
+      suggestedPlate: null,
       matchedSessionId: null,
       confidence: 90,
       cameraEventAt: new Date().toISOString(),

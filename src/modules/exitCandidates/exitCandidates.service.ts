@@ -53,6 +53,7 @@ interface CandidateRow {
   org_id: number;
   webhook_event_id: number;
   detected_plate: string | null;
+  suggested_plate: string | null;
   matched_session_id: number | null;
   resolved_session_id: number | null;
   confidence: string | number | null;
@@ -416,9 +417,11 @@ export async function createExitCandidate(input: {
   orgId: number;
   webhookEventId: number;
   detectedPlate: string | null;
+  suggestedPlate?: string | null;
   confidence: number | null;
 }) {
   const detectedPlate = normalizeDetectedPlate(input.detectedPlate);
+  const suggestedPlate = normalizeDetectedPlate(input.suggestedPlate);
   const result = await db.transaction(async (trx) => {
     await trx("tb_organizations").where({ id: input.orgId }).forUpdate().first();
     const existingByEvent = await trx<CandidateRow>("tb_exit_candidates")
@@ -496,9 +499,10 @@ export async function createExitCandidate(input: {
     });
     if (detectedPlate) {
       pendingQuery = pendingQuery.andWhere({ detected_plate: detectedPlate });
-    } else {
+    } else if (!suggestedPlate) {
       pendingQuery = pendingQuery
         .whereNull("detected_plate")
+        .whereNull("suggested_plate")
         .andWhere(
           "camera_event_at",
           ">=",
@@ -510,7 +514,32 @@ export async function createExitCandidate(input: {
           new Date(cameraEventAt.getTime() + NULL_PLATE_COALESCE_WINDOW_MS)
         );
     }
-    let pending = await pendingQuery.orderBy("camera_event_at", "desc").forUpdate().first();
+    let pending: CandidateRow | undefined;
+    if (suggestedPlate) {
+      const candidates = await pendingQuery
+        .whereNull("detected_plate")
+        .whereNotNull("suggested_plate")
+        .andWhere(
+          "camera_event_at",
+          ">=",
+          new Date(cameraEventAt.getTime() - NULL_PLATE_COALESCE_WINDOW_MS)
+        )
+        .andWhere(
+          "camera_event_at",
+          "<=",
+          new Date(cameraEventAt.getTime() + NULL_PLATE_COALESCE_WINDOW_MS)
+        )
+        .orderBy("camera_event_at", "desc")
+        .forUpdate();
+      const matches = candidates.filter(
+        (candidate) =>
+          candidate.suggested_plate === suggestedPlate ||
+          isFuzzyPlateMatch(suggestedPlate, candidate.suggested_plate)
+      );
+      pending = matches.length === 1 ? matches[0] : undefined;
+    } else {
+      pending = await pendingQuery.orderBy("camera_event_at", "desc").forUpdate().first();
+    }
     if (!pending && detectedPlate) {
       pending = await findFuzzyPendingCandidate(trx, input.orgId, detectedPlate);
     }
@@ -518,6 +547,7 @@ export async function createExitCandidate(input: {
       await trx("tb_exit_candidates").where({ id: pending.id, org_id: input.orgId }).update({
         camera_event_at: cameraEventAt,
         confidence: input.confidence,
+        suggested_plate: suggestedPlate,
         updated_at: trx.fn.now(),
       });
       await trx("tb_webhook_events").where({ id: input.webhookEventId, org_id: input.orgId }).update({
@@ -531,6 +561,7 @@ export async function createExitCandidate(input: {
       org_id: input.orgId,
       webhook_event_id: input.webhookEventId,
       detected_plate: detectedPlate,
+      suggested_plate: suggestedPlate,
       matched_session_id: matchedSession?.id ?? null,
       confidence: input.confidence,
       camera_event_at: cameraEventAt,
@@ -568,6 +599,7 @@ export async function createExitCandidate(input: {
       orgId: input.orgId,
       webhookEventId: candidate.webhook_event_id,
       detectedPlate: candidate.detected_plate,
+      suggestedPlate: candidate.suggested_plate,
       matchedSessionId: candidate.matched_session_id,
       confidence: candidate.confidence,
       cameraEventAt: new Date(candidate.camera_event_at).toISOString(),
@@ -667,6 +699,7 @@ export async function getNextExitCandidate(actor: AuthTokenPayload, requestedOrg
     status: candidate.status,
     webhook_event_id: candidate.webhook_event_id,
     detected_plate: candidate.detected_plate,
+    suggested_plate: candidate.suggested_plate,
     camera_event_at: candidate.camera_event_at,
     exit_images: await exitImages(actor, candidate),
     matched_session: matchedSession,

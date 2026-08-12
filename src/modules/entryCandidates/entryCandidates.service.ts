@@ -15,6 +15,7 @@ import { NormalizedCameraEvent } from "@/modules/webhook/parsers/normalizedCamer
 import { getWebhookEventImage } from "@/modules/webhook/webhookEventImage.service";
 import { resolveSafeCameraEventTime } from "@/modules/webhook/webhookIdempotency";
 import {
+  isFuzzyPlateMatch,
   normalizeDetectedPlate,
   NULL_PLATE_COALESCE_WINDOW_MS,
 } from "@/modules/webhook/webhookRules";
@@ -37,6 +38,7 @@ interface EntryCandidateRow {
   org_id: number;
   webhook_event_id: number;
   detected_plate: string | null;
+  suggested_plate: string | null;
   reason: EntryCandidateReason;
   confidence: string | number | null;
   camera_event_at: Date;
@@ -173,6 +175,7 @@ export async function processEntryWebhook(input: {
   orgId: number;
   webhookEventId: number;
   event: NormalizedCameraEvent;
+  suggestedPlate?: string | null;
 }) {
   const transactionResult = await db.transaction(async (trx) => {
     await trx("tb_organizations").where({ id: input.orgId }).forUpdate().first();
@@ -222,22 +225,43 @@ export async function processEntryWebhook(input: {
         return { type: "rejected" as const, reason: "fuzzy_duplicate_entry_ignored" as const };
       }
     }
+    const suggestedPlate = normalizeDetectedPlate(input.suggestedPlate);
     let pendingQuery = trx<EntryCandidateRow>("tb_entry_candidates")
       .where({ org_id: input.orgId, status: "pending" });
     if (plateNumber) {
       pendingQuery = pendingQuery.andWhere({ detected_plate: plateNumber });
-    } else {
+    } else if (!suggestedPlate) {
       pendingQuery = pendingQuery
         .whereNull("detected_plate")
+        .whereNull("suggested_plate")
         .whereIn("reason", ["plate_not_detected", "capacity_full_and_plate_not_detected"])
         .andWhere("camera_event_at", ">=", new Date(cameraEventAt.getTime() - NULL_PLATE_COALESCE_WINDOW_MS))
         .andWhere("camera_event_at", "<=", new Date(cameraEventAt.getTime() + NULL_PLATE_COALESCE_WINDOW_MS));
     }
-    const pendingCandidate = await pendingQuery.orderBy("camera_event_at", "desc").forUpdate().first();
+    let pendingCandidate: EntryCandidateRow | undefined;
+    if (suggestedPlate) {
+      const candidates = await pendingQuery
+        .whereNull("detected_plate")
+        .whereNotNull("suggested_plate")
+        .whereIn("reason", ["plate_not_detected", "capacity_full_and_plate_not_detected"])
+        .andWhere("camera_event_at", ">=", new Date(cameraEventAt.getTime() - NULL_PLATE_COALESCE_WINDOW_MS))
+        .andWhere("camera_event_at", "<=", new Date(cameraEventAt.getTime() + NULL_PLATE_COALESCE_WINDOW_MS))
+        .orderBy("camera_event_at", "desc")
+        .forUpdate();
+      const matches = candidates.filter(
+        (candidate) =>
+          candidate.suggested_plate === suggestedPlate ||
+          isFuzzyPlateMatch(suggestedPlate, candidate.suggested_plate)
+      );
+      pendingCandidate = matches.length === 1 ? matches[0] : undefined;
+    } else {
+      pendingCandidate = await pendingQuery.orderBy("camera_event_at", "desc").forUpdate().first();
+    }
     if (pendingCandidate) {
       await trx("tb_entry_candidates").where({ id: pendingCandidate.id }).update({
         camera_event_at: cameraEventAt,
         confidence: input.event.confidence,
+        suggested_plate: suggestedPlate,
         updated_at: trx.fn.now(),
       });
       await trx("tb_webhook_events").where({ id: input.webhookEventId, org_id: input.orgId }).update({
@@ -302,6 +326,7 @@ export async function processEntryWebhook(input: {
       org_id: input.orgId,
       webhook_event_id: input.webhookEventId,
       detected_plate: plateNumber,
+      suggested_plate: suggestedPlate,
       reason,
       confidence: input.event.confidence,
       camera_event_at: cameraEventAt,
@@ -340,12 +365,19 @@ export async function processEntryWebhook(input: {
         candidateId: candidate.id,
         orgId: input.orgId,
         detectedPlate: candidate.detected_plate,
+        suggestedPlate: candidate.suggested_plate,
         cameraEventAt: new Date(candidate.camera_event_at).toISOString(),
         confidence: candidate.confidence === null ? null : Number(candidate.confidence),
         entryImages: websocketImages(candidate),
       });
     }
-    return { created: false as const, reason: transactionResult.reason, candidateId: candidate.id };
+    return {
+      created: false as const,
+      reason: transactionResult.reason,
+      candidateId: candidate.id,
+      candidateCreated: transactionResult.created,
+      candidateCoalesced: !transactionResult.created,
+    };
   }
 
   const attachedSession = await attachWebhookEntryImages(transactionResult.session, input.event);
@@ -394,6 +426,7 @@ export async function getNextEntryCandidate(actor: AuthTokenPayload, requestedOr
   return {
     candidate_id: candidate.id,
     detected_plate: candidate.detected_plate,
+    suggested_plate: candidate.suggested_plate,
     reason: candidate.reason,
     camera_event_at: candidate.camera_event_at,
     confidence: candidate.confidence === null ? null : Number(candidate.confidence),
