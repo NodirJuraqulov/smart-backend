@@ -33,6 +33,11 @@ interface PendingSummary {
   period_end: Date;
 }
 
+export interface RevenueByMethod {
+  cash: number;
+  online: number;
+}
+
 function safeAmount(value: string | number | null | undefined): number {
   const amount = Number(value ?? 0);
   return Number.isFinite(amount) && amount > 0 ? amount : 0;
@@ -94,7 +99,7 @@ async function sumOperatorPaymentsByMethod(
   periodStart: Date,
   periodEnd: Date,
   executor: Knex
-): Promise<{ cash: number; online: number }> {
+): Promise<RevenueByMethod> {
   const rows = await executor("tb_payments")
     .where({ org_id: orgId, operator_id: operatorId })
     .andWhere("paid_at", ">=", periodStart)
@@ -102,6 +107,35 @@ async function sumOperatorPaymentsByMethod(
     .groupBy("payment_method")
     .select("payment_method")
     .sum<{ payment_method: string; total: string | null }[]>("amount as total");
+
+  let cash = 0;
+  let online = 0;
+  for (const row of rows) {
+    if (row.payment_method === "online") online += safeAmount(row.total);
+    else if (row.payment_method === "cash") cash += safeAmount(row.total);
+  }
+  return { cash, online };
+}
+
+async function sumNonOperatorPaymentsByMethod(
+  orgId: number,
+  periodStart: Date,
+  periodEnd: Date,
+  executor: Knex
+): Promise<RevenueByMethod> {
+  const rows = await executor("tb_payments as p")
+    .leftJoin("tb_users as u", function () {
+      this.on("u.id", "=", "p.operator_id").andOn("u.org_id", "=", "p.org_id");
+    })
+    .where({ "p.org_id": orgId })
+    .andWhere("p.paid_at", ">=", periodStart)
+    .andWhere("p.paid_at", "<", periodEnd)
+    .andWhere((builder) => {
+      builder.whereNull("u.id").orWhereNot("u.role", "operator");
+    })
+    .groupBy("p.payment_method")
+    .select("p.payment_method")
+    .sum<{ payment_method: string; total: string | null }[]>("p.amount as total");
 
   let cash = 0;
   let online = 0;
@@ -129,33 +163,44 @@ async function buildPendingSummary(
   };
 }
 
-export async function getOrgUncollectedRevenue(orgId: number, executor: Knex = db): Promise<number> {
+async function calculateOrgUncollectedRevenueByMethod(
+  orgId: number,
+  executor: Knex
+): Promise<RevenueByMethod> {
   const organization = await executor("tb_organizations").select("created_at").where({ id: orgId }).first();
   if (!organization) throw new ApiError("Stoyanka topilmadi", 404);
 
   const legacyPeriodEnd = await findLegacyOrgPeriodEnd(orgId, executor);
   const baseline = legacyPeriodEnd ?? new Date(organization.created_at);
+  const periodEnd = new Date();
+  const operators = await executor("tb_users").select("id").where({ org_id: orgId, role: "operator" });
+  const [summaries, nonOperatorTotals] = await Promise.all([
+    Promise.all(
+      operators.map((operator) => buildPendingSummary(orgId, Number(operator.id), periodEnd, executor))
+    ),
+    sumNonOperatorPaymentsByMethod(orgId, baseline, periodEnd, executor),
+  ]);
 
-  const [{ total }] = await executor("tb_payments as p")
-    .leftJoin(
-      executor("tb_cash_collections")
-        .select("operator_id")
-        .max("period_end as last_end")
-        .where({ org_id: orgId })
-        .whereNotNull("operator_id")
-        .groupBy("operator_id")
-        .as("c"),
-      "c.operator_id",
-      "p.operator_id"
-    )
-    .where({ "p.org_id": orgId })
-    .andWhere("p.paid_at", ">=", baseline)
-    .andWhere((builder) => {
-      builder.whereNull("c.last_end").orWhere("p.paid_at", ">=", executor.ref("c.last_end"));
-    })
-    .sum<{ total: string | null }[]>("p.amount as total");
+  return summaries.reduce(
+    (total, summary) => ({
+      cash: total.cash + summary.expected_cash_amount,
+      online: total.online + summary.online_amount,
+    }),
+    nonOperatorTotals
+  );
+}
 
-  return safeAmount(total);
+export async function getOrgUncollectedRevenueByMethod(
+  orgId: number,
+  executor?: Knex
+): Promise<RevenueByMethod> {
+  if (executor) return calculateOrgUncollectedRevenueByMethod(orgId, executor);
+  return db.transaction((trx) => calculateOrgUncollectedRevenueByMethod(orgId, trx));
+}
+
+export async function getOrgUncollectedRevenue(orgId: number, executor?: Knex): Promise<number> {
+  const totals = await getOrgUncollectedRevenueByMethod(orgId, executor);
+  return totals.cash + totals.online;
 }
 
 export async function listOrganizationOperators(

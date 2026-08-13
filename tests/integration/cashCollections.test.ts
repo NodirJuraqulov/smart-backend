@@ -299,12 +299,13 @@ describe("operator darajasidagi inkassatsiya", () => {
     await addPayment({ org: orgId, amount: 5000, method: "online", operatorId: operatorA.id });
 
     const now = DateTime.now().setZone("Asia/Tashkent");
-    const dailyBefore = await reportsService.getDailyReport(owner, orgId, undefined);
+    const date = now.toFormat("yyyy-MM-dd");
+    const dailyBefore = await reportsService.getDailyReport(owner, orgId, date);
     const monthlyBefore = await reportsService.getMonthlyReport(owner, orgId, now.year, now.month);
 
     await collect(owner, { operator_id: operatorA.id, collected_amount: 25000 });
 
-    const dailyAfter = await reportsService.getDailyReport(owner, orgId, undefined);
+    const dailyAfter = await reportsService.getDailyReport(owner, orgId, date);
     const monthlyAfter = await reportsService.getMonthlyReport(owner, orgId, now.year, now.month);
 
     expect(dailyAfter.cash_revenue).toBe(25000);
@@ -369,5 +370,56 @@ describe("operator darajasidagi inkassatsiya", () => {
       collected_by_name: null,
     });
     expect(Number(response.body.collections[0].collected_amount)).toBe(4000);
+  });
+});
+
+describe.each([
+  { method: "cash" as const, field: "cash_revenue" as const },
+  { method: "online" as const, field: "online_revenue" as const },
+])("dashboard operator pending $method", ({ method, field }) => {
+  it("inkassatsiya qilinmagan 500000 ni to'liq ko'rsatadi", async () => {
+    await addPayment({ org: orgId, amount: 500000, method, operatorId: operatorA.id });
+
+    expect((await reportsService.getDailyReport(owner, orgId, undefined))[field]).toBe(500000);
+  });
+
+  it("inkassatsiya qilingan 500000 ni ko'rsatmaydi", async () => {
+    await addPayment({ org: orgId, amount: 500000, method, operatorId: operatorA.id });
+    await collect(owner, { operator_id: operatorA.id, collected_amount: method === "cash" ? 500000 : 0 });
+
+    expect((await reportsService.getDailyReport(owner, orgId, undefined))[field]).toBe(0);
+  });
+
+  it("inkassatsiyadan keyingi yangi 100000 ni ko'rsatadi", async () => {
+    await addPayment({ org: orgId, amount: 500000, method, operatorId: operatorA.id });
+    await collect(owner, { operator_id: operatorA.id, collected_amount: method === "cash" ? 500000 : 0 });
+    await addPayment({ org: orgId, amount: 100000, method, operatorId: operatorA.id });
+
+    expect((await reportsService.getDailyReport(owner, orgId, undefined))[field]).toBe(100000);
+  });
+
+  it("A inkassatsiya qilinganda faqat B ning 200000 summasini ko'rsatadi", async () => {
+    await addPayment({ org: orgId, amount: 500000, method, operatorId: operatorA.id });
+    await addPayment({ org: orgId, amount: 200000, method, operatorId: operatorB.id });
+    await collect(owner, { operator_id: operatorA.id, collected_amount: method === "cash" ? 500000 : 0 });
+
+    expect((await reportsService.getDailyReport(owner, orgId, undefined))[field]).toBe(200000);
+  });
+});
+
+describe("dashboard operator bo'lmagan to'lovlar", () => {
+  it("owner, kassir va operator_id null to'lovlarini hisoblashda saqlab qoladi", async () => {
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    await testDb("tb_organizations")
+      .where({ id: orgId })
+      .update({ created_at: new Date(yesterday.getTime() - 24 * 60 * 60 * 1000) });
+    await addPayment({ org: orgId, amount: 30000, method: "cash", operatorId: owner.id });
+    await addPayment({ org: orgId, amount: 40000, method: "online", operatorId: kassir.id });
+    await addPayment({ org: orgId, amount: 50000, method: "cash", operatorId: null, paidAt: yesterday });
+
+    const report = await reportsService.getDailyReport(owner, orgId, undefined);
+
+    expect(report.cash_revenue).toBe(80000);
+    expect(report.online_revenue).toBe(40000);
   });
 });
