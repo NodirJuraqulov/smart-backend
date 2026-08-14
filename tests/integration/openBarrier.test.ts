@@ -10,7 +10,6 @@ import {
   assertTestDatabase,
   cleanupOrganization,
   closeDb,
-  createTestActiveSession,
   createTestOrganization,
   createTestUser,
 } from "./helpers";
@@ -20,7 +19,6 @@ vi.mock("@/modules/relay/relay.service", () => ({
 }));
 
 let orgId: number;
-let otherOrgId: number;
 let operator: AuthTokenPayload;
 let superAdmin: AuthTokenPayload;
 
@@ -43,7 +41,6 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   orgId = await createTestOrganization();
-  otherOrgId = await createTestOrganization();
   const operatorUser = await createTestUser(orgId, { role: "operator" });
   operator = { id: operatorUser.id, org_id: orgId, role: "operator" };
   const adminUser = await createTestUser(null, { role: "super_admin" });
@@ -52,7 +49,6 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await cleanupOrganization(orgId);
-  await cleanupOrganization(otherOrgId);
   vi.clearAllMocks();
 });
 
@@ -61,40 +57,14 @@ afterAll(async () => {
 });
 
 describe("POST /api/parking/sessions/:id/open-barrier", () => {
-  it("operator o'z org'idagi sessiya uchun shlagbaumni ochadi", async () => {
-    const sessionId = await createTestActiveSession(orgId, "01C111AA");
-
+  it("route olib tashlangani uchun 404 qaytaradi", async () => {
     const res = await request(buildApp())
-      .post(`/api/parking/sessions/${sessionId}/open-barrier`)
-      .set("Authorization", authHeader(operator))
-      .send({ direction: "entry" });
-
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ status: "opened", success: true });
-    expect(openBarrier).toHaveBeenCalledWith(orgId, "entry");
-  });
-
-  it("boshqa org'ga tegishli sessiya uchun 404 qaytaradi (scope tekshiruvi)", async () => {
-    const foreignSessionId = await createTestActiveSession(otherOrgId, "01C222AA");
-
-    const res = await request(buildApp())
-      .post(`/api/parking/sessions/${foreignSessionId}/open-barrier`)
+      .post("/api/parking/sessions/1/open-barrier")
       .set("Authorization", authHeader(operator))
       .send({ direction: "entry" });
 
     expect(res.status).toBe(404);
     expect(openBarrier).not.toHaveBeenCalled();
-  });
-
-  it("noto'g'ri direction bilan 400 qaytaradi", async () => {
-    const sessionId = await createTestActiveSession(orgId, "01C333AA");
-
-    const res = await request(buildApp())
-      .post(`/api/parking/sessions/${sessionId}/open-barrier`)
-      .set("Authorization", authHeader(operator))
-      .send({ direction: "invalid" });
-
-    expect(res.status).toBe(400);
   });
 });
 

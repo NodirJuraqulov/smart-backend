@@ -136,7 +136,7 @@ describe("POST /api/parking/exit/manual", () => {
 });
 
 describe("POST /api/parking/sessions/:id/force-close", () => {
-  it("sessiya majburiy yopilgandan keyin rele, printer va exit_completed eventi chaqiriladi", async () => {
+  it("sessiya majburiy yopilgandan keyin rele va exit_completed eventi chaqiriladi, printer chaqirilmaydi", async () => {
     const sessionId = await createTestActiveSession(orgId, "01H555AA");
 
     const res = await request(buildApp())
@@ -144,21 +144,24 @@ describe("POST /api/parking/sessions/:id/force-close", () => {
       .set("Authorization", authHeader(operator))
       .send({});
 
+    const [session, payment] = await Promise.all([
+      db("tb_parking_sessions").where({ id: sessionId }).first(),
+      db("tb_payments").where({ session_id: sessionId }).first(),
+    ]);
+
     expect(res.status).toBe(200);
+    expect(session).toMatchObject({ status: "completed", exit_method: "forced" });
+    expect(payment).toMatchObject({ org_id: orgId, session_id: sessionId, payment_method: "cash" });
     expect(openBarrier).toHaveBeenCalledWith(orgId, "exit");
-    expect(printReceipt).toHaveBeenCalledWith(
-      "192.168.1.95",
-      expect.objectContaining({ plateNumber: "01H555AA" })
-    );
+    expect(printReceipt).not.toHaveBeenCalled();
     expect(emitExitCompleted).toHaveBeenCalledWith(
       orgId,
       expect.objectContaining({ plateNumber: "01H555AA" })
     );
   });
 
-  it("rele va printer xato bersa ham — sessiya baribir yopiladi", async () => {
+  it("rele xato bersa ham — sessiya baribir yopiladi va printer chaqirilmaydi", async () => {
     vi.mocked(openBarrier).mockResolvedValueOnce({ status: "failed", success: false });
-    vi.mocked(printReceipt).mockResolvedValueOnce({ status: "failed", success: false });
     const sessionId = await createTestActiveSession(orgId, "01H666AA");
 
     const res = await request(buildApp())
@@ -169,6 +172,7 @@ describe("POST /api/parking/sessions/:id/force-close", () => {
     expect(res.status).toBe(200);
     const session = await db("tb_parking_sessions").where({ id: sessionId }).first();
     expect(session.status).toBe("completed");
+    expect(printReceipt).not.toHaveBeenCalled();
     expect(emitRelayFailed).toHaveBeenCalledWith(orgId, expect.objectContaining({ direction: "exit" }));
   });
 });

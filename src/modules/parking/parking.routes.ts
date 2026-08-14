@@ -12,7 +12,6 @@ import {
   entryManualHandler,
   exitManualHandler,
   forceCloseHandler,
-  openBarrierHandler,
   printReceiptHandler,
   sessionDetailHandler,
   sessionImageHandler,
@@ -33,7 +32,6 @@ router.get("/sessions/awaiting-payment", isOperatorOrOwner, asyncHandler(awaitin
 router.get("/sessions/:id", asyncHandler(sessionDetailHandler));
 router.get("/sessions/:id/images/:kind", asyncHandler(sessionImageHandler));
 router.post("/sessions/:id/force-close", asyncHandler(forceCloseHandler));
-router.post("/sessions/:id/open-barrier", isOperatorOrOwner, asyncHandler(openBarrierHandler));
 router.post("/sessions/:id/print-receipt", isOperatorOrOwner, asyncHandler(printReceiptHandler));
 router.post("/sessions/:id/confirm-cash-payment", isOperatorOrOwner, asyncHandler(confirmCashPaymentHandler));
 router.post("/sessions/:id/payment-method", asyncHandler(updatePaymentMethodHandler));

@@ -902,17 +902,6 @@ export async function getSessionImage(
   return absolutePath;
 }
 
-export async function openBarrierForSession(
-  actor: AuthTokenPayload,
-  id: number,
-  direction: "entry" | "exit"
-) {
-  const session = await findSessionOrFail(id);
-  assertInScope(actor, session);
-
-  return openBarrier(session.org_id, direction);
-}
-
 export async function printReceiptForSession(actor: AuthTokenPayload, id: number) {
   const session = await findSessionOrFail(id);
   assertInScope(actor, session);
@@ -1177,11 +1166,6 @@ export async function forceCloseSession(
   const plateNumber = displayPlateNumber(result.session!.plate_number);
 
   const barrierStatus = await openBarrierOrWarn(orgId, "exit", plateNumber);
-
-  const printResult = await printReceiptForSession(actor, id);
-  if (!printResult.success) {
-    console.warn(`Chek chop etilmadi (session #${id}): ${JSON.stringify(printResult)}`);
-  }
 
   emitExitCompleted(orgId, {
     orgId,

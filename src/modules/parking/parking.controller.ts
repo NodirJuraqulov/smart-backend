@@ -177,20 +177,6 @@ export async function forceCloseHandler(req: Request, res: Response) {
   res.json(result);
 }
 
-export async function openBarrierHandler(req: Request, res: Response) {
-  const id = parseId(req, res);
-  if (id === null) return;
-
-  const { direction } = req.body ?? {};
-  if (direction !== "entry" && direction !== "exit") {
-    res.status(400).json({ message: "direction 'entry' yoki 'exit' bo'lishi kerak" });
-    return;
-  }
-
-  const result = await parkingService.openBarrierForSession(req.user!, id, direction);
-  res.json(result);
-}
-
 export async function printReceiptHandler(req: Request, res: Response) {
   const id = parseId(req, res);
   if (id === null) return;

@@ -139,7 +139,6 @@ Har bir tashkilot (`tb_organizations`) uchun printer/kamera va webhook sozlamala
 - `GET /sessions/awaiting-payment`
 - `GET /sessions/:id`
 - `POST /sessions/:id/force-close`
-- `POST /sessions/:id/open-barrier`
 - `POST /sessions/:id/print-receipt`
 - `POST /sessions/:id/confirm-cash-payment`
 - `POST /sessions/:id/payment-method`
