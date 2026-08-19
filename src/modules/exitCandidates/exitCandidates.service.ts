@@ -29,6 +29,7 @@ import {
 } from "@/modules/medplus/medplus.service";
 import { ApiError } from "@/utils/ApiError";
 import { resolveOrgIdRequired } from "@/utils/orgScope";
+import { ledService } from "@/modules/led/led.service";
 import {
   emitExitCandidateCreated,
   emitExitCandidateResolved,
@@ -938,6 +939,14 @@ export async function confirmExitCandidate(
       resolutionType,
     };
   });
+  try {
+    void ledService.showPayment(
+      transactionResult.session.plate_number ?? "",
+      transactionResult.session.amount
+    );
+  } catch (error) {
+    console.error("LED_PAYMENT_FAILED", error);
+  }
   const barrierStatus = await recordBarrierAttempt({
     actorId: actor.id,
     orgId,
@@ -980,12 +989,18 @@ export async function confirmExitCandidate(
         : null,
     durationMinutes: transactionResult.session.duration_minutes,
   });
-  return {
+  const result = {
     candidate: await getCandidateByInternalId(orgId, candidateId),
     session: serializeSessionSummary(transactionResult.session),
     payment: transactionResult.payment,
     barrier_status: barrierStatus,
   };
+  try {
+    ledService.scheduleReturnToClock();
+  } catch (error) {
+    console.error("LED_CLOCK_SCHEDULE_FAILED", error);
+  }
+  return result;
 }
 
 export async function forceOpenExitCandidate(

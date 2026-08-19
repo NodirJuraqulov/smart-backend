@@ -12,6 +12,7 @@ import exitCandidatesRouter from "@/modules/exitCandidates/exitCandidates.routes
 import webhookRouter from "@/modules/webhook/webhook.routes";
 import { clearWebhookDedupeCache } from "@/modules/webhook/webhookIdempotency";
 import { openBarrier } from "@/modules/relay/relay.service";
+import { ledService } from "@/modules/led/led.service";
 import {
   emitExitCandidateCreated,
   emitExitCandidateResolved,
@@ -31,6 +32,13 @@ vi.mock("@/modules/relay/relay.service", () => {
   const createMock = vi.fn as unknown as () => ReturnType<typeof vi.fn>;
   return { openBarrier: createMock() };
 });
+
+vi.mock("@/modules/led/led.service", () => ({
+  ledService: {
+    showPayment: vi.fn(),
+    scheduleReturnToClock: vi.fn(),
+  },
+}));
 
 vi.mock("@/websocket/socketServer", () => {
   const createMock = vi.fn as unknown as () => ReturnType<typeof vi.fn>;
@@ -315,6 +323,8 @@ describe("exit candidate completion workflow", () => {
     const payment = await testDb<PaymentRow>("tb_payments").where({ session_id: sessionId }).first();
     expect(payment).toMatchObject({ payment_method: "cash" });
     expect(Number(payment.amount)).toBe(10000);
+    expect(ledService.showPayment).toHaveBeenCalledWith("01A100AA", 10000);
+    expect(ledService.scheduleReturnToClock).toHaveBeenCalledTimes(1);
     expect(openBarrier).toHaveBeenCalledWith(orgId, "exit");
     expect(emitExitCompleted).toHaveBeenCalledWith(
       orgId,

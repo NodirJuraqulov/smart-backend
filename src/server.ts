@@ -13,6 +13,7 @@ import { scheduleClinicDiscountsExpiryJob } from "./jobs/clinicDiscountsExpiryJo
 import { scheduleInpatientVehiclesExpiryJob } from "./jobs/inpatientVehiclesExpiryJob";
 import { initSocketServer } from "./websocket/socketServer";
 import { resumePlateFormatChecks } from "./modules/plateFormats/plateFormatCheck.service";
+import { ledService } from "./modules/led/led.service";
 
 process.on("uncaughtException", (error) => {
   console.error("KUTILMAGAN XATO:", error);
@@ -38,6 +39,16 @@ scheduleInpatientVehiclesExpiryJob();
 
 httpServer.listen(env.port, () => {
   console.log(`Server running on port ${env.port} [${env.nodeEnv}]`);
+  try {
+    void ledService.showClock();
+  } catch (error) {
+    console.error("LED_START_FAILED", error);
+  }
+  try {
+    ledService.startClockScheduler();
+  } catch (error) {
+    console.error("LED_SCHEDULER_FAILED", error);
+  }
   resumePlateFormatChecks().catch((err) => {
     console.error("Davlat raqami format tekshiruvlarini tiklashda xato:", err);
   });

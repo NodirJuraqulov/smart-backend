@@ -60,6 +60,15 @@ export const env = {
     paymeEnabled: process.env.PAYME_ENABLED === "true",
     clickEnabled: process.env.CLICK_ENABLED === "true",
   },
+
+  led: {
+    enabled: process.env.LED_ENABLED === "true",
+    host: process.env.LED_HOST || "192.168.1.157",
+    port: Number(process.env.LED_PORT) || 10000,
+    timeoutMs: Number(process.env.LED_TIMEOUT_MS) || 3000,
+    clockIntervalMs: Number(process.env.LED_CLOCK_INTERVAL_MS) || 60000,
+    paymentConfirmDelayMs: Number(process.env.LED_PAYMENT_CONFIRM_DELAY_MS) || 3000,
+  },
 };
 
 const WEAK_DB_PASSWORDS = ["password", "123456", "12345678", "admin", "root", "qwerty", "changeme"];
