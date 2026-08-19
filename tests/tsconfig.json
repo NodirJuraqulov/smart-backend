@@ -1,0 +1,12 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".."
+  },
+  "files": [
+    "../src/types/express.d.ts",
+    "./integration/exitCandidates.test.ts"
+  ],
+  "exclude": ["../node_modules", "../dist"]
+}
