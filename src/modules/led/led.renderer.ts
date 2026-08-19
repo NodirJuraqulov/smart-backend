@@ -57,6 +57,13 @@ export function renderClock(time: string): LedPixels {
   return pixels;
 }
 
+export function renderPlateOnly(plate: string): LedPixels {
+  const pixels = createPixels();
+  const y = Math.floor((H - CHAR_H) / 2);
+  renderText(plate, y, pixels);
+  return pixels;
+}
+
 export function pixelsToPlane1(pixels: LedPixels): Buffer {
   const plane1 = Buffer.alloc(352, 0xff);
   for (let y = 0; y < H; y += 1) {

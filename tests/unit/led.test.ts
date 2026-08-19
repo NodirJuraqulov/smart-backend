@@ -35,7 +35,12 @@ import {
   buildLogicalPayload,
   buildPackets,
 } from "@/modules/led/led.packetBuilder";
-import { pixelsToPlane1, renderClock, renderPayment } from "@/modules/led/led.renderer";
+import {
+  pixelsToPlane1,
+  renderClock,
+  renderPayment,
+  renderPlateOnly,
+} from "@/modules/led/led.renderer";
 
 const PAYMENT_GOLDEN_HEX =
   "ffffffffffffffffffffffffffffffffff20e882201c87ffff20e882201c87ffffafefbafeebfaffffafefbafeebfaffffaf5fbbfeebfaffffaf5fbbfeebfaffffb75fbbfeebfaffffb75fbbfeebfaffff37bc8360ec8affff37bc8360ec8afffffb5bbfeeabbafffffb5bbfeeabbafffffb5bbfee6bbbfffffb5bbfee6bbbfffffdebbeeeebbafffffdebbeeeebbaffff3decc2209c86ffff3decc2209c86ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0f8220f8ffffffff0f8220f8ffffffffefbbaefbffffffffefbbaefbffffffffefbbaefbffffffffefbbaefbffffffffefbbaefbffffffffefbbaefbffffffff0fbbaefbffffffff0fbbaefbffffffffffbaaefbffffffffffbaaefbffffffffffbaaefbffffffffffbaaefbffffffffffbaaefbffffffffffbaaefbffffffff0f8320f8ffffffff0f8320f8ffffffffffffffffffffffffffffffffffff";
@@ -58,6 +63,7 @@ describe("LED renderer, packets va service", () => {
     const service = new LedService();
     await service.showClock();
     await service.showPayment("75X963QG", 5000);
+    await service.showPlateOnly("75X963QG");
     service.scheduleReturnToClock();
     service.startClockScheduler();
     await vi.advanceTimersByTimeAsync(120000);
@@ -77,6 +83,13 @@ describe("LED renderer, packets va service", () => {
     expect(pixels[12].every((pixel) => pixel === 0)).toBe(true);
     expect(pixels[31].every((pixel) => pixel === 0)).toBe(true);
     expect(pixels.every((row) => row[16] === 0 && row[46] === 0)).toBe(true);
+  });
+
+  it("plate-only faqat bitta markazlangan qatorni render qiladi", () => {
+    const pixels = renderPlateOnly("75X963QG");
+    expect(pixels).toEqual(renderClock("75X963QG"));
+    expect(pixels.slice(0, 13).every((row) => row.every((pixel) => pixel === 0))).toBe(true);
+    expect(pixels.slice(31).every((row) => row.every((pixel) => pixel === 0))).toBe(true);
   });
 
   it("4. logical uzunlik va 512 baytli packet headerlari to'g'ri", () => {
@@ -120,8 +133,88 @@ describe("LED renderer, packets va service", () => {
     service.scheduleReturnToClock();
     await vi.advanceTimersByTimeAsync(1000);
     await service.showPayment("01A123BC", 7000);
+    service.scheduleReturnToClock();
     await vi.advanceTimersByTimeAsync(2000);
     expect(mocks.sendPackets).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(mocks.sendPackets).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(mocks.sendPackets).toHaveBeenCalledTimes(3);
+  });
+
+  it("startup clockni darhol ko'rsatadi va keyin minut boundaryda yangilaydi", async () => {
+    vi.setSystemTime(new Date("2026-08-19T09:23:47.250Z"));
+    const sentAt: number[] = [];
+    mocks.sendPackets.mockImplementation(async () => {
+      sentAt.push(Date.now());
+    });
+    const service = new LedService();
+    await service.showClock();
+    service.startClockScheduler();
+    expect(sentAt).toEqual([new Date("2026-08-19T09:23:47.250Z").getTime()]);
+    await vi.advanceTimersByTimeAsync(12750);
+    expect(sentAt).toEqual([
+      new Date("2026-08-19T09:23:47.250Z").getTime(),
+      new Date("2026-08-19T09:24:00.000Z").getTime(),
+    ]);
+  });
+
+  it("paymentdan uch soniya keyin scheduler kutmasdan clockni ko'rsatadi", async () => {
+    vi.setSystemTime(new Date("2026-08-19T09:23:47.000Z"));
+    const sentAt: number[] = [];
+    mocks.sendPackets.mockImplementation(async () => {
+      sentAt.push(Date.now());
+    });
+    const service = new LedService();
+    await service.showPayment("75X963QG", 5000);
+    service.scheduleReturnToClock();
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(sentAt).toEqual([new Date("2026-08-19T09:23:47.000Z").getTime()]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sentAt).toEqual([
+      new Date("2026-08-19T09:23:47.000Z").getTime(),
+      new Date("2026-08-19T09:23:50.000Z").getTime(),
+    ]);
+  });
+
+  it("queue'dagi stale clock yangi paymentdan keyin yuborilmaydi", async () => {
+    let releaseFirstSend = (): void => undefined;
+    mocks.sendPackets.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseFirstSend = resolve;
+        })
+    );
+    const service = new LedService();
+    const firstPayment = service.showPayment("01A100AA", 5000);
+    service.scheduleReturnToClock();
+    await vi.advanceTimersByTimeAsync(3000);
+    const secondPayment = service.showPayment("01B200BB", 7000);
+    releaseFirstSend();
+    await Promise.all([firstPayment, secondPayment]);
+    expect(mocks.sendPackets).toHaveBeenCalledTimes(2);
+  });
+
+  it("clock va payment transition markerlarini yozadi", async () => {
+    const consoleLog = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const service = new LedService();
+    await service.showPayment("01A100AA", 5000);
+    service.scheduleReturnToClock();
+    await service.showPayment("01B200BB", 7000);
+    service.scheduleReturnToClock();
+    await vi.advanceTimersByTimeAsync(3000);
+    const markers = consoleLog.mock.calls.map((call) => call[0]);
+    expect(markers).toEqual(
+      expect.arrayContaining([
+        "PAYMENT_MODE_ENTERED",
+        "RETURN_TO_CLOCK_TIMER_STARTED",
+        "RETURN_TO_CLOCK_TIMER_CANCELLED",
+        "RETURN_TO_CLOCK_TIMER_FIRED",
+        "CLOCK_MODE_ENTERED",
+        "CLOCK_IMMEDIATE_SHOW_START",
+        "CLOCK_IMMEDIATE_SHOW_FINISHED",
+      ])
+    );
   });
 
   it("6. clock scheduler faqat clock holatida yuboradi", async () => {

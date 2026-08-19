@@ -14,7 +14,7 @@ import { scheduleInpatientVehiclesExpiryJob } from "./jobs/inpatientVehiclesExpi
 import { initSocketServer } from "./websocket/socketServer";
 import { resumePlateFormatChecks } from "./modules/plateFormats/plateFormatCheck.service";
 import { ledService } from "./modules/led/led.service";
-import { createLedDiagnosticTrace, logLedDiagnostic } from "./modules/led/led.diagnostics";
+import { createLedDiagnosticTrace } from "./modules/led/led.diagnostics";
 
 process.on("uncaughtException", (error) => {
   console.error("KUTILMAGAN XATO:", error);
@@ -40,17 +40,20 @@ scheduleInpatientVehiclesExpiryJob();
 
 httpServer.listen(env.port, () => {
   console.log(`Server running on port ${env.port} [${env.nodeEnv}]`);
-  try {
-    const trace = createLedDiagnosticTrace("clock", { trigger: "startup" });
-    logLedDiagnostic("LED_DIAG_CLOCK_BEFORE_SHOW_CLOCK", trace, { trigger: "startup" });
-    void ledService.showClock(trace);
-  } catch (error) {
-    console.error("LED_START_FAILED", error);
-  }
-  try {
-    ledService.startClockScheduler();
-  } catch (error) {
-    console.error("LED_SCHEDULER_FAILED", error);
+  if (env.led.enabled) {
+    try {
+      const trace = createLedDiagnosticTrace("clock", { trigger: "startup" });
+      void ledService.showClock(trace).catch((error) => {
+        console.error("LED_START_FAILED", error);
+      });
+    } catch (error) {
+      console.error("LED_START_FAILED", error);
+    }
+    try {
+      ledService.startClockScheduler();
+    } catch (error) {
+      console.error("LED_SCHEDULER_FAILED", error);
+    }
   }
   resumePlateFormatChecks().catch((err) => {
     console.error("Davlat raqami format tekshiruvlarini tiklashda xato:", err);

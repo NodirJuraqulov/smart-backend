@@ -2,7 +2,7 @@ import { DateTime } from "luxon";
 import { env } from "@/config/env";
 import { LedClientError, sendPackets } from "./led.client";
 import { buildLogicalPayload, buildPackets } from "./led.packetBuilder";
-import { pixelsToPlane1, renderClock, renderPayment } from "./led.renderer";
+import { pixelsToPlane1, renderClock, renderPayment, renderPlateOnly } from "./led.renderer";
 import {
   createLedDiagnosticTrace,
   LedDiagnosticTrace,
@@ -13,7 +13,9 @@ export type LedState = "clock" | "payment";
 
 export class LedService {
   private state: LedState = "clock";
+  private modeGeneration = 0;
   private returnToClockTimer: NodeJS.Timeout | null = null;
+  private returnToClockTrace: LedDiagnosticTrace | null = null;
   private clockTimer: NodeJS.Timeout | null = null;
   private sendQueue: Promise<void> = Promise.resolve();
   private pendingSendCount = 0;
@@ -26,25 +28,47 @@ export class LedService {
   private clearReturnToClockTimer(): void {
     if (!this.returnToClockTimer) return;
     clearTimeout(this.returnToClockTimer);
+    if (this.returnToClockTrace) {
+      logLedDiagnostic("RETURN_TO_CLOCK_TIMER_CANCELLED", this.returnToClockTrace, {
+        state: this.state,
+        generation: this.modeGeneration,
+      });
+    }
     this.returnToClockTimer = null;
+    this.returnToClockTrace = null;
   }
 
-  private send(plane1: Buffer, trace: LedDiagnosticTrace): Promise<void> {
+  private send(
+    plane1: Buffer,
+    trace: LedDiagnosticTrace,
+    canSend: () => boolean = () => true
+  ): Promise<boolean> {
     const packets = buildPackets(buildLogicalPayload(plane1));
     this.pendingSendCount += 1;
     const queuedAtMs = logLedDiagnostic("LED_DIAG_SEND_QUEUE_ENQUEUED", trace, {
       queueDepth: this.pendingSendCount,
       packetCount: packets.length,
     });
-    const operation = this.sendQueue.then(() => {
+    const operation = this.sendQueue.then(async () => {
+      if (!canSend()) {
+        logLedDiagnostic("CLOCK_STALE_SEND_SKIPPED", trace, {
+          queueDepth: this.pendingSendCount,
+          queueWaitMs: Date.now() - queuedAtMs,
+        });
+        return false;
+      }
       logLedDiagnostic("LED_DIAG_SEND_QUEUE_STARTED", trace, {
         queueDepth: this.pendingSendCount,
         queueWaitMs: Date.now() - queuedAtMs,
         packetCount: packets.length,
       });
-      return sendPackets(packets, trace);
+      await sendPackets(packets, trace);
+      return true;
     });
-    this.sendQueue = operation.catch(() => undefined);
+    this.sendQueue = operation.then(
+      () => undefined,
+      () => undefined
+    );
     operation.then(
       () => {
         this.pendingSendCount -= 1;
@@ -56,15 +80,19 @@ export class LedService {
     return operation;
   }
 
-  async showClock(
-    trace: LedDiagnosticTrace = createLedDiagnosticTrace("clock", { trigger: "direct" })
-  ): Promise<void> {
-    logLedDiagnostic("LED_DIAG_CLOCK_SHOW_FIRST_LINE", trace, {
-      state: this.state,
-      enabled: env.led.enabled,
-    });
-    if (!env.led.enabled) return;
-    this.state = "clock";
+  private isCurrentClockGeneration(generation: number): boolean {
+    return this.state === "clock" && this.modeGeneration === generation;
+  }
+
+  private async sendClock(trace: LedDiagnosticTrace, generation: number): Promise<boolean> {
+    if (!this.isCurrentClockGeneration(generation)) {
+      logLedDiagnostic("CLOCK_STALE_SEND_SKIPPED", trace, {
+        state: this.state,
+        generation,
+        currentGeneration: this.modeGeneration,
+      });
+      return false;
+    }
     try {
       const time = DateTime.now().setZone(env.platformDefaultTimezone).toFormat("HH:mm");
       const renderStartedAtMs = logLedDiagnostic("LED_DIAG_CLOCK_RENDER_START", trace, { time });
@@ -74,14 +102,55 @@ export class LedService {
         renderElapsedMs: Date.now() - renderStartedAtMs,
       });
       const plane1 = pixelsToPlane1(pixels);
-      await this.send(plane1, trace);
-      logLedDiagnostic("LED_DIAG_CLOCK_OPERATION_FINISHED", trace, { time });
+      const sent = await this.send(plane1, trace, () => this.isCurrentClockGeneration(generation));
+      if (sent) {
+        logLedDiagnostic("LED_DIAG_CLOCK_OPERATION_FINISHED", trace, { time });
+      }
+      return sent;
     } catch (error) {
       logLedDiagnostic("LED_DIAG_CLOCK_OPERATION_FAILED", trace, {
         error: error instanceof Error ? error.message : String(error),
       });
       this.logError(error);
+      return false;
     }
+  }
+
+  private async enterClockMode(trace: LedDiagnosticTrace, trigger: string): Promise<void> {
+    this.clearReturnToClockTimer();
+    this.modeGeneration += 1;
+    const generation = this.modeGeneration;
+    this.state = "clock";
+    logLedDiagnostic("CLOCK_MODE_ENTERED", trace, { trigger, generation });
+    logLedDiagnostic("CLOCK_IMMEDIATE_SHOW_START", trace, { trigger, generation });
+    const sent = await this.sendClock(trace, generation);
+    logLedDiagnostic("CLOCK_IMMEDIATE_SHOW_FINISHED", trace, {
+      trigger,
+      generation,
+      sent,
+      state: this.state,
+    });
+  }
+
+  private enterPaymentMode(trace: LedDiagnosticTrace, details: Record<string, unknown>): void {
+    this.clearReturnToClockTimer();
+    this.modeGeneration += 1;
+    this.state = "payment";
+    logLedDiagnostic("PAYMENT_MODE_ENTERED", trace, {
+      ...details,
+      generation: this.modeGeneration,
+    });
+  }
+
+  async showClock(
+    trace: LedDiagnosticTrace = createLedDiagnosticTrace("clock", { trigger: "direct" })
+  ): Promise<void> {
+    logLedDiagnostic("LED_DIAG_CLOCK_SHOW_FIRST_LINE", trace, {
+      state: this.state,
+      enabled: env.led.enabled,
+    });
+    if (!env.led.enabled) return;
+    await this.enterClockMode(trace, String(trace.metadata.trigger ?? "direct"));
   }
 
   async showPayment(
@@ -96,8 +165,7 @@ export class LedService {
       amount,
     });
     if (!env.led.enabled) return;
-    this.clearReturnToClockTimer();
-    this.state = "payment";
+    this.enterPaymentMode(trace, { plateNumber: plate, amount });
     try {
       const normalizedPlate = plate.toUpperCase().replace(/\s/g, "").slice(0, 10);
       const normalizedAmount = String(amount).replace(/\D/g, "");
@@ -125,26 +193,68 @@ export class LedService {
     }
   }
 
+  async showPlateOnly(
+    plate: string,
+    trace: LedDiagnosticTrace = createLedDiagnosticTrace("plate", { trigger: "direct" })
+  ): Promise<void> {
+    logLedDiagnostic("LED_DIAG_PLATE_SHOW_FIRST_LINE", trace, {
+      state: this.state,
+      enabled: env.led.enabled,
+      plateNumber: plate,
+    });
+    if (!env.led.enabled) return;
+    this.enterPaymentMode(trace, { plateNumber: plate, displayType: "plate-only" });
+    try {
+      const normalizedPlate = plate.toUpperCase().replace(/\s/g, "").slice(0, 10);
+      const renderStartedAtMs = logLedDiagnostic("LED_DIAG_PLATE_RENDER_START", trace, {
+        plateNumber: normalizedPlate,
+      });
+      const pixels = renderPlateOnly(normalizedPlate);
+      logLedDiagnostic("LED_DIAG_PLATE_RENDER_END", trace, {
+        plateNumber: normalizedPlate,
+        renderElapsedMs: Date.now() - renderStartedAtMs,
+      });
+      const plane1 = pixelsToPlane1(pixels);
+      await this.send(plane1, trace);
+      logLedDiagnostic("LED_DIAG_PLATE_OPERATION_FINISHED", trace, {
+        plateNumber: normalizedPlate,
+      });
+    } catch (error) {
+      logLedDiagnostic("LED_DIAG_PLATE_OPERATION_FAILED", trace, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      this.logError(error);
+    }
+  }
+
   scheduleReturnToClock(): void {
     if (!env.led.enabled) return;
     try {
       this.clearReturnToClockTimer();
       const trace = createLedDiagnosticTrace("clock", { trigger: "payment-return-timer" });
-      logLedDiagnostic("LED_DIAG_CLOCK_RETURN_TIMER_SCHEDULED", trace, {
+      const generation = this.modeGeneration;
+      this.returnToClockTrace = trace;
+      logLedDiagnostic("RETURN_TO_CLOCK_TIMER_STARTED", trace, {
         delayMs: env.led.paymentConfirmDelayMs,
         state: this.state,
+        generation,
       });
       this.returnToClockTimer = setTimeout(() => {
         this.returnToClockTimer = null;
-        logLedDiagnostic("LED_DIAG_CLOCK_RETURN_TIMER_FIRED", trace, {
+        this.returnToClockTrace = null;
+        const current = this.state === "payment" && this.modeGeneration === generation;
+        logLedDiagnostic("RETURN_TO_CLOCK_TIMER_FIRED", trace, {
           delayMs: env.led.paymentConfirmDelayMs,
           state: this.state,
+          generation,
+          currentGeneration: this.modeGeneration,
+          current,
         });
+        if (!current) return;
         try {
-          logLedDiagnostic("LED_DIAG_CLOCK_BEFORE_SHOW_CLOCK", trace, {
-            trigger: "payment-return-timer",
+          void this.enterClockMode(trace, "payment-return-timer").catch((error) => {
+            this.logError(error);
           });
-          void this.showClock(trace);
         } catch (error) {
           this.logError(error);
         }
@@ -157,21 +267,22 @@ export class LedService {
 
   private runClockSchedulerTick(): void {
     const trace = createLedDiagnosticTrace("clock", { trigger: "scheduler" });
-    logLedDiagnostic("LED_DIAG_CLOCK_SCHEDULER_FIRED", trace, {
+    logLedDiagnostic("CLOCK_SCHEDULER_FIRED", trace, {
       state: this.state,
       intervalMs: env.led.clockIntervalMs,
+      generation: this.modeGeneration,
     });
     if (this.state !== "clock") {
-      logLedDiagnostic("LED_DIAG_CLOCK_SCHEDULER_SKIPPED", trace, {
+      logLedDiagnostic("CLOCK_SCHEDULER_SKIPPED", trace, {
         state: this.state,
       });
       return;
     }
+    const generation = this.modeGeneration;
     try {
-      logLedDiagnostic("LED_DIAG_CLOCK_BEFORE_SHOW_CLOCK", trace, {
-        trigger: "scheduler",
+      void this.sendClock(trace, generation).catch((error) => {
+        this.logError(error);
       });
-      void this.showClock(trace);
     } catch (error) {
       this.logError(error);
     }

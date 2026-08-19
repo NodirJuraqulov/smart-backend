@@ -126,6 +126,41 @@ const BARRIER_AUDIT_ACTIONS = [
   "parking.exit_candidate_barrier_open_failed",
   "parking.exit_candidate_barrier_unavailable",
 ];
+const lastLedCandidatePreviewByOrg = new Map<number, number>();
+
+function showLedPaymentPreview(
+  plateNumber: string,
+  amount: number,
+  metadata: Record<string, unknown>
+): void {
+  const trace = createLedDiagnosticTrace("payment-preview", metadata);
+  try {
+    void ledService.showPayment(plateNumber, amount, trace).catch((error) => {
+      console.error("LED_PAYMENT_FAILED", error);
+    });
+  } catch (error) {
+    console.error("LED_PAYMENT_FAILED", error);
+  }
+}
+
+function showLedPlatePreview(plateNumber: string, metadata: Record<string, unknown>): void {
+  const trace = createLedDiagnosticTrace("plate-preview", metadata);
+  try {
+    void ledService.showPlateOnly(plateNumber, trace).catch((error) => {
+      console.error("LED_PLATE_FAILED", error);
+    });
+  } catch (error) {
+    console.error("LED_PLATE_FAILED", error);
+  }
+}
+
+function calculateSessionTariffPreview(session: SessionSummary, at: Date) {
+  const durationMinutes = calculateDurationMinutes(new Date(session.entered_at), at);
+  return {
+    durationMinutes,
+    amount: calculateTariffSnapshotAmount(session, durationMinutes),
+  };
+}
 
 function eventImageUrl(eventId: number, kind: "overview" | "vehicle" | "plate", imagePath?: string | null) {
   return imagePath ? `/api/webhook-events/${eventId}/images/${kind}` : null;
@@ -674,28 +709,41 @@ export async function getNextExitCandidate(actor: AuthTokenPayload, requestedOrg
     .orderBy("tb_exit_candidates.created_at", "asc")
     .orderBy("tb_exit_candidates.id", "asc")
     .first();
-  if (!candidate) return { candidate: null, pending_count_for_org: 0 };
+  if (!candidate) {
+    lastLedCandidatePreviewByOrg.delete(orgId);
+    return { candidate: null, pending_count_for_org: 0 };
+  }
   const session = candidate.detected_plate
     ? await sessionSummaryQuery()
         .where({ org_id: orgId, status: "active", plate_number: candidate.detected_plate })
         .orderBy("entered_at", "desc")
         .first()
     : null;
-  const now = new Date();
-  const matchedSession = session
-    ? {
-        session_id: session.id,
-        plate_number: session.plate_number,
-        session_source: session.session_source,
-        entered_at: session.entered_at,
-        entry_images: await entryImages(actor, session),
-        duration_minutes: calculateDurationMinutes(new Date(session.entered_at), now),
-        tariff_snapshot_amount: calculateTariffSnapshotAmount(
-          session,
-          calculateDurationMinutes(new Date(session.entered_at), now)
-        ),
-      }
-    : null;
+  let matchedSession = null;
+  if (session) {
+    const preview = calculateSessionTariffPreview(session, new Date());
+    if (
+      preview.amount !== null &&
+      lastLedCandidatePreviewByOrg.get(orgId) !== candidate.id
+    ) {
+      lastLedCandidatePreviewByOrg.set(orgId, candidate.id);
+      showLedPaymentPreview(displayPlateNumber(session.plate_number), preview.amount, {
+        trigger: "next-exit-candidate",
+        orgId,
+        candidateId: candidate.id,
+        sessionId: session.id,
+      });
+    }
+    matchedSession = {
+      session_id: session.id,
+      plate_number: session.plate_number,
+      session_source: session.session_source,
+      entered_at: session.entered_at,
+      entry_images: await entryImages(actor, session),
+      duration_minutes: preview.durationMinutes,
+      tariff_snapshot_amount: preview.amount,
+    };
+  }
   return {
     candidate_id: candidate.id,
     status: candidate.status,
@@ -769,6 +817,36 @@ export async function searchExitCandidateSessions(
     })
   );
   return { results, active_sessions };
+}
+
+export async function previewExitCandidateSession(
+  actor: AuthTokenPayload,
+  requestedOrgId: number | undefined,
+  candidateId: number,
+  sessionId: number
+) {
+  const orgId = resolveOrgIdRequired(actor, requestedOrgId);
+  const candidate = await db<CandidateRow>("tb_exit_candidates")
+    .select("id", "status")
+    .where({ id: candidateId, org_id: orgId })
+    .first();
+  if (!candidate) throw new ApiError("Chiqish nomzodi topilmadi", 404);
+  if (candidate.status !== "pending") throw new ApiError("Bu chiqish allaqachon hal qilingan", 409);
+  const session = await sessionSummaryQuery()
+    .where({ id: sessionId, org_id: orgId })
+    .whereIn("status", ["active", "awaiting_payment"])
+    .first();
+  if (!session) throw new ApiError("Tanlangan sessiya topilmadi", 404);
+  const preview = calculateSessionTariffPreview(session, new Date());
+  const amount = preview.amount ?? 0;
+  const plateNumber = displayPlateNumber(session.plate_number);
+  showLedPaymentPreview(plateNumber, amount, {
+    trigger: "preview-session",
+    orgId,
+    candidateId,
+    sessionId,
+  });
+  return { plateNumber, amount };
 }
 
 export async function confirmExitCandidate(
@@ -977,6 +1055,11 @@ export async function confirmExitCandidate(
   } catch (error) {
     console.error("LED_PAYMENT_FAILED", error);
   }
+  logLedDiagnostic("PAYMENT_CONFIRMED", ledTrace, {
+    sessionId: transactionResult.session.id,
+    plateNumber: transactionResult.session.plate_number,
+    amount: transactionResult.session.amount,
+  });
   try {
     ledService.scheduleReturnToClock();
   } catch (error) {
@@ -1050,6 +1133,19 @@ export async function forceOpenExitCandidate(
       .first();
     if (!candidate) throw new ApiError("Chiqish nomzodi topilmadi", 404);
     if (candidate.status !== "pending") throw new ApiError("Bu chiqish allaqachon hal qilingan", 409);
+    const plateNumber = displayPlateNumber(
+      enteredPlate ?? candidate.detected_plate ?? candidate.suggested_plate
+    );
+    showLedPlatePreview(plateNumber, {
+      trigger: "force-open",
+      orgId,
+      candidateId,
+    });
+    try {
+      ledService.scheduleReturnToClock();
+    } catch (error) {
+      console.error("LED_CLOCK_SCHEDULE_FAILED", error);
+    }
     const event = await trx("tb_webhook_events")
       .select("overview_image_path", "vehicle_image_path")
       .where({ id: candidate.webhook_event_id, org_id: orgId })

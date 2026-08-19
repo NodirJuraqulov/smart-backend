@@ -9,6 +9,7 @@ import {
   forceOpenHandler,
   listHandler,
   nextHandler,
+  previewSessionHandler,
   reassignHandler,
   retryBarrierHandler,
   searchHandler,
@@ -21,6 +22,7 @@ router.get("/", asyncHandler(listHandler));
 router.get("/next", asyncHandler(nextHandler));
 router.get("/:id", asyncHandler(detailHandler));
 router.post("/:id/search", asyncHandler(searchHandler));
+router.post("/:id/preview-session", asyncHandler(previewSessionHandler));
 router.post("/:id/confirm", asyncHandler(confirmHandler));
 router.post("/:id/force-open", asyncHandler(forceOpenHandler));
 router.post("/:id/retry-barrier", asyncHandler(retryBarrierHandler));

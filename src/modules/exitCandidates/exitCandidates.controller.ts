@@ -55,6 +55,19 @@ export async function searchHandler(req: Request, res: Response) {
   res.json(await service.searchExitCandidateSessions(req.user!, orgId, id, req.body?.plate));
 }
 
+export async function previewSessionHandler(req: Request, res: Response) {
+  const id = parseId(req, res);
+  if (id === null) return;
+  const orgId = requestScope(req, res);
+  if (orgId === null) return;
+  const sessionId = req.body?.sessionId;
+  if (typeof sessionId !== "number" || !Number.isInteger(sessionId) || sessionId < 1) {
+    res.status(400).json({ message: "sessionId noto'g'ri" });
+    return;
+  }
+  res.json(await service.previewExitCandidateSession(req.user!, orgId, id, sessionId));
+}
+
 function parseSessionId(req: Request, res: Response): number | undefined | null {
   if (req.body?.session_id === undefined) return undefined;
   const sessionId = Number(req.body.session_id);

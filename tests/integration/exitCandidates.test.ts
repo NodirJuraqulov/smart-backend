@@ -38,6 +38,7 @@ vi.mock("@/modules/relay/relay.service", () => {
 vi.mock("@/modules/led/led.service", () => ({
   ledService: {
     showPayment: vi.fn().mockResolvedValue(undefined),
+    showPlateOnly: vi.fn().mockResolvedValue(undefined),
     scheduleReturnToClock: vi.fn(),
   },
 }));
@@ -265,6 +266,7 @@ beforeEach(async () => {
   openBarrierMock.mockResolvedValue({ status: "opened", success: true });
   vi.clearAllMocks();
   vi.mocked(ledService.showPayment).mockReset().mockResolvedValue(undefined);
+  vi.mocked(ledService.showPlateOnly).mockReset().mockResolvedValue(undefined);
   vi.mocked(ledService.scheduleReturnToClock).mockReset();
 });
 
@@ -365,6 +367,108 @@ describe("exit candidate completion workflow", () => {
         barrierStatus: "opened",
       })
     );
+  });
+
+  it("preview-session summani hisoblaydi va LEDni kutmasdan javob qaytaradi", async () => {
+    const sessionId = await createSession("01L100AA");
+    await postExitForTest("WRONGP1");
+    const candidate = await findCandidateForTest("WRONGP1");
+    vi.mocked(ledService.showPayment).mockImplementationOnce(
+      () => new Promise<void>(() => undefined)
+    );
+    const response = await testRequest(app)
+      .post(`/api/exit-candidates/${candidate.id}/preview-session`)
+      .set("Authorization", authorizationHeader)
+      .send({ sessionId });
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ plateNumber: "01L100AA", amount: 10000 });
+    expect(ledService.showPayment).toHaveBeenCalledWith(
+      "01L100AA",
+      10000,
+      expect.objectContaining({ kind: "payment-preview" })
+    );
+  });
+
+  it("preview-session boshqa organization sessiyasini ko'rsatmaydi", async () => {
+    const foreignSessionId = await createSession("01L101AA", "regular", otherOrgId);
+    await postExitForTest("WRONGP2");
+    const candidate = await findCandidateForTest("WRONGP2");
+    const response = await testRequest(app)
+      .post(`/api/exit-candidates/${candidate.id}/preview-session`)
+      .set("Authorization", authorizationHeader)
+      .send({ sessionId: foreignSessionId });
+    expect(response.status).toBe(404);
+    expect(ledService.showPayment).not.toHaveBeenCalled();
+  });
+
+  it("next candidate LEDni darhol bir marta yuboradi va pollingda takrorlamaydi", async () => {
+    await createSession("01L102AA");
+    await postExitForTest("01L102AA");
+    vi.mocked(ledService.showPayment).mockImplementationOnce(
+      () => new Promise<void>(() => undefined)
+    );
+    const first = await testRequest(app)
+      .get("/api/exit-candidates/next")
+      .set("Authorization", authorizationHeader);
+    expect(first.status).toBe(200);
+    expect(ledService.showPayment).toHaveBeenCalledWith(
+      "01L102AA",
+      10000,
+      expect.objectContaining({ kind: "payment-preview" })
+    );
+    const second = await testRequest(app)
+      .get("/api/exit-candidates/next")
+      .set("Authorization", authorizationHeader);
+    expect(second.status).toBe(200);
+    expect(ledService.showPayment).toHaveBeenCalledTimes(1);
+  });
+
+  it("force-open faqat plate yuboradi va LEDni kutmaydi", async () => {
+    await postExitForTest("UNKNOWNP3");
+    const candidate = await findCandidateForTest("UNKNOWNP3");
+    vi.mocked(ledService.showPlateOnly).mockImplementationOnce(
+      () => new Promise<void>(() => undefined)
+    );
+    const response = await testRequest(app)
+      .post(`/api/exit-candidates/${candidate.id}/force-open`)
+      .set("Authorization", authorizationHeader);
+    expect(response.status).toBe(200);
+    expect(ledService.showPlateOnly).toHaveBeenCalledWith(
+      "UNKNOWNP3",
+      expect.objectContaining({ kind: "plate-preview" })
+    );
+    expect(ledService.showPayment).not.toHaveBeenCalled();
+  });
+
+  it("LED xatosi next, preview-session va force-open oqimlarini to'xtatmaydi", async () => {
+    const sessionId = await createSession("01L103AA");
+    await postExitForTest("01L103AA");
+    const candidate = await findCandidateForTest("01L103AA");
+    const paymentError = new Error("LED payment failed");
+    const plateError = new Error("LED plate failed");
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.mocked(ledService.showPayment).mockRejectedValueOnce(paymentError);
+    const next = await testRequest(app)
+      .get("/api/exit-candidates/next")
+      .set("Authorization", authorizationHeader);
+    expect(next.status).toBe(200);
+    vi.mocked(ledService.showPayment).mockRejectedValueOnce(paymentError);
+    const preview = await testRequest(app)
+      .post(`/api/exit-candidates/${candidate.id}/preview-session`)
+      .set("Authorization", authorizationHeader)
+      .send({ sessionId });
+    expect(preview.status).toBe(200);
+    await postExitForTest("UNKNOWNP4");
+    const forceCandidate = await findCandidateForTest("UNKNOWNP4");
+    vi.mocked(ledService.showPlateOnly).mockRejectedValueOnce(plateError);
+    const force = await testRequest(app)
+      .post(`/api/exit-candidates/${forceCandidate.id}/force-open`)
+      .set("Authorization", authorizationHeader);
+    expect(force.status).toBe(200);
+    await vi.waitFor(() => {
+      expect(consoleError).toHaveBeenCalledWith("LED_PAYMENT_FAILED", paymentError);
+      expect(consoleError).toHaveBeenCalledWith("LED_PLATE_FAILED", plateError);
+    });
   });
 
   it("LED va return timer sekin barrier tugashidan oldin boshlanadi", async () => {
