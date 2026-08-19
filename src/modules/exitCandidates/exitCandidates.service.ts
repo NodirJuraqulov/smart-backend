@@ -30,6 +30,7 @@ import {
 import { ApiError } from "@/utils/ApiError";
 import { resolveOrgIdRequired } from "@/utils/orgScope";
 import { ledService } from "@/modules/led/led.service";
+import { createLedDiagnosticTrace, logLedDiagnostic } from "@/modules/led/led.diagnostics";
 import {
   emitExitCandidateCreated,
   emitExitCandidateResolved,
@@ -777,6 +778,10 @@ export async function confirmExitCandidate(
   input: { sessionId?: number; paymentMethod?: PaymentMethod }
 ) {
   const orgId = resolveOrgIdRequired(actor, requestedOrgId);
+  const ledTrace = createLedDiagnosticTrace("payment", { orgId, candidateId });
+  logLedDiagnostic("LED_DIAG_PAYMENT_CONFIRM_FLOW_STARTED", ledTrace, {
+    actorId: actor.id,
+  });
   const transactionResult = await db.transaction(async (trx) => {
     const candidate = await trx<CandidateRow>("tb_exit_candidates")
       .where({ id: candidateId, org_id: orgId })
@@ -797,6 +802,11 @@ export async function confirmExitCandidate(
     if (!session || session.status !== "active") {
       throw new ApiError("Tanlangan faol sessiya topilmadi", 409);
     }
+    logLedDiagnostic("LED_DIAG_PAYMENT_PLATE_AVAILABLE", ledTrace, {
+      webhookEventId: candidate.webhook_event_id,
+      sessionId: session.id,
+      plateNumber: session.plate_number,
+    });
     if (
       session.session_source === "regular" &&
       input.paymentMethod !== "cash" &&
@@ -840,6 +850,16 @@ export async function confirmExitCandidate(
         }
       }
     }
+    logLedDiagnostic("LED_DIAG_PAYMENT_FINAL_AMOUNT_CALCULATED", ledTrace, {
+      webhookEventId: candidate.webhook_event_id,
+      sessionId: session.id,
+      plateNumber: session.plate_number,
+      amount,
+      durationMinutes,
+      sessionSource: session.session_source,
+      inpatientFreeExit,
+      clinicDiscountApplied: appliedClinicDiscount !== null,
+    });
 
     let payment: { id: number; amount: number; payment_method: PaymentMethod; paid_at: Date } | null = null;
     if (session.session_source === "regular" && !inpatientFreeExit) {
@@ -940,12 +960,27 @@ export async function confirmExitCandidate(
     };
   });
   try {
-    void ledService.showPayment(
-      transactionResult.session.plate_number ?? "",
-      transactionResult.session.amount
-    );
+    logLedDiagnostic("LED_DIAG_PAYMENT_BEFORE_SHOW_PAYMENT", ledTrace, {
+      sessionId: transactionResult.session.id,
+      plateNumber: transactionResult.session.plate_number,
+      amount: transactionResult.session.amount,
+    });
+    void ledService
+      .showPayment(
+        transactionResult.session.plate_number ?? "",
+        transactionResult.session.amount,
+        ledTrace
+      )
+      .catch((error) => {
+        console.error("LED_PAYMENT_FAILED", error);
+      });
   } catch (error) {
     console.error("LED_PAYMENT_FAILED", error);
+  }
+  try {
+    ledService.scheduleReturnToClock();
+  } catch (error) {
+    console.error("LED_CLOCK_SCHEDULE_FAILED", error);
   }
   const barrierStatus = await recordBarrierAttempt({
     actorId: actor.id,
@@ -989,18 +1024,12 @@ export async function confirmExitCandidate(
         : null,
     durationMinutes: transactionResult.session.duration_minutes,
   });
-  const result = {
+  return {
     candidate: await getCandidateByInternalId(orgId, candidateId),
     session: serializeSessionSummary(transactionResult.session),
     payment: transactionResult.payment,
     barrier_status: barrierStatus,
   };
-  try {
-    ledService.scheduleReturnToClock();
-  } catch (error) {
-    console.error("LED_CLOCK_SCHEDULE_FAILED", error);
-  }
-  return result;
 }
 
 export async function forceOpenExitCandidate(

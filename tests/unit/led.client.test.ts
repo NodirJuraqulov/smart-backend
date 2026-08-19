@@ -1,5 +1,5 @@
 import { EventEmitter } from "events";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   createConnection: vi.fn(),
@@ -14,6 +14,7 @@ vi.mock("net", () => ({
 vi.mock("@/config/env", () => ({
   env: {
     led: {
+      enabled: true,
       host: "192.168.1.157",
       port: 10000,
       timeoutMs: 3000,
@@ -44,16 +45,43 @@ beforeEach(() => {
   mocks.createConnection.mockReset().mockReturnValue(socket);
 });
 
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 describe("LED TCP client", () => {
   it("har packetdan keyin ACK kutib keyingi packetni yuboradi", async () => {
+    const consoleLog = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const result = sendPackets([Buffer.from([1]), Buffer.from([2])]);
     socket.emit("connect");
-    expect(socket.writes).toEqual([Buffer.from([1])]);
+    expect(socket.writes).toHaveLength(1);
+    expect(socket.writes[0]?.length).toBe(1);
+    expect(socket.writes[0]?.[0]).toBe(1);
     socket.emit("data", Buffer.from([0xaa]));
-    expect(socket.writes).toEqual([Buffer.from([1]), Buffer.from([2])]);
+    expect(socket.writes).toHaveLength(2);
+    expect(socket.writes[1]?.length).toBe(1);
+    expect(socket.writes[1]?.[0]).toBe(2);
     socket.emit("data", Buffer.from([0xaa]));
     await expect(result).resolves.toBeUndefined();
     expect(socket.end).toHaveBeenCalledTimes(1);
+    expect(consoleLog.mock.calls.map((call) => call[0])).toEqual([
+      "LED_DIAG_TCP_CONNECT_START",
+      "LED_DIAG_TCP_CONNECTED",
+      "LED_DIAG_PACKET_SEND_START",
+      "LED_DIAG_PACKET_WRITE_COMPLETE",
+      "LED_DIAG_ACK_RECEIVED",
+      "LED_DIAG_PACKET_SEND_START",
+      "LED_DIAG_PACKET_WRITE_COMPLETE",
+      "LED_DIAG_ACK_RECEIVED",
+      "LED_DIAG_TCP_SEND_FINISHED",
+    ]);
+    const connectPayload = JSON.parse(String(consoleLog.mock.calls[0][1])) as Record<string, unknown>;
+    expect(connectPayload).toMatchObject({
+      timestampMs: expect.any(Number),
+      timestampIso: expect.any(String),
+      elapsedMs: expect.any(Number),
+      traceId: expect.any(String),
+    });
   });
 
   it("ACK timeoutni LED_ACK_TIMEOUT bilan reject qiladi", async () => {

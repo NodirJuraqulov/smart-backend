@@ -135,6 +135,25 @@ describe("LED renderer, packets va service", () => {
     expect(mocks.sendPackets).toHaveBeenCalledTimes(2);
   });
 
+  it("clock scheduler keyingi minut boshida va keyin har minut boshida ishlaydi", async () => {
+    vi.setSystemTime(new Date("2026-08-19T09:23:47.250Z"));
+    const sentAt: number[] = [];
+    mocks.sendPackets.mockImplementation(async () => {
+      sentAt.push(Date.now());
+    });
+    const service = new LedService();
+    service.startClockScheduler();
+    await vi.advanceTimersByTimeAsync(12749);
+    expect(sentAt).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sentAt).toEqual([new Date("2026-08-19T09:24:00.000Z").getTime()]);
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(sentAt).toEqual([
+      new Date("2026-08-19T09:24:00.000Z").getTime(),
+      new Date("2026-08-19T09:25:00.000Z").getTime(),
+    ]);
+  });
+
   it("7. TCP xatosi yuqoriga otilmaydi va log qilinadi", async () => {
     const error = new Error("connection refused");
     mocks.sendPackets.mockRejectedValueOnce(error);
