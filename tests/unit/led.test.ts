@@ -86,6 +86,9 @@ describe("LED renderer, packets va service", () => {
     expect(PREFIX.length + ITEM_TEMPLATE.readUInt32LE(1)).toBe(785);
     const logicalPayload = buildLogicalPayload(Buffer.alloc(352, 0xff));
     expect(logicalPayload).toHaveLength(1457);
+    expect(logicalPayload.readUInt32LE(2)).toBe(1456);
+    expect(logicalPayload.subarray(2, 6).toString("hex")).toBe("b0050000");
+    expect(PREFIX.readUInt32LE(2)).toBe(784);
     expect(logicalPayload.readUInt32LE(26)).toBe(1432);
     expect(logicalPayload.readUInt16LE(33)).toBe(10);
     expect(logicalPayload.readUInt16LE(35)).toBe(63);
@@ -102,6 +105,13 @@ describe("LED renderer, packets va service", () => {
     const packetsFor1072 = buildPackets(Buffer.alloc(1072));
     expect(packetsFor1072).toHaveLength(3);
     expect(packetsFor1072.map((packet) => packet.readUInt32LE(16))).toEqual([512, 512, 48]);
+  });
+
+  it.each([184, 352, 512])("plane hajmi %i bo'lganda prefix va item uzunligi dinamik yoziladi", (planeSize) => {
+    const logicalPayload = buildLogicalPayload(Buffer.alloc(planeSize, 0xff));
+    expect(logicalPayload).toHaveLength(PREFIX.length + ITEM_TEMPLATE.length + planeSize * 4);
+    expect(logicalPayload.readUInt32LE(2)).toBe(logicalPayload.length - 1);
+    expect(logicalPayload.readUInt32LE(PREFIX.length + 1)).toBe(ITEM_TEMPLATE.length + planeSize * 4);
   });
 
   it("5. yangi payment oldingi clock qaytarish timerini bekor qiladi", async () => {
