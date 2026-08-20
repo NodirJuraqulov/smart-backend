@@ -12,6 +12,7 @@ import { confirmExitCandidate } from "@/modules/exitCandidates/exitCandidates.se
 import webhookRouter from "@/modules/webhook/webhook.routes";
 import { clearWebhookDedupeCache } from "@/modules/webhook/webhookIdempotency";
 import { openBarrier } from "@/modules/relay/relay.service";
+import { ledService } from "@/modules/led/led.service";
 import { emitExitCompleted, emitRelayFailed } from "@/websocket/socketServer";
 import {
   assertTestDatabase,
@@ -26,6 +27,14 @@ import {
 
 vi.mock("@/modules/relay/relay.service", () => ({
   openBarrier: vi.fn().mockResolvedValue({ status: "opened", success: true, detail: "opened" }),
+}));
+
+vi.mock("@/modules/led/led.service", () => ({
+  ledService: {
+    showPayment: vi.fn().mockResolvedValue(undefined),
+    showPlateOnly: vi.fn().mockResolvedValue(undefined),
+    scheduleReturnToClock: vi.fn(),
+  },
 }));
 
 vi.mock("@/websocket/socketServer", () => ({
@@ -173,6 +182,9 @@ beforeEach(async () => {
   openBarrierMock.mockReset();
   openBarrierMock.mockResolvedValue({ status: "opened", success: true, detail: "opened" });
   vi.clearAllMocks();
+  vi.mocked(ledService.showPayment).mockReset().mockResolvedValue(undefined);
+  vi.mocked(ledService.showPlateOnly).mockReset().mockResolvedValue(undefined);
+  vi.mocked(ledService.scheduleReturnToClock).mockReset();
 });
 
 afterEach(async () => {
@@ -208,6 +220,33 @@ describe("operatorsiz avtomatik chiqish", () => {
     expect(await candidates()).toHaveLength(0);
     expect(await testDb("tb_payments").where({ session_id: sessionId })).toHaveLength(0);
     expect(openBarrier).toHaveBeenCalledWith(orgId, "exit");
+    expect(ledService.showPlateOnly).toHaveBeenCalledWith("01V500AA");
+    expect(ledService.scheduleReturnToClock).toHaveBeenCalledTimes(1);
+    expect(openBarrierMock.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(ledService.showPlateOnly).mock.invocationCallOrder[0]
+    );
+    expect(vi.mocked(ledService.showPlateOnly).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(ledService.scheduleReturnToClock).mock.invocationCallOrder[0]
+    );
+  });
+
+  it("auto-exit LED xatosi asosiy oqimni to'xtatmaydi", async () => {
+    const sessionId = await createSession("01V501AA", "vip");
+    await createTestVipVehicle(orgId, "01V501AA");
+    const error = new Error("LED connection refused");
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.mocked(ledService.showPlateOnly).mockRejectedValueOnce(error);
+
+    const response = await postExit("01V501AA");
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ auto_exit: true, session_id: sessionId });
+    expect((await sessionById(sessionId)).status).toBe("completed");
+    expect(openBarrier).toHaveBeenCalledWith(orgId, "exit");
+    expect(ledService.scheduleReturnToClock).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => {
+      expect(consoleError).toHaveBeenCalledWith("LED_PLATE_FAILED", error);
+    });
   });
 
   it("2. faol statsionar mashina operatorsiz avtomatik chiqadi", async () => {
@@ -389,6 +428,9 @@ describe("operatorsiz avtomatik chiqish", () => {
     expect((await postExit("01V950AA")).body.auto_exit).toBe(true);
     await expireDedupeWindow();
     await shiftAutoExitLog(sessionId, 2);
+    vi.mocked(ledService.showPlateOnly).mockClear();
+    vi.mocked(ledService.showPayment).mockClear();
+    vi.mocked(ledService.scheduleReturnToClock).mockClear();
 
     const second = await postExit("01V950AA");
     expect(second.body).toMatchObject({
@@ -399,6 +441,9 @@ describe("operatorsiz avtomatik chiqish", () => {
 
     expect(await candidates()).toHaveLength(0);
     expect(await autoExitLogs(sessionId)).toHaveLength(1);
+    expect(ledService.showPlateOnly).not.toHaveBeenCalled();
+    expect(ledService.showPayment).not.toHaveBeenCalled();
+    expect(ledService.scheduleReturnToClock).not.toHaveBeenCalled();
 
     const event = await testDb("tb_webhook_events").where({ org_id: orgId }).orderBy("id", "desc").first();
     expect(event).toMatchObject({
@@ -440,11 +485,17 @@ describe("operatorsiz avtomatik chiqish", () => {
     expect(await autoExitLogs(sessionId)).toHaveLength(0);
 
     await expireDedupeWindow();
+    vi.mocked(ledService.showPlateOnly).mockClear();
+    vi.mocked(ledService.showPayment).mockClear();
+    vi.mocked(ledService.scheduleReturnToClock).mockClear();
     const second = await postExit("01N600AA");
     expect(second.body).toMatchObject({
       ignored: true,
       reason: "resolved_recently_ignored",
     });
     expect(await candidates()).toHaveLength(1);
+    expect(ledService.showPlateOnly).not.toHaveBeenCalled();
+    expect(ledService.showPayment).not.toHaveBeenCalled();
+    expect(ledService.scheduleReturnToClock).not.toHaveBeenCalled();
   });
 });

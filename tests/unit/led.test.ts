@@ -246,20 +246,15 @@ describe("LED renderer, packets va service", () => {
 
   it("return timer va scheduler yaqin vaqtda clockni ikki marta yubormaydi", async () => {
     vi.setSystemTime(new Date("2026-08-19T09:23:57.000Z"));
-    const consoleLog = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const service = new LedService();
     await service.showPayment("01A100AA", 5000);
     service.scheduleReturnToClock();
     service.startClockScheduler();
     await vi.advanceTimersByTimeAsync(3000);
     expect(mocks.sendPackets).toHaveBeenCalledTimes(2);
-    expect(consoleLog).toHaveBeenCalledWith(
-      "CLOCK_DUPLICATE_SEND_SKIPPED",
-      expect.any(String)
-    );
   });
 
-  it("clock va payment transition markerlarini yozadi", async () => {
+  it("muvaffaqiyatli LED operatsiyalari batafsil log yozmaydi", async () => {
     const consoleLog = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const service = new LedService();
     await service.showPayment("01A100AA", 5000);
@@ -267,18 +262,7 @@ describe("LED renderer, packets va service", () => {
     await service.showPayment("01B200BB", 7000);
     service.scheduleReturnToClock();
     await vi.advanceTimersByTimeAsync(3000);
-    const markers = consoleLog.mock.calls.map((call) => call[0]);
-    expect(markers).toEqual(
-      expect.arrayContaining([
-        "PAYMENT_MODE_ENTERED",
-        "RETURN_TO_CLOCK_TIMER_STARTED",
-        "RETURN_TO_CLOCK_TIMER_CANCELLED",
-        "RETURN_TO_CLOCK_TIMER_FIRED",
-        "CLOCK_MODE_ENTERED",
-        "CLOCK_IMMEDIATE_SHOW_START",
-        "CLOCK_IMMEDIATE_SHOW_FINISHED",
-      ])
-    );
+    expect(consoleLog).not.toHaveBeenCalled();
   });
 
   it("6. clock scheduler faqat clock holatida yuboradi", async () => {

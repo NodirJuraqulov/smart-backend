@@ -9,6 +9,7 @@ import {
 import { calculateDurationMinutes, displayPlateNumber } from "@/modules/parking/parking.service";
 import { INSIDE_SESSION_STATUSES } from "@/modules/parking/sessionStatus";
 import { BarrierStatus } from "@/modules/relay/relay.service";
+import { ledService } from "@/modules/led/led.service";
 import { RESOLVED_EXIT_CANDIDATE_COOLDOWN_MS } from "@/modules/webhook/webhookRules";
 import { emitExitCompleted, emitRelayFailed } from "@/websocket/socketServer";
 import { recordBarrierAttempt } from "./exitCandidates.service";
@@ -16,6 +17,21 @@ import { recordBarrierAttempt } from "./exitCandidates.service";
 export type AutoExitReason = "inpatient" | "vip" | "clinic_discount_100";
 
 const FULL_DISCOUNT_PERCENT = 100;
+
+function completeAutoExitLed(plateNumber: string): void {
+  try {
+    void ledService.showPlateOnly(plateNumber).catch((error) => {
+      console.error("LED_PLATE_FAILED", error);
+    });
+  } catch (error) {
+    console.error("LED_PLATE_FAILED", error);
+  }
+  try {
+    ledService.scheduleReturnToClock();
+  } catch (error) {
+    console.error("LED_CLOCK_SCHEDULE_FAILED", error);
+  }
+}
 
 interface AutoExitEligibility {
   eligible: boolean;
@@ -211,6 +227,8 @@ export async function performAutoExit(input: {
     sessionSource: session.session_source,
     durationMinutes,
   });
+
+  completeAutoExitLed(plateNumber);
 
   return { sessionId: session.id, plateNumber, reason: input.reason, barrierStatus };
 }

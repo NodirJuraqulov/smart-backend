@@ -23,11 +23,6 @@ import {
   getPlateFormatValidationDecision,
   validateOrTrackPlateFormat,
 } from "@/modules/plateFormats/plateFormatCheck.service";
-import {
-  ensureExitWebhookDiagnosticTrace,
-  logLedDiagnostic,
-} from "@/modules/led/led.diagnostics";
-import { ledService } from "@/modules/led/led.service";
 
 const DEFAULT_CAMERA_BRAND = "hikvision";
 
@@ -67,12 +62,6 @@ async function processCameraWebhook(
 ) {
   const direction = req.params.direction as "entry" | "exit";
   const orgId = req.webhookOrgId!;
-  const ledTrace = direction === "exit"
-    ? ensureExitWebhookDiagnosticTrace(req, {
-        method: req.method,
-        endpoint: cameraBrand,
-      })
-    : null;
 
   await touchLastWebhookAt(orgId, direction);
 
@@ -128,23 +117,6 @@ async function processCameraWebhook(
   }
   const plateNumber = normalizeDetectedPlate(event.plateNumber);
   event = { ...event, plateNumber };
-  if (ledTrace) {
-    logLedDiagnostic("LED_DIAG_EXIT_PLATE_AVAILABLE", ledTrace, {
-      orgId,
-      cameraBrand,
-      plateNumber,
-      cameraTimestamp: event.timestamp?.toISOString() ?? null,
-    });
-  }
-  if (direction === "exit" && plateNumber && ledTrace) {
-    try {
-      void ledService.showPlateOnly(plateNumber, ledTrace).catch((error) => {
-        console.error("LED_PLATE_FAILED", error);
-      });
-    } catch (error) {
-      console.error("LED_PLATE_FAILED", error);
-    }
-  }
 
   console.log(
     `Camera event: brand=${cameraBrand} org_id=${orgId} direction=${direction} plate=${plateNumber ?? "null"} ` +
@@ -350,15 +322,6 @@ async function processCameraWebhook(
       detectedPlate: plateNumber,
       confidence: event.confidence,
     });
-    if (ledTrace) {
-      logLedDiagnostic("LED_DIAG_EXIT_CANDIDATE_RESULT", ledTrace, {
-        orgId,
-        webhookEventId: registration.eventId,
-        candidateId: result.skipped ? null : result.candidate.id,
-        plateNumber,
-        skipped: result.skipped,
-      });
-    }
     if (result.skipped) {
       res.status(200).json({
         ok: true,

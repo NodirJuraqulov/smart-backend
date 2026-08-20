@@ -64,37 +64,20 @@ describe("LED TCP client", () => {
     socket.emit("data", Buffer.from([0xaa]));
     await expect(result).resolves.toBeUndefined();
     expect(socket.end).toHaveBeenCalledTimes(1);
-    expect(consoleLog.mock.calls.map((call) => call[0])).toEqual([
-      "LED_DIAG_TCP_CONNECT_START",
-      "LED_DIAG_TCP_CONNECTED",
-      "LED_DIAG_PACKET_SEND_START",
-      "LED_DIAG_PACKET_WRITE_COMPLETE",
-      "LED_DIAG_ACK_RECEIVED",
-      "LED_DIAG_PACKET_SEND_START",
-      "LED_DIAG_PACKET_WRITE_COMPLETE",
-      "LED_DIAG_ACK_RECEIVED",
-      "LED_DIAG_TCP_SEND_FINISHED",
-    ]);
-    const connectPayload = JSON.parse(String(consoleLog.mock.calls[0][1])) as Record<string, unknown>;
-    expect(connectPayload).toMatchObject({
-      timestampMs: expect.any(Number),
-      timestampIso: expect.any(String),
-      elapsedMs: expect.any(Number),
-      traceId: expect.any(String),
-    });
+    expect(consoleLog).not.toHaveBeenCalled();
   });
 
   it("ACK timeoutni LED_ACK_TIMEOUT bilan reject qiladi", async () => {
     const result = sendPackets([Buffer.from([1])]);
     socket.emit("connect");
     socket.emit("timeout");
-    await expect(result).rejects.toMatchObject<Partial<LedClientError>>({ code: "LED_ACK_TIMEOUT" });
+    await expect(result).rejects.toMatchObject({ code: "LED_ACK_TIMEOUT" } satisfies Partial<LedClientError>);
     expect(socket.destroy).toHaveBeenCalledTimes(1);
   });
 
   it("connection refusedni LED_SEND_FAILED bilan reject qiladi", async () => {
     const result = sendPackets([Buffer.from([1])]);
     socket.emit("error", new Error("connection refused"));
-    await expect(result).rejects.toMatchObject<Partial<LedClientError>>({ code: "LED_SEND_FAILED" });
+    await expect(result).rejects.toMatchObject({ code: "LED_SEND_FAILED" } satisfies Partial<LedClientError>);
   });
 });

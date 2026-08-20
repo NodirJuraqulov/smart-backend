@@ -30,7 +30,6 @@ import {
 import { ApiError } from "@/utils/ApiError";
 import { resolveOrgIdRequired } from "@/utils/orgScope";
 import { ledService } from "@/modules/led/led.service";
-import { createLedDiagnosticTrace, logLedDiagnostic } from "@/modules/led/led.diagnostics";
 import {
   emitExitCandidateCreated,
   emitExitCandidateResolved,
@@ -128,14 +127,9 @@ const BARRIER_AUDIT_ACTIONS = [
 ];
 const lastLedCandidatePreviewByOrg = new Map<number, number>();
 
-function showLedPaymentPreview(
-  plateNumber: string,
-  amount: number,
-  metadata: Record<string, unknown>
-): void {
-  const trace = createLedDiagnosticTrace("payment-preview", metadata);
+function showLedPaymentPreview(plateNumber: string, amount: number): void {
   try {
-    void ledService.showPayment(plateNumber, amount, trace).catch((error) => {
+    void ledService.showPayment(plateNumber, amount).catch((error) => {
       console.error("LED_PAYMENT_FAILED", error);
     });
   } catch (error) {
@@ -143,10 +137,9 @@ function showLedPaymentPreview(
   }
 }
 
-function showLedPlatePreview(plateNumber: string, metadata: Record<string, unknown>): void {
-  const trace = createLedDiagnosticTrace("plate-preview", metadata);
+function showLedPlatePreview(plateNumber: string): void {
   try {
-    void ledService.showPlateOnly(plateNumber, trace).catch((error) => {
+    void ledService.showPlateOnly(plateNumber).catch((error) => {
       console.error("LED_PLATE_FAILED", error);
     });
   } catch (error) {
@@ -656,6 +649,8 @@ export async function createExitCandidate(input: {
       },
     });
   }
+  const ledPlateNumber = candidate.detected_plate ?? candidate.suggested_plate;
+  if (ledPlateNumber) showLedPlatePreview(displayPlateNumber(ledPlateNumber));
   return { ...result, candidate };
 }
 
@@ -735,12 +730,7 @@ export async function getNextExitCandidate(actor: AuthTokenPayload, requestedOrg
       lastLedCandidatePreviewByOrg.get(orgId) !== candidate.id
     ) {
       lastLedCandidatePreviewByOrg.set(orgId, candidate.id);
-      showLedPaymentPreview(displayPlateNumber(session.plate_number), preview.amount, {
-        trigger: "next-exit-candidate",
-        orgId,
-        candidateId: candidate.id,
-        sessionId: session.id,
-      });
+      showLedPaymentPreview(displayPlateNumber(session.plate_number), preview.amount);
     }
     matchedSession = {
       session_id: session.id,
@@ -848,12 +838,7 @@ export async function previewExitCandidateSession(
   const preview = calculateSessionTariffPreview(session, new Date());
   const amount = preview.amount ?? 0;
   const plateNumber = displayPlateNumber(session.plate_number);
-  showLedPaymentPreview(plateNumber, amount, {
-    trigger: "preview-session",
-    orgId,
-    candidateId,
-    sessionId,
-  });
+  showLedPaymentPreview(plateNumber, amount);
   return { plateNumber, amount };
 }
 
@@ -864,10 +849,6 @@ export async function confirmExitCandidate(
   input: { sessionId?: number; paymentMethod?: PaymentMethod }
 ) {
   const orgId = resolveOrgIdRequired(actor, requestedOrgId);
-  const ledTrace = createLedDiagnosticTrace("payment", { orgId, candidateId });
-  logLedDiagnostic("LED_DIAG_PAYMENT_CONFIRM_FLOW_STARTED", ledTrace, {
-    actorId: actor.id,
-  });
   const transactionResult = await db.transaction(async (trx) => {
     const candidate = await trx<CandidateRow>("tb_exit_candidates")
       .where({ id: candidateId, org_id: orgId })
@@ -888,11 +869,6 @@ export async function confirmExitCandidate(
     if (!session || session.status !== "active") {
       throw new ApiError("Tanlangan faol sessiya topilmadi", 409);
     }
-    logLedDiagnostic("LED_DIAG_PAYMENT_PLATE_AVAILABLE", ledTrace, {
-      webhookEventId: candidate.webhook_event_id,
-      sessionId: session.id,
-      plateNumber: session.plate_number,
-    });
     if (
       session.session_source === "regular" &&
       input.paymentMethod !== "cash" &&
@@ -936,17 +912,6 @@ export async function confirmExitCandidate(
         }
       }
     }
-    logLedDiagnostic("LED_DIAG_PAYMENT_FINAL_AMOUNT_CALCULATED", ledTrace, {
-      webhookEventId: candidate.webhook_event_id,
-      sessionId: session.id,
-      plateNumber: session.plate_number,
-      amount,
-      durationMinutes,
-      sessionSource: session.session_source,
-      inpatientFreeExit,
-      clinicDiscountApplied: appliedClinicDiscount !== null,
-    });
-
     let payment: { id: number; amount: number; payment_method: PaymentMethod; paid_at: Date } | null = null;
     if (session.session_source === "regular" && !inpatientFreeExit) {
       const [paymentId] = await trx("tb_payments").insert({
@@ -1046,16 +1011,10 @@ export async function confirmExitCandidate(
     };
   });
   try {
-    logLedDiagnostic("LED_DIAG_PAYMENT_BEFORE_SHOW_PAYMENT", ledTrace, {
-      sessionId: transactionResult.session.id,
-      plateNumber: transactionResult.session.plate_number,
-      amount: transactionResult.session.amount,
-    });
     void ledService
       .showPayment(
         transactionResult.session.plate_number ?? "",
-        transactionResult.session.amount,
-        ledTrace
+        transactionResult.session.amount
       )
       .catch((error) => {
         console.error("LED_PAYMENT_FAILED", error);
@@ -1063,11 +1022,6 @@ export async function confirmExitCandidate(
   } catch (error) {
     console.error("LED_PAYMENT_FAILED", error);
   }
-  logLedDiagnostic("PAYMENT_CONFIRMED", ledTrace, {
-    sessionId: transactionResult.session.id,
-    plateNumber: transactionResult.session.plate_number,
-    amount: transactionResult.session.amount,
-  });
   scheduleLedReturnToClock();
   const barrierStatus = await recordBarrierAttempt({
     actorId: actor.id,
@@ -1175,11 +1129,7 @@ export async function forceOpenExitCandidate(
     });
     return resolvedPlateNumber;
   });
-  showLedPlatePreview(plateNumber, {
-    trigger: "force-open",
-    orgId,
-    candidateId,
-  });
+  showLedPlatePreview(plateNumber);
   scheduleLedReturnToClock();
   const barrierStatus = await recordBarrierAttempt({
     actorId: actor.id,

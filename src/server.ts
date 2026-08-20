@@ -14,7 +14,6 @@ import { scheduleInpatientVehiclesExpiryJob } from "./jobs/inpatientVehiclesExpi
 import { initSocketServer } from "./websocket/socketServer";
 import { resumePlateFormatChecks } from "./modules/plateFormats/plateFormatCheck.service";
 import { ledService } from "./modules/led/led.service";
-import { createLedDiagnosticTrace } from "./modules/led/led.diagnostics";
 
 process.on("uncaughtException", (error) => {
   console.error("KUTILMAGAN XATO:", error);
@@ -42,8 +41,7 @@ httpServer.listen(env.port, () => {
   console.log(`Server running on port ${env.port} [${env.nodeEnv}]`);
   if (env.led.enabled) {
     try {
-      const trace = createLedDiagnosticTrace("clock", { trigger: "startup" });
-      void ledService.showClock(trace).catch((error) => {
+      void ledService.showClock().catch((error) => {
         console.error("LED_START_FAILED", error);
       });
     } catch (error) {
