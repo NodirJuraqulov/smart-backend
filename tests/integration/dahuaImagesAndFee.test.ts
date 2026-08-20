@@ -71,7 +71,7 @@ function dahuaPayload(plateNumber: string) {
   };
 }
 
-async function postCamera(direction: "entry" | "exit", body: unknown) {
+async function postCamera(direction: "entry" | "exit", body: string | object) {
   return request(server)
     .post(`/api/webhook/camera/${webhookToken}/${direction}`)
     .set("Content-Type", "application/json")

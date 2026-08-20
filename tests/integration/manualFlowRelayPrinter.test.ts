@@ -23,7 +23,7 @@ vi.mock("@/modules/relay/relay.service", () => ({
   openBarrier: vi.fn().mockResolvedValue({ status: "opened", success: true }),
 }));
 vi.mock("@/modules/printer/printer.service", () => ({
-  printReceipt: vi.fn().mockResolvedValue({ status: "opened", success: true }),
+  printReceipt: vi.fn().mockResolvedValue(true),
 }));
 vi.mock("@/websocket/socketServer", () => ({
   emitEntryDetected: vi.fn(),
@@ -121,7 +121,7 @@ describe("POST /api/parking/exit/manual", () => {
 
   it("rele va printer xato bersa ham — sessiya baribir yopiladi", async () => {
     vi.mocked(openBarrier).mockResolvedValueOnce({ status: "failed", success: false });
-    vi.mocked(printReceipt).mockResolvedValueOnce({ status: "failed", success: false });
+    vi.mocked(printReceipt).mockResolvedValueOnce(false);
     await createTestActiveSession(orgId, "01H444AA");
 
     const res = await request(buildApp())

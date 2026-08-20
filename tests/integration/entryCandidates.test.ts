@@ -62,16 +62,20 @@ let jpegBase64: string;
 
 interface EntryCandidateRow {
   id: number;
+  org_id: number;
   detected_plate: string | null;
   status: string;
 }
 
 interface EntrySessionRow {
   id: number;
+  org_id: number;
+  plate_number: string;
   status: string;
 }
 
 interface CameraRelayPasswordRow {
+  id: number;
   entry_camera_relay_password_encrypted: string | null;
 }
 

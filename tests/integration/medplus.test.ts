@@ -112,6 +112,7 @@ async function confirmCandidate(candidateId: number, paymentMethod = "cash"): Pr
 
 interface ActivityLogRow {
   action: string;
+  target_id: number;
   details: Record<string, unknown> | null;
 }
 

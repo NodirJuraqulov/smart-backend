@@ -64,10 +64,13 @@ jobs:
         run: npm test
 
       - name: TypeScript tekshiruvi
-        run: npx tsc --noEmit
+        run: npm run typecheck
+
+      - name: Test TypeScript tekshiruvi
+        run: npm run typecheck:tests
 
       - name: Lint tekshiruvi
-        run: npx oxlint src tests
+        run: npm run lint
 
       - name: Build
         run: npm run build

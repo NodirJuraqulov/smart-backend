@@ -24,7 +24,7 @@ vi.mock("node-thermal-printer", () => ({
   types: { EPSON: "epson" },
 }));
 
-const { printReceipt } = await import("@/modules/printer/printer.service");
+import { printReceipt } from "@/modules/printer/printer.service";
 
 const receiptData = {
   orgName: "Test Stoyanka",

@@ -22,7 +22,7 @@ vi.mock("@/modules/relay/relay.service", () => ({
   openBarrier: vi.fn().mockResolvedValue({ status: "opened", success: true }),
 }));
 vi.mock("@/modules/printer/printer.service", () => ({
-  printReceipt: vi.fn().mockResolvedValue({ status: "opened", success: true }),
+  printReceipt: vi.fn().mockResolvedValue(true),
 }));
 vi.mock("@/websocket/socketServer", () => ({
   emitExitCompleted: vi.fn(),
@@ -131,7 +131,7 @@ describe("POST /api/parking/sessions/:id/confirm-cash-payment", () => {
   });
 
   it("printer xato bersa ham — jarayon muvaffaqiyatli yakunlanadi", async () => {
-    vi.mocked(printReceipt).mockResolvedValueOnce({ status: "failed", success: false });
+    vi.mocked(printReceipt).mockResolvedValueOnce(false);
     const sessionId = await createTestAwaitingPaymentSession(orgId, "01E666AA");
 
     const res = await request(buildApp())

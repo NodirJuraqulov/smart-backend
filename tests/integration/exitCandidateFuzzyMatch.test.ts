@@ -50,6 +50,7 @@ vi.mock("@/websocket/socketServer", () => {
 
 interface CandidateRecord {
   id: number;
+  org_id: number;
   webhook_event_id: number;
   detected_plate: string | null;
   matched_session_id: number | null;

@@ -50,6 +50,7 @@ vi.mock("@/websocket/socketServer", () => ({
 
 interface SessionRow {
   id: number;
+  org_id: number;
   plate_number: string;
   status: string;
 }

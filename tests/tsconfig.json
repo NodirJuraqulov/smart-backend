@@ -4,9 +4,6 @@
     "noEmit": true,
     "rootDir": ".."
   },
-  "files": [
-    "../src/types/express.d.ts",
-    "./integration/exitCandidates.test.ts"
-  ],
+  "include": ["../src/**/*.ts", "./**/*.ts"],
   "exclude": ["../node_modules", "../dist"]
 }
