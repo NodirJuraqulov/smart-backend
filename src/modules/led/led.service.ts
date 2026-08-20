@@ -19,6 +19,8 @@ export class LedService {
   private clockTimer: NodeJS.Timeout | null = null;
   private sendQueue: Promise<void> = Promise.resolve();
   private pendingSendCount = 0;
+  private lastClockRequestAtMs: number | null = null;
+  private lastClockRequestGeneration: number | null = null;
 
   private logError(error: unknown): void {
     const code = error instanceof LedClientError ? error.code : "LED_SEND_FAILED";
@@ -41,7 +43,7 @@ export class LedService {
   private send(
     plane1: Buffer,
     trace: LedDiagnosticTrace,
-    canSend: () => boolean = () => true
+    getSkipMarker: () => string | null = () => null
   ): Promise<boolean> {
     const packets = buildPackets(buildLogicalPayload(plane1));
     this.pendingSendCount += 1;
@@ -50,8 +52,9 @@ export class LedService {
       packetCount: packets.length,
     });
     const operation = this.sendQueue.then(async () => {
-      if (!canSend()) {
-        logLedDiagnostic("CLOCK_STALE_SEND_SKIPPED", trace, {
+      const skipMarker = getSkipMarker();
+      if (skipMarker) {
+        logLedDiagnostic(skipMarker, trace, {
           queueDepth: this.pendingSendCount,
           queueWaitMs: Date.now() - queuedAtMs,
         });
@@ -84,6 +87,10 @@ export class LedService {
     return this.state === "clock" && this.modeGeneration === generation;
   }
 
+  private isCurrentPaymentGeneration(generation: number): boolean {
+    return this.state === "payment" && this.modeGeneration === generation;
+  }
+
   private async sendClock(trace: LedDiagnosticTrace, generation: number): Promise<boolean> {
     if (!this.isCurrentClockGeneration(generation)) {
       logLedDiagnostic("CLOCK_STALE_SEND_SKIPPED", trace, {
@@ -93,6 +100,20 @@ export class LedService {
       });
       return false;
     }
+    const requestedAtMs = Date.now();
+    if (
+      this.lastClockRequestGeneration === generation &&
+      this.lastClockRequestAtMs !== null &&
+      requestedAtMs - this.lastClockRequestAtMs < 1000
+    ) {
+      logLedDiagnostic("CLOCK_DUPLICATE_SEND_SKIPPED", trace, {
+        generation,
+        sinceLastClockRequestMs: requestedAtMs - this.lastClockRequestAtMs,
+      });
+      return false;
+    }
+    this.lastClockRequestAtMs = requestedAtMs;
+    this.lastClockRequestGeneration = generation;
     try {
       const time = DateTime.now().setZone(env.platformDefaultTimezone).toFormat("HH:mm");
       const renderStartedAtMs = logLedDiagnostic("LED_DIAG_CLOCK_RENDER_START", trace, { time });
@@ -102,7 +123,9 @@ export class LedService {
         renderElapsedMs: Date.now() - renderStartedAtMs,
       });
       const plane1 = pixelsToPlane1(pixels);
-      const sent = await this.send(plane1, trace, () => this.isCurrentClockGeneration(generation));
+      const sent = await this.send(plane1, trace, () =>
+        this.isCurrentClockGeneration(generation) ? null : "CLOCK_STALE_SEND_SKIPPED"
+      );
       if (sent) {
         logLedDiagnostic("LED_DIAG_CLOCK_OPERATION_FINISHED", trace, { time });
       }
@@ -132,7 +155,7 @@ export class LedService {
     });
   }
 
-  private enterPaymentMode(trace: LedDiagnosticTrace, details: Record<string, unknown>): void {
+  private enterPaymentMode(trace: LedDiagnosticTrace, details: Record<string, unknown>): number {
     this.clearReturnToClockTimer();
     this.modeGeneration += 1;
     this.state = "payment";
@@ -140,6 +163,7 @@ export class LedService {
       ...details,
       generation: this.modeGeneration,
     });
+    return this.modeGeneration;
   }
 
   async showClock(
@@ -165,7 +189,7 @@ export class LedService {
       amount,
     });
     if (!env.led.enabled) return;
-    this.enterPaymentMode(trace, { plateNumber: plate, amount });
+    const generation = this.enterPaymentMode(trace, { plateNumber: plate, amount });
     try {
       const normalizedPlate = plate.toUpperCase().replace(/\s/g, "").slice(0, 10);
       const normalizedAmount = String(amount).replace(/\D/g, "");
@@ -180,11 +204,15 @@ export class LedService {
         renderElapsedMs: Date.now() - renderStartedAtMs,
       });
       const plane1 = pixelsToPlane1(pixels);
-      await this.send(plane1, trace);
-      logLedDiagnostic("LED_DIAG_PAYMENT_OPERATION_FINISHED", trace, {
-        plateNumber: normalizedPlate,
-        amount: normalizedAmount,
-      });
+      const sent = await this.send(plane1, trace, () =>
+        this.isCurrentPaymentGeneration(generation) ? null : "PAYMENT_STALE_SEND_SKIPPED"
+      );
+      if (sent) {
+        logLedDiagnostic("LED_DIAG_PAYMENT_OPERATION_FINISHED", trace, {
+          plateNumber: normalizedPlate,
+          amount: normalizedAmount,
+        });
+      }
     } catch (error) {
       logLedDiagnostic("LED_DIAG_PAYMENT_OPERATION_FAILED", trace, {
         error: error instanceof Error ? error.message : String(error),
@@ -203,7 +231,10 @@ export class LedService {
       plateNumber: plate,
     });
     if (!env.led.enabled) return;
-    this.enterPaymentMode(trace, { plateNumber: plate, displayType: "plate-only" });
+    const generation = this.enterPaymentMode(trace, {
+      plateNumber: plate,
+      displayType: "plate-only",
+    });
     try {
       const normalizedPlate = plate.toUpperCase().replace(/\s/g, "").slice(0, 10);
       const renderStartedAtMs = logLedDiagnostic("LED_DIAG_PLATE_RENDER_START", trace, {
@@ -215,10 +246,14 @@ export class LedService {
         renderElapsedMs: Date.now() - renderStartedAtMs,
       });
       const plane1 = pixelsToPlane1(pixels);
-      await this.send(plane1, trace);
-      logLedDiagnostic("LED_DIAG_PLATE_OPERATION_FINISHED", trace, {
-        plateNumber: normalizedPlate,
-      });
+      const sent = await this.send(plane1, trace, () =>
+        this.isCurrentPaymentGeneration(generation) ? null : "PAYMENT_STALE_SEND_SKIPPED"
+      );
+      if (sent) {
+        logLedDiagnostic("LED_DIAG_PLATE_OPERATION_FINISHED", trace, {
+          plateNumber: normalizedPlate,
+        });
+      }
     } catch (error) {
       logLedDiagnostic("LED_DIAG_PLATE_OPERATION_FAILED", trace, {
         error: error instanceof Error ? error.message : String(error),

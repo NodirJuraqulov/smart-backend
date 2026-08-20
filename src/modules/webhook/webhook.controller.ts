@@ -27,6 +27,7 @@ import {
   ensureExitWebhookDiagnosticTrace,
   logLedDiagnostic,
 } from "@/modules/led/led.diagnostics";
+import { ledService } from "@/modules/led/led.service";
 
 const DEFAULT_CAMERA_BRAND = "hikvision";
 
@@ -134,6 +135,15 @@ async function processCameraWebhook(
       plateNumber,
       cameraTimestamp: event.timestamp?.toISOString() ?? null,
     });
+  }
+  if (direction === "exit" && plateNumber && ledTrace) {
+    try {
+      void ledService.showPlateOnly(plateNumber, ledTrace).catch((error) => {
+        console.error("LED_PLATE_FAILED", error);
+      });
+    } catch (error) {
+      console.error("LED_PLATE_FAILED", error);
+    }
   }
 
   console.log(

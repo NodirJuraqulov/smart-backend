@@ -154,6 +154,14 @@ function showLedPlatePreview(plateNumber: string, metadata: Record<string, unkno
   }
 }
 
+function scheduleLedReturnToClock(): void {
+  try {
+    ledService.scheduleReturnToClock();
+  } catch (error) {
+    console.error("LED_CLOCK_SCHEDULE_FAILED", error);
+  }
+}
+
 function calculateSessionTariffPreview(session: SessionSummary, at: Date) {
   const durationMinutes = calculateDurationMinutes(new Date(session.entered_at), at);
   return {
@@ -1060,11 +1068,7 @@ export async function confirmExitCandidate(
     plateNumber: transactionResult.session.plate_number,
     amount: transactionResult.session.amount,
   });
-  try {
-    ledService.scheduleReturnToClock();
-  } catch (error) {
-    console.error("LED_CLOCK_SCHEDULE_FAILED", error);
-  }
+  scheduleLedReturnToClock();
   const barrierStatus = await recordBarrierAttempt({
     actorId: actor.id,
     orgId,
@@ -1126,26 +1130,16 @@ export async function forceOpenExitCandidate(
   if (!FORCE_OPEN_REASONS.has(reason)) throw new ApiError("Majburiy ochish sababi noto'g'ri", 400);
   const note = input.note?.trim().slice(0, 500) || null;
   const enteredPlate = input.enteredPlate ? normalizePlate(input.enteredPlate) || null : null;
-  await db.transaction(async (trx) => {
+  const plateNumber = await db.transaction(async (trx) => {
     const candidate = await trx<CandidateRow>("tb_exit_candidates")
       .where({ id: candidateId, org_id: orgId })
       .forUpdate()
       .first();
     if (!candidate) throw new ApiError("Chiqish nomzodi topilmadi", 404);
     if (candidate.status !== "pending") throw new ApiError("Bu chiqish allaqachon hal qilingan", 409);
-    const plateNumber = displayPlateNumber(
+    const resolvedPlateNumber = displayPlateNumber(
       enteredPlate ?? candidate.detected_plate ?? candidate.suggested_plate
     );
-    showLedPlatePreview(plateNumber, {
-      trigger: "force-open",
-      orgId,
-      candidateId,
-    });
-    try {
-      ledService.scheduleReturnToClock();
-    } catch (error) {
-      console.error("LED_CLOCK_SCHEDULE_FAILED", error);
-    }
     const event = await trx("tb_webhook_events")
       .select("overview_image_path", "vehicle_image_path")
       .where({ id: candidate.webhook_event_id, org_id: orgId })
@@ -1179,7 +1173,14 @@ export async function forceOpenExitCandidate(
         exitImageRef: event?.overview_image_path ?? event?.vehicle_image_path ?? null,
       }),
     });
+    return resolvedPlateNumber;
   });
+  showLedPlatePreview(plateNumber, {
+    trigger: "force-open",
+    orgId,
+    candidateId,
+  });
+  scheduleLedReturnToClock();
   const barrierStatus = await recordBarrierAttempt({
     actorId: actor.id,
     orgId,

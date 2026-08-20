@@ -284,6 +284,34 @@ afterEach(async () => {
 afterAll(closeDb);
 
 describe("exit candidate completion workflow", () => {
+  it("exit xom plate aniqlanganda LED candidate yaratilishidan oldin boshlanadi", async () => {
+    let releasePlate = (): void => undefined;
+    vi.mocked(ledService.showPlateOnly).mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releasePlate = resolve;
+        })
+    );
+    const response = await postExitForTest("01W100AA");
+    expect(response.status).toBe(200);
+    expect(ledService.showPlateOnly).toHaveBeenCalledWith(
+      "01W100AA",
+      expect.objectContaining({ kind: "exit-webhook" })
+    );
+    expect(vi.mocked(ledService.showPlateOnly).mock.invocationCallOrder[0]).toBeLessThan(
+      exitCandidateCreatedMock.mock.invocationCallOrder[0]
+    );
+    expect(await findCandidateForTest("01W100AA")).toBeDefined();
+    releasePlate();
+  });
+
+  it("exit webhook plate topmasa LEDga hech narsa yubormaydi", async () => {
+    const response = await postExitForTest(null);
+    expect(response.status).toBe(200);
+    expect(ledService.showPlateOnly).not.toHaveBeenCalled();
+    expect(ledService.showPayment).not.toHaveBeenCalled();
+  });
+
   it("1. exact regular cash completed, payment va next response to'g'ri", async () => {
     const sessionId = await createSession("01A100AA");
     await postExitForTest("01A100AA");
@@ -387,6 +415,7 @@ describe("exit candidate completion workflow", () => {
       10000,
       expect.objectContaining({ kind: "payment-preview" })
     );
+    expect(ledService.scheduleReturnToClock).not.toHaveBeenCalled();
   });
 
   it("preview-session boshqa organization sessiyasini ko'rsatmaydi", async () => {
@@ -421,11 +450,13 @@ describe("exit candidate completion workflow", () => {
       .set("Authorization", authorizationHeader);
     expect(second.status).toBe(200);
     expect(ledService.showPayment).toHaveBeenCalledTimes(1);
+    expect(ledService.scheduleReturnToClock).not.toHaveBeenCalled();
   });
 
   it("force-open faqat plate yuboradi va LEDni kutmaydi", async () => {
     await postExitForTest("UNKNOWNP3");
     const candidate = await findCandidateForTest("UNKNOWNP3");
+    vi.mocked(ledService.showPlateOnly).mockClear();
     vi.mocked(ledService.showPlateOnly).mockImplementationOnce(
       () => new Promise<void>(() => undefined)
     );
@@ -438,6 +469,13 @@ describe("exit candidate completion workflow", () => {
       expect.objectContaining({ kind: "plate-preview" })
     );
     expect(ledService.showPayment).not.toHaveBeenCalled();
+    expect(ledService.scheduleReturnToClock).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(ledService.showPlateOnly).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(ledService.scheduleReturnToClock).mock.invocationCallOrder[0]
+    );
+    expect(vi.mocked(ledService.scheduleReturnToClock).mock.invocationCallOrder[0]).toBeLessThan(
+      openBarrierMock.mock.invocationCallOrder[0]
+    );
   });
 
   it("LED xatosi next, preview-session va force-open oqimlarini to'xtatmaydi", async () => {
@@ -471,7 +509,7 @@ describe("exit candidate completion workflow", () => {
     });
   });
 
-  it("LED va return timer sekin barrier tugashidan oldin boshlanadi", async () => {
+  it("LED sekin barrier tugashidan oldin boshlanadi", async () => {
     await createSessionForTest("01P100AA");
     await postExitForTest("01P100AA");
     const candidate = await findCandidateForTest("01P100AA");

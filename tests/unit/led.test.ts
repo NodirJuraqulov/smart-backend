@@ -64,7 +64,6 @@ describe("LED renderer, packets va service", () => {
     await service.showClock();
     await service.showPayment("75X963QG", 5000);
     await service.showPlateOnly("75X963QG");
-    service.scheduleReturnToClock();
     service.startClockScheduler();
     await vi.advanceTimersByTimeAsync(120000);
     expect(mocks.sendPackets).not.toHaveBeenCalled();
@@ -133,12 +132,12 @@ describe("LED renderer, packets va service", () => {
     service.scheduleReturnToClock();
     await vi.advanceTimersByTimeAsync(1000);
     await service.showPayment("01A123BC", 7000);
-    service.scheduleReturnToClock();
-    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(60000);
     expect(mocks.sendPackets).toHaveBeenCalledTimes(2);
+    service.scheduleReturnToClock();
     await vi.advanceTimersByTimeAsync(999);
     expect(mocks.sendPackets).toHaveBeenCalledTimes(2);
-    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(2001);
     expect(mocks.sendPackets).toHaveBeenCalledTimes(3);
   });
 
@@ -177,7 +176,7 @@ describe("LED renderer, packets va service", () => {
     ]);
   });
 
-  it("queue'dagi stale clock yangi paymentdan keyin yuborilmaydi", async () => {
+  it("showPayment TCP tugagandan keyin ham return timerini boshlamaydi", async () => {
     let releaseFirstSend = (): void => undefined;
     mocks.sendPackets.mockImplementationOnce(
       () =>
@@ -186,13 +185,78 @@ describe("LED renderer, packets va service", () => {
         })
     );
     const service = new LedService();
-    const firstPayment = service.showPayment("01A100AA", 5000);
-    service.scheduleReturnToClock();
-    await vi.advanceTimersByTimeAsync(3000);
-    const secondPayment = service.showPayment("01B200BB", 7000);
+    const scheduleReturnToClock = vi.spyOn(service, "scheduleReturnToClock");
+    const payment = service.showPayment("01A100AA", 5000);
+    await Promise.resolve();
+    expect(mocks.sendPackets).toHaveBeenCalledTimes(1);
+    expect(scheduleReturnToClock).not.toHaveBeenCalled();
     releaseFirstSend();
-    await Promise.all([firstPayment, secondPayment]);
+    await payment;
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(scheduleReturnToClock).not.toHaveBeenCalled();
+    expect(mocks.sendPackets).toHaveBeenCalledTimes(1);
+  });
+
+  it("payment TCP xatosidan keyin ham return timerini boshlamaydi", async () => {
+    const error = new Error("connection refused");
+    mocks.sendPackets.mockRejectedValueOnce(error);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const service = new LedService();
+    const scheduleReturnToClock = vi.spyOn(service, "scheduleReturnToClock");
+    await expect(service.showPayment("01A100AA", 5000)).resolves.toBeUndefined();
+    expect(consoleError).toHaveBeenCalledWith("LED_SEND_FAILED", error);
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(mocks.sendPackets).toHaveBeenCalledTimes(1);
+    expect(scheduleReturnToClock).not.toHaveBeenCalled();
+  });
+
+  it("payment operator tasdigigacha schedulerda 120 soniya o'zgarmaydi", async () => {
+    const service = new LedService();
+    await service.showPayment("01A100AA", 5000);
+    service.startClockScheduler();
+    await vi.advanceTimersByTimeAsync(120000);
+    expect(mocks.sendPackets).toHaveBeenCalledTimes(1);
+  });
+
+  it("plate-only force-open'gacha schedulerda 120 soniya o'zgarmaydi", async () => {
+    const service = new LedService();
+    await service.showPlateOnly("01A100AA");
+    service.startClockScheduler();
+    await vi.advanceTimersByTimeAsync(120000);
+    expect(mocks.sendPackets).toHaveBeenCalledTimes(1);
+  });
+
+  it("yangi payment queue'dagi eski paymentni bekor qiladi", async () => {
+    let releaseClock = (): void => undefined;
+    mocks.sendPackets.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseClock = resolve;
+        })
+    );
+    const service = new LedService();
+    const clock = service.showClock();
+    await Promise.resolve();
+    const firstPayment = service.showPayment("01A100AA", 5000);
+    const secondPayment = service.showPayment("01B200BB", 7000);
+    releaseClock();
+    await Promise.all([clock, firstPayment, secondPayment]);
     expect(mocks.sendPackets).toHaveBeenCalledTimes(2);
+  });
+
+  it("return timer va scheduler yaqin vaqtda clockni ikki marta yubormaydi", async () => {
+    vi.setSystemTime(new Date("2026-08-19T09:23:57.000Z"));
+    const consoleLog = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const service = new LedService();
+    await service.showPayment("01A100AA", 5000);
+    service.scheduleReturnToClock();
+    service.startClockScheduler();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(mocks.sendPackets).toHaveBeenCalledTimes(2);
+    expect(consoleLog).toHaveBeenCalledWith(
+      "CLOCK_DUPLICATE_SEND_SKIPPED",
+      expect.any(String)
+    );
   });
 
   it("clock va payment transition markerlarini yozadi", async () => {
@@ -218,14 +282,24 @@ describe("LED renderer, packets va service", () => {
   });
 
   it("6. clock scheduler faqat clock holatida yuboradi", async () => {
+    let releasePayment = (): void => undefined;
     const service = new LedService();
     service.startClockScheduler();
     await vi.advanceTimersByTimeAsync(60000);
     expect(mocks.sendPackets).toHaveBeenCalledTimes(1);
-    await service.showPayment("75X963QG", 5000);
+    mocks.sendPackets.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releasePayment = resolve;
+        })
+    );
+    const payment = service.showPayment("75X963QG", 5000);
+    await Promise.resolve();
     expect(mocks.sendPackets).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(60000);
     expect(mocks.sendPackets).toHaveBeenCalledTimes(2);
+    releasePayment();
+    await payment;
   });
 
   it("clock scheduler keyingi minut boshida va keyin har minut boshida ishlaydi", async () => {
