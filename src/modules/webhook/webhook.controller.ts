@@ -11,9 +11,14 @@ import {
   updateWebhookEventOutcome,
 } from "./webhookIdempotency";
 import { processEntryWebhook } from "@/modules/entryCandidates/entryCandidates.service";
-import { emitPlateNotRecognizedForExit, emitWebhookParseFailed } from "@/websocket/socketServer";
+import {
+  emitBlacklistAttempt,
+  emitPlateNotRecognizedForExit,
+  emitWebhookParseFailed,
+} from "@/websocket/socketServer";
 import { createExitCandidate } from "@/modules/exitCandidates/exitCandidates.service";
 import { tryAutoExit, wasRecentlyAutoExited } from "@/modules/exitCandidates/autoExit.service";
+import { recordBlacklistAttemptIfMatched } from "@/modules/blacklist/blacklist.service";
 import {
   markDuplicateImagesSkipped,
   saveWebhookEventImages,
@@ -268,6 +273,37 @@ async function processCameraWebhook(
   if (formatValidation.status === "cancelled") {
     res.status(200).json({ ok: true, parsed: true, ignored: true });
     return;
+  }
+
+  if (direction === "entry" && plateNumber) {
+    const blacklistMatch = await recordBlacklistAttemptIfMatched({
+      orgId,
+      webhookEventId: registration.eventId,
+      plateNumber,
+    });
+    if (blacklistMatch.matched) {
+      const blacklistAttempt = blacklistMatch.attempt;
+      const attemptedAt = new Date(blacklistAttempt.attempted_at).toISOString();
+      if (blacklistMatch.created) {
+        emitBlacklistAttempt(orgId, {
+          attemptId: blacklistAttempt.id,
+          orgId,
+          plateNumber: blacklistAttempt.plate_number,
+          attemptedAt,
+          imageUrl: blacklistAttempt.image_url,
+        });
+      }
+      res.status(200).json({
+        ok: true,
+        parsed: true,
+        blocked: true,
+        reason: "blacklisted",
+        attempt_created: blacklistMatch.created,
+        plate_number: blacklistAttempt.plate_number,
+        attempted_at: attemptedAt,
+      });
+      return;
+    }
   }
 
   if (direction === "exit") {

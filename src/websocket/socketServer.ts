@@ -91,6 +91,14 @@ export interface EntryBarrierFailedPayload {
   detail: string;
 }
 
+export interface BlacklistAttemptPayload {
+  attemptId: number;
+  orgId: number;
+  plateNumber: string;
+  attemptedAt: string;
+  imageUrl: string | null;
+}
+
 async function authenticate(socket: Socket): Promise<AuthTokenPayload> {
   const token = socket.handshake.auth?.token as string | undefined;
   if (!token) {
@@ -240,6 +248,10 @@ export function emitEntryCandidateResolved(orgId: number, payload: EntryCandidat
 
 export function emitParkingFull(orgId: number, payload: unknown): void {
   getIO()?.to(`org_${orgId}`).emit("parking_full", payload);
+}
+
+export function emitBlacklistAttempt(orgId: number, payload: BlacklistAttemptPayload): void {
+  getIO()?.to(`org_${orgId}`).emit("blacklist_attempt", payload);
 }
 
 export function emitExitAwaitingPayment(orgId: number, payload: unknown): void {
