@@ -18,16 +18,16 @@ export type AutoExitReason = "inpatient" | "vip" | "clinic_discount_100";
 
 const FULL_DISCOUNT_PERCENT = 100;
 
-function completeAutoExitLed(plateNumber: string): void {
+function completeAutoExitLed(orgId: number, plateNumber: string): void {
   try {
-    void ledService.showPlateOnly(plateNumber).catch((error) => {
+    void ledService.showPlateOnly(orgId, plateNumber).catch((error) => {
       console.error("LED_PLATE_FAILED", error);
     });
   } catch (error) {
     console.error("LED_PLATE_FAILED", error);
   }
   try {
-    ledService.scheduleReturnToClock();
+    ledService.scheduleReturnToClock(orgId);
   } catch (error) {
     console.error("LED_CLOCK_SCHEDULE_FAILED", error);
   }
@@ -228,7 +228,7 @@ export async function performAutoExit(input: {
     durationMinutes,
   });
 
-  completeAutoExitLed(plateNumber);
+  completeAutoExitLed(input.orgId, plateNumber);
 
   return { sessionId: session.id, plateNumber, reason: input.reason, barrierStatus };
 }

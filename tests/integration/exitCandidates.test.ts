@@ -30,9 +30,9 @@ import {
 } from "./helpers";
 
 const ledMocks = vi.hoisted(() => ({
-  showPayment: vi.fn<(plate: string, amount: number) => Promise<void>>(),
-  showPlateOnly: vi.fn<(plate: string) => Promise<void>>(),
-  scheduleReturnToClock: vi.fn<() => void>(),
+  showPayment: vi.fn<(orgId: number, plate: string, amount: number) => Promise<void>>(),
+  showPlateOnly: vi.fn<(orgId: number, plate: string) => Promise<void>>(),
+  scheduleReturnToClock: vi.fn<(orgId: number) => void>(),
 }));
 
 vi.mock("@/modules/relay/relay.service", () => {
@@ -249,7 +249,7 @@ describe("exit candidate completion workflow", () => {
     );
     const response = await postExit("01W100AA");
     expect(response.status).toBe(200);
-    expect(ledMocks.showPlateOnly).toHaveBeenCalledWith("01W100AA");
+    expect(ledMocks.showPlateOnly).toHaveBeenCalledWith(orgId, "01W100AA");
     expect(exitCandidateCreatedMock.mock.invocationCallOrder[0]).toBeLessThan(
       ledMocks.showPlateOnly.mock.invocationCallOrder[0]
     );
@@ -332,8 +332,8 @@ describe("exit candidate completion workflow", () => {
     if (!payment) throw new Error("Payment topilmadi");
     expect(payment).toMatchObject({ payment_method: "cash" });
     expect(Number(payment.amount)).toBe(10000);
-    expect(ledMocks.showPayment).toHaveBeenCalledWith("01A100AA", 10000);
-    expect(ledMocks.scheduleReturnToClock).toHaveBeenCalledTimes(1);
+    expect(ledMocks.showPayment).toHaveBeenCalledWith(orgId, "01A100AA", 10000);
+    expect(ledMocks.scheduleReturnToClock).toHaveBeenCalledWith(orgId);
     expect(openBarrier).toHaveBeenCalledWith(orgId, "exit");
     expect(emitExitCompleted).toHaveBeenCalledWith(
       orgId,
@@ -372,7 +372,7 @@ describe("exit candidate completion workflow", () => {
       .send({ sessionId });
     expect(response.status).toBe(200);
     expect(response.body).toEqual({ plateNumber: "01L100AA", amount: 10000 });
-    expect(ledMocks.showPayment).toHaveBeenCalledWith("01L100AA", 10000);
+    expect(ledMocks.showPayment).toHaveBeenCalledWith(orgId, "01L100AA", 10000);
     expect(ledMocks.scheduleReturnToClock).not.toHaveBeenCalled();
   });
 
@@ -398,7 +398,7 @@ describe("exit candidate completion workflow", () => {
       .get("/api/exit-candidates/next")
       .set("Authorization", authorizationHeader);
     expect(first.status).toBe(200);
-    expect(ledMocks.showPayment).toHaveBeenCalledWith("01L102AA", 10000);
+    expect(ledMocks.showPayment).toHaveBeenCalledWith(orgId, "01L102AA", 10000);
     const second = await testRequest(app)
       .get("/api/exit-candidates/next")
       .set("Authorization", authorizationHeader);
@@ -418,9 +418,9 @@ describe("exit candidate completion workflow", () => {
       .post(`/api/exit-candidates/${candidate.id}/force-open`)
       .set("Authorization", authorizationHeader);
     expect(response.status).toBe(200);
-    expect(ledMocks.showPlateOnly).toHaveBeenCalledWith("UNKNOWNP3");
+    expect(ledMocks.showPlateOnly).toHaveBeenCalledWith(orgId, "UNKNOWNP3");
     expect(ledMocks.showPayment).not.toHaveBeenCalled();
-    expect(ledMocks.scheduleReturnToClock).toHaveBeenCalledTimes(1);
+    expect(ledMocks.scheduleReturnToClock).toHaveBeenCalledWith(orgId);
     expect(ledMocks.showPlateOnly.mock.invocationCallOrder[0]).toBeLessThan(
       ledMocks.scheduleReturnToClock.mock.invocationCallOrder[0]
     );

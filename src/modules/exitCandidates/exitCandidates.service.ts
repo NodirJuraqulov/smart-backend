@@ -127,9 +127,9 @@ const BARRIER_AUDIT_ACTIONS = [
 ];
 const lastLedCandidatePreviewByOrg = new Map<number, number>();
 
-function showLedPaymentPreview(plateNumber: string, amount: number): void {
+function showLedPaymentPreview(orgId: number, plateNumber: string, amount: number): void {
   try {
-    void ledService.showPayment(plateNumber, amount).catch((error) => {
+    void ledService.showPayment(orgId, plateNumber, amount).catch((error) => {
       console.error("LED_PAYMENT_FAILED", error);
     });
   } catch (error) {
@@ -137,9 +137,9 @@ function showLedPaymentPreview(plateNumber: string, amount: number): void {
   }
 }
 
-function showLedPlatePreview(plateNumber: string): void {
+function showLedPlatePreview(orgId: number, plateNumber: string): void {
   try {
-    void ledService.showPlateOnly(plateNumber).catch((error) => {
+    void ledService.showPlateOnly(orgId, plateNumber).catch((error) => {
       console.error("LED_PLATE_FAILED", error);
     });
   } catch (error) {
@@ -147,9 +147,9 @@ function showLedPlatePreview(plateNumber: string): void {
   }
 }
 
-function scheduleLedReturnToClock(): void {
+function scheduleLedReturnToClock(orgId: number): void {
   try {
-    ledService.scheduleReturnToClock();
+    ledService.scheduleReturnToClock(orgId);
   } catch (error) {
     console.error("LED_CLOCK_SCHEDULE_FAILED", error);
   }
@@ -650,7 +650,7 @@ export async function createExitCandidate(input: {
     });
   }
   const ledPlateNumber = candidate.detected_plate ?? candidate.suggested_plate;
-  if (ledPlateNumber) showLedPlatePreview(displayPlateNumber(ledPlateNumber));
+  if (ledPlateNumber) showLedPlatePreview(input.orgId, displayPlateNumber(ledPlateNumber));
   return { ...result, candidate };
 }
 
@@ -730,7 +730,7 @@ export async function getNextExitCandidate(actor: AuthTokenPayload, requestedOrg
       lastLedCandidatePreviewByOrg.get(orgId) !== candidate.id
     ) {
       lastLedCandidatePreviewByOrg.set(orgId, candidate.id);
-      showLedPaymentPreview(displayPlateNumber(session.plate_number), preview.amount);
+      showLedPaymentPreview(orgId, displayPlateNumber(session.plate_number), preview.amount);
     }
     matchedSession = {
       session_id: session.id,
@@ -838,7 +838,7 @@ export async function previewExitCandidateSession(
   const preview = calculateSessionTariffPreview(session, new Date());
   const amount = preview.amount ?? 0;
   const plateNumber = displayPlateNumber(session.plate_number);
-  showLedPaymentPreview(plateNumber, amount);
+  showLedPaymentPreview(orgId, plateNumber, amount);
   return { plateNumber, amount };
 }
 
@@ -1013,6 +1013,7 @@ export async function confirmExitCandidate(
   try {
     void ledService
       .showPayment(
+        orgId,
         transactionResult.session.plate_number ?? "",
         transactionResult.session.amount
       )
@@ -1022,7 +1023,7 @@ export async function confirmExitCandidate(
   } catch (error) {
     console.error("LED_PAYMENT_FAILED", error);
   }
-  scheduleLedReturnToClock();
+  scheduleLedReturnToClock(orgId);
   const barrierStatus = await recordBarrierAttempt({
     actorId: actor.id,
     orgId,
@@ -1129,8 +1130,8 @@ export async function forceOpenExitCandidate(
     });
     return resolvedPlateNumber;
   });
-  showLedPlatePreview(plateNumber);
-  scheduleLedReturnToClock();
+  showLedPlatePreview(orgId, plateNumber);
+  scheduleLedReturnToClock(orgId);
   const barrierStatus = await recordBarrierAttempt({
     actorId: actor.id,
     orgId,

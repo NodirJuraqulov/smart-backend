@@ -41,7 +41,7 @@ httpServer.listen(env.port, () => {
   console.log(`Server running on port ${env.port} [${env.nodeEnv}]`);
   if (env.led.enabled) {
     try {
-      void ledService.showClock().catch((error) => {
+      void ledService.showClockForConfiguredOrganizations().catch((error) => {
         console.error("LED_START_FAILED", error);
       });
     } catch (error) {

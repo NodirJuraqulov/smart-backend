@@ -220,8 +220,8 @@ describe("operatorsiz avtomatik chiqish", () => {
     expect(await candidates()).toHaveLength(0);
     expect(await testDb("tb_payments").where({ session_id: sessionId })).toHaveLength(0);
     expect(openBarrier).toHaveBeenCalledWith(orgId, "exit");
-    expect(ledService.showPlateOnly).toHaveBeenCalledWith("01V500AA");
-    expect(ledService.scheduleReturnToClock).toHaveBeenCalledTimes(1);
+    expect(ledService.showPlateOnly).toHaveBeenCalledWith(orgId, "01V500AA");
+    expect(ledService.scheduleReturnToClock).toHaveBeenCalledWith(orgId);
     expect(openBarrierMock.mock.invocationCallOrder[0]).toBeLessThan(
       vi.mocked(ledService.showPlateOnly).mock.invocationCallOrder[0]
     );
@@ -243,7 +243,7 @@ describe("operatorsiz avtomatik chiqish", () => {
     expect(response.body).toMatchObject({ auto_exit: true, session_id: sessionId });
     expect((await sessionById(sessionId)).status).toBe("completed");
     expect(openBarrier).toHaveBeenCalledWith(orgId, "exit");
-    expect(ledService.scheduleReturnToClock).toHaveBeenCalledTimes(1);
+    expect(ledService.scheduleReturnToClock).toHaveBeenCalledWith(orgId);
     await vi.waitFor(() => {
       expect(consoleError).toHaveBeenCalledWith("LED_PLATE_FAILED", error);
     });

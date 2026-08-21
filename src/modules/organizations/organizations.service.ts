@@ -128,6 +128,7 @@ export async function createOrganization(input: CreateOrganizationInput) {
         name,
         address: address ?? null,
         webhook_token: randomBytes(32).toString("hex"),
+        led_port: null,
         ...(input.timezone !== undefined ? { timezone: input.timezone } : {}),
       });
 
@@ -371,6 +372,43 @@ export interface CameraRelaySettingsInput {
   username?: string | null;
   password?: string | null;
   channel?: number | null;
+}
+
+interface LedSettingsRow {
+  id: number;
+  led_host: string | null;
+  led_port: number | null;
+}
+
+export interface LedSettingsInput {
+  led_host?: string | null;
+  led_port?: number | null;
+}
+
+async function findLedSettingsOrFail(id: number): Promise<LedSettingsRow> {
+  const organization = await db<LedSettingsRow>("tb_organizations")
+    .select("id", "led_host", "led_port")
+    .where({ id })
+    .first();
+  if (!organization) throw new ApiError("Stoyanka topilmadi", 404);
+  return organization;
+}
+
+export async function getLedSettings(id: number) {
+  const { led_host, led_port } = await findLedSettingsOrFail(id);
+  return { led_host, led_port };
+}
+
+export async function updateLedSettings(id: number, input: LedSettingsInput) {
+  const current = await findLedSettingsOrFail(id);
+  const ledHost = input.led_host === undefined ? current.led_host : input.led_host;
+  const ledPort = input.led_port === undefined ? current.led_port : input.led_port;
+  const updates = {
+    led_host: ledHost,
+    led_port: ledHost ? ledPort ?? 10000 : null,
+  };
+  await db("tb_organizations").where({ id }).update(updates);
+  return updates;
 }
 
 async function findCameraRelaySettingsOrFail(id: number): Promise<CameraRelaySettingsRow> {

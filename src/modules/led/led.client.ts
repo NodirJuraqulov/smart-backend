@@ -13,12 +13,17 @@ export class LedClientError extends Error {
   }
 }
 
-export function sendPackets(packets: Buffer[]): Promise<void> {
+export interface LedDestination {
+  host: string;
+  port: number;
+}
+
+export function sendPackets(packets: Buffer[], destination: LedDestination): Promise<void> {
   if (packets.length === 0) {
     return Promise.resolve();
   }
   return new Promise<void>((resolve, reject) => {
-    const socket = net.createConnection({ host: env.led.host, port: env.led.port });
+    const socket = net.createConnection(destination);
     let packetIndex = 0;
     let waitingForAck = false;
     let settled = false;

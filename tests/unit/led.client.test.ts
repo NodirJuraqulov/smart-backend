@@ -15,8 +15,6 @@ vi.mock("@/config/env", () => ({
   env: {
     led: {
       enabled: true,
-      host: "192.168.1.157",
-      port: 10000,
       timeoutMs: 3000,
     },
   },
@@ -52,7 +50,11 @@ afterEach(() => {
 describe("LED TCP client", () => {
   it("har packetdan keyin ACK kutib keyingi packetni yuboradi", async () => {
     const consoleLog = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const result = sendPackets([Buffer.from([1]), Buffer.from([2])]);
+    const result = sendPackets(
+      [Buffer.from([1]), Buffer.from([2])],
+      { host: "192.168.1.157", port: 10000 }
+    );
+    expect(mocks.createConnection).toHaveBeenCalledWith({ host: "192.168.1.157", port: 10000 });
     socket.emit("connect");
     expect(socket.writes).toHaveLength(1);
     expect(socket.writes[0]?.length).toBe(1);
@@ -68,7 +70,7 @@ describe("LED TCP client", () => {
   });
 
   it("ACK timeoutni LED_ACK_TIMEOUT bilan reject qiladi", async () => {
-    const result = sendPackets([Buffer.from([1])]);
+    const result = sendPackets([Buffer.from([1])], { host: "192.168.1.157", port: 10000 });
     socket.emit("connect");
     socket.emit("timeout");
     await expect(result).rejects.toMatchObject({ code: "LED_ACK_TIMEOUT" } satisfies Partial<LedClientError>);
@@ -76,7 +78,7 @@ describe("LED TCP client", () => {
   });
 
   it("connection refusedni LED_SEND_FAILED bilan reject qiladi", async () => {
-    const result = sendPackets([Buffer.from([1])]);
+    const result = sendPackets([Buffer.from([1])], { host: "192.168.1.157", port: 10000 });
     socket.emit("error", new Error("connection refused"));
     await expect(result).rejects.toMatchObject({ code: "LED_SEND_FAILED" } satisfies Partial<LedClientError>);
   });

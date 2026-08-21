@@ -12,10 +12,12 @@ import {
   getEmergencyBarrierSettingsHandler,
   updateEmergencyBarrierSettingsHandler,
   getCameraRelaySettingsHandler,
+  getLedSettingsHandler,
   expireStaleExitCandidatesHandler,
   resetTestDataHandler,
   staleSessionsHandler,
   updateCameraRelaySettingsHandler,
+  updateLedSettingsHandler,
 } from "./organizations.controller";
 
 const router = Router();
@@ -46,5 +48,7 @@ router.patch(
 router.get("/:id/stale-sessions", isSuperAdminOrOwner, asyncHandler(staleSessionsHandler));
 router.get("/:id/camera-relay-settings", isSuperAdminOrOwner, asyncHandler(getCameraRelaySettingsHandler));
 router.patch("/:id/camera-relay-settings", isSuperAdminOrOwner, asyncHandler(updateCameraRelaySettingsHandler));
+router.get("/:id/led-settings", isSuperAdminOrOwner, asyncHandler(getLedSettingsHandler));
+router.patch("/:id/led-settings", isSuperAdmin, asyncHandler(updateLedSettingsHandler));
 
 export default router;

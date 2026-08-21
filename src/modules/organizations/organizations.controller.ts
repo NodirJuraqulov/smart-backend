@@ -341,12 +341,51 @@ export async function regenerateWebhookTokenHandler(req: Request, res: Response)
   });
 }
 
-function assertCameraRelayScope(req: Request, id: number, res: Response): boolean {
+function assertOrganizationSettingsScope(req: Request, id: number, res: Response): boolean {
   if (req.user?.role === "owner" && req.user.org_id !== id) {
     res.status(404).json({ message: "Stoyanka topilmadi" });
     return false;
   }
   return true;
+}
+
+export async function getLedSettingsHandler(req: Request, res: Response) {
+  const id = parseId(req, res);
+  if (id === null || !assertOrganizationSettingsScope(req, id, res)) return;
+  res.json(await organizationsService.getLedSettings(id));
+}
+
+export async function updateLedSettingsHandler(req: Request, res: Response) {
+  const id = parseId(req, res);
+  if (id === null) return;
+  const ledHost = req.body?.led_host;
+  const ledPort = req.body?.led_port;
+  if (ledHost === undefined && ledPort === undefined) {
+    res.status(400).json({ message: "led_host yoki led_port yuborilishi kerak" });
+    return;
+  }
+  if (
+    ledHost !== undefined &&
+    ledHost !== null &&
+    (typeof ledHost !== "string" || !ledHost.trim() || /[\s/?#]/.test(ledHost) || ledHost.includes("://"))
+  ) {
+    res.status(400).json({ message: "led_host noto'g'ri" });
+    return;
+  }
+  if (
+    ledPort !== undefined &&
+    ledPort !== null &&
+    (!Number.isInteger(ledPort) || ledPort < 1 || ledPort > 65535)
+  ) {
+    res.status(400).json({ message: "led_port 1-65535 oralig'ida bo'lishi kerak" });
+    return;
+  }
+  const settings = await organizationsService.updateLedSettings(id, {
+    led_host: typeof ledHost === "string" ? ledHost.trim() : ledHost,
+    led_port: ledPort,
+  });
+  await logActivity(req.user!.id, "organization.led_settings_updated", "organization", id, settings);
+  res.json(settings);
 }
 
 function parseRelayDirection(value: unknown, field: string, res: Response) {
@@ -390,13 +429,13 @@ function parseRelayDirection(value: unknown, field: string, res: Response) {
 
 export async function getCameraRelaySettingsHandler(req: Request, res: Response) {
   const id = parseId(req, res);
-  if (id === null || !assertCameraRelayScope(req, id, res)) return;
+  if (id === null || !assertOrganizationSettingsScope(req, id, res)) return;
   res.json(await organizationsService.getCameraRelaySettings(id));
 }
 
 export async function updateCameraRelaySettingsHandler(req: Request, res: Response) {
   const id = parseId(req, res);
-  if (id === null || !assertCameraRelayScope(req, id, res)) return;
+  if (id === null || !assertOrganizationSettingsScope(req, id, res)) return;
   const entry = parseRelayDirection(req.body?.entry, "entry", res);
   if (entry === null) return;
   const exit = parseRelayDirection(req.body?.exit, "exit", res);

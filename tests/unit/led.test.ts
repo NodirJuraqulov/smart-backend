@@ -3,8 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   led: {
     enabled: true,
-    host: "192.168.1.157",
-    port: 10000,
     timeoutMs: 3000,
     clockIntervalMs: 60000,
     paymentConfirmDelayMs: 3000,
@@ -17,6 +15,10 @@ vi.mock("@/config/env", () => ({
     led: mocks.led,
     platformDefaultTimezone: "Asia/Tashkent",
   },
+}));
+
+vi.mock("@/config/db", () => ({
+  db: vi.fn(),
 }));
 
 vi.mock("@/modules/led/led.client", () => ({
@@ -45,10 +47,34 @@ import {
 const PAYMENT_GOLDEN_HEX =
   "ffffffffffffffffffffffffffffffffff20e882201c87ffff20e882201c87ffffafefbafeebfaffffafefbafeebfaffffaf5fbbfeebfaffffaf5fbbfeebfaffffb75fbbfeebfaffffb75fbbfeebfaffff37bc8360ec8affff37bc8360ec8afffffb5bbfeeabbafffffb5bbfeeabbafffffb5bbfee6bbbfffffb5bbfee6bbbfffffdebbeeeebbafffffdebbeeeebbaffff3decc2209c86ffff3decc2209c86ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0f8220f8ffffffff0f8220f8ffffffffefbbaefbffffffffefbbaefbffffffffefbbaefbffffffffefbbaefbffffffffefbbaefbffffffffefbbaefbffffffff0fbbaefbffffffff0fbbaefbffffffffffbaaefbffffffffffbaaefbffffffffffbaaefbffffffffffbaaefbffffffffffbaaefbffffffffffbaaefbffffffff0f8320f8ffffffff0f8320f8ffffffffffffffffffffffffffffffffffff";
 
+const LED_ORG_ID = 1;
+const ledConfigurations = new Map([
+  [LED_ORG_ID, { orgId: LED_ORG_ID, host: "192.168.1.157", port: 10000 }],
+]);
+
+function createLedService(): LedService {
+  return new LedService(
+    async (orgId) => ledConfigurations.get(orgId) ?? null,
+    async () => [...ledConfigurations.values()]
+  );
+}
+
+async function flushLedOperation(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
   mocks.led.enabled = true;
   mocks.sendPackets.mockReset().mockResolvedValue(undefined);
+  ledConfigurations.clear();
+  ledConfigurations.set(LED_ORG_ID, {
+    orgId: LED_ORG_ID,
+    host: "192.168.1.157",
+    port: 10000,
+  });
 });
 
 afterEach(() => {
@@ -60,13 +86,35 @@ afterEach(() => {
 describe("LED renderer, packets va service", () => {
   it("1. LED o'chirilganda TCP client chaqirilmaydi", async () => {
     mocks.led.enabled = false;
-    const service = new LedService();
-    await service.showClock();
-    await service.showPayment("75X963QG", 5000);
-    await service.showPlateOnly("75X963QG");
+    const service = createLedService();
+    await service.showClock(LED_ORG_ID);
+    await service.showPayment(LED_ORG_ID, "75X963QG", 5000);
+    await service.showPlateOnly(LED_ORG_ID, "75X963QG");
     service.startClockScheduler();
     await vi.advanceTimersByTimeAsync(120000);
     expect(mocks.sendPackets).not.toHaveBeenCalled();
+  });
+
+  it("configured organization uchun DB'dagi host va portdan foydalanadi", async () => {
+    const service = createLedService();
+
+    await service.showClock(LED_ORG_ID);
+
+    expect(mocks.sendPackets).toHaveBeenCalledTimes(1);
+    expect(mocks.sendPackets.mock.calls[0]?.[1]).toEqual({
+      host: "192.168.1.157",
+      port: 10000,
+    });
+  });
+
+  it("LED sozlanmagan organization uchun TCP va xato logisiz qaytadi", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const service = createLedService();
+
+    await service.showPayment(2, "01A100AA", 5000);
+
+    expect(mocks.sendPackets).not.toHaveBeenCalled();
+    expect(consoleError).not.toHaveBeenCalled();
   });
 
   it("2. payment bitmap tasdiqlangan font va mappingga mos", () => {
@@ -127,14 +175,14 @@ describe("LED renderer, packets va service", () => {
   });
 
   it("5. yangi payment oldingi clock qaytarish timerini bekor qiladi", async () => {
-    const service = new LedService();
-    await service.showPayment("75X963QG", 5000);
-    service.scheduleReturnToClock();
+    const service = createLedService();
+    await service.showPayment(LED_ORG_ID, "75X963QG", 5000);
+    service.scheduleReturnToClock(LED_ORG_ID);
     await vi.advanceTimersByTimeAsync(1000);
-    await service.showPayment("01A123BC", 7000);
+    await service.showPayment(LED_ORG_ID, "01A123BC", 7000);
     await vi.advanceTimersByTimeAsync(60000);
     expect(mocks.sendPackets).toHaveBeenCalledTimes(2);
-    service.scheduleReturnToClock();
+    service.scheduleReturnToClock(LED_ORG_ID);
     await vi.advanceTimersByTimeAsync(999);
     expect(mocks.sendPackets).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(2001);
@@ -147,8 +195,8 @@ describe("LED renderer, packets va service", () => {
     mocks.sendPackets.mockImplementation(async () => {
       sentAt.push(Date.now());
     });
-    const service = new LedService();
-    await service.showClock();
+    const service = createLedService();
+    await service.showClockForConfiguredOrganizations();
     service.startClockScheduler();
     expect(sentAt).toEqual([new Date("2026-08-19T09:23:47.250Z").getTime()]);
     await vi.advanceTimersByTimeAsync(12750);
@@ -164,9 +212,9 @@ describe("LED renderer, packets va service", () => {
     mocks.sendPackets.mockImplementation(async () => {
       sentAt.push(Date.now());
     });
-    const service = new LedService();
-    await service.showPayment("75X963QG", 5000);
-    service.scheduleReturnToClock();
+    const service = createLedService();
+    await service.showPayment(LED_ORG_ID, "75X963QG", 5000);
+    service.scheduleReturnToClock(LED_ORG_ID);
     await vi.advanceTimersByTimeAsync(2999);
     expect(sentAt).toEqual([new Date("2026-08-19T09:23:47.000Z").getTime()]);
     await vi.advanceTimersByTimeAsync(1);
@@ -184,10 +232,10 @@ describe("LED renderer, packets va service", () => {
           releaseFirstSend = resolve;
         })
     );
-    const service = new LedService();
+    const service = createLedService();
     const scheduleReturnToClock = vi.spyOn(service, "scheduleReturnToClock");
-    const payment = service.showPayment("01A100AA", 5000);
-    await Promise.resolve();
+    const payment = service.showPayment(LED_ORG_ID, "01A100AA", 5000);
+    await flushLedOperation();
     expect(mocks.sendPackets).toHaveBeenCalledTimes(1);
     expect(scheduleReturnToClock).not.toHaveBeenCalled();
     releaseFirstSend();
@@ -201,9 +249,9 @@ describe("LED renderer, packets va service", () => {
     const error = new Error("connection refused");
     mocks.sendPackets.mockRejectedValueOnce(error);
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const service = new LedService();
+    const service = createLedService();
     const scheduleReturnToClock = vi.spyOn(service, "scheduleReturnToClock");
-    await expect(service.showPayment("01A100AA", 5000)).resolves.toBeUndefined();
+    await expect(service.showPayment(LED_ORG_ID, "01A100AA", 5000)).resolves.toBeUndefined();
     expect(consoleError).toHaveBeenCalledWith("LED_SEND_FAILED", error);
     await vi.advanceTimersByTimeAsync(60000);
     expect(mocks.sendPackets).toHaveBeenCalledTimes(1);
@@ -211,16 +259,16 @@ describe("LED renderer, packets va service", () => {
   });
 
   it("payment operator tasdigigacha schedulerda 120 soniya o'zgarmaydi", async () => {
-    const service = new LedService();
-    await service.showPayment("01A100AA", 5000);
+    const service = createLedService();
+    await service.showPayment(LED_ORG_ID, "01A100AA", 5000);
     service.startClockScheduler();
     await vi.advanceTimersByTimeAsync(120000);
     expect(mocks.sendPackets).toHaveBeenCalledTimes(1);
   });
 
   it("plate-only force-open'gacha schedulerda 120 soniya o'zgarmaydi", async () => {
-    const service = new LedService();
-    await service.showPlateOnly("01A100AA");
+    const service = createLedService();
+    await service.showPlateOnly(LED_ORG_ID, "01A100AA");
     service.startClockScheduler();
     await vi.advanceTimersByTimeAsync(120000);
     expect(mocks.sendPackets).toHaveBeenCalledTimes(1);
@@ -234,11 +282,11 @@ describe("LED renderer, packets va service", () => {
           releaseClock = resolve;
         })
     );
-    const service = new LedService();
-    const clock = service.showClock();
-    await Promise.resolve();
-    const firstPayment = service.showPayment("01A100AA", 5000);
-    const secondPayment = service.showPayment("01B200BB", 7000);
+    const service = createLedService();
+    const clock = service.showClock(LED_ORG_ID);
+    await flushLedOperation();
+    const firstPayment = service.showPayment(LED_ORG_ID, "01A100AA", 5000);
+    const secondPayment = service.showPayment(LED_ORG_ID, "01B200BB", 7000);
     releaseClock();
     await Promise.all([clock, firstPayment, secondPayment]);
     expect(mocks.sendPackets).toHaveBeenCalledTimes(2);
@@ -246,9 +294,9 @@ describe("LED renderer, packets va service", () => {
 
   it("return timer va scheduler yaqin vaqtda clockni ikki marta yubormaydi", async () => {
     vi.setSystemTime(new Date("2026-08-19T09:23:57.000Z"));
-    const service = new LedService();
-    await service.showPayment("01A100AA", 5000);
-    service.scheduleReturnToClock();
+    const service = createLedService();
+    await service.showPayment(LED_ORG_ID, "01A100AA", 5000);
+    service.scheduleReturnToClock(LED_ORG_ID);
     service.startClockScheduler();
     await vi.advanceTimersByTimeAsync(3000);
     expect(mocks.sendPackets).toHaveBeenCalledTimes(2);
@@ -256,18 +304,18 @@ describe("LED renderer, packets va service", () => {
 
   it("muvaffaqiyatli LED operatsiyalari batafsil log yozmaydi", async () => {
     const consoleLog = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const service = new LedService();
-    await service.showPayment("01A100AA", 5000);
-    service.scheduleReturnToClock();
-    await service.showPayment("01B200BB", 7000);
-    service.scheduleReturnToClock();
+    const service = createLedService();
+    await service.showPayment(LED_ORG_ID, "01A100AA", 5000);
+    service.scheduleReturnToClock(LED_ORG_ID);
+    await service.showPayment(LED_ORG_ID, "01B200BB", 7000);
+    service.scheduleReturnToClock(LED_ORG_ID);
     await vi.advanceTimersByTimeAsync(3000);
     expect(consoleLog).not.toHaveBeenCalled();
   });
 
   it("6. clock scheduler faqat clock holatida yuboradi", async () => {
     let releasePayment = (): void => undefined;
-    const service = new LedService();
+    const service = createLedService();
     service.startClockScheduler();
     await vi.advanceTimersByTimeAsync(60000);
     expect(mocks.sendPackets).toHaveBeenCalledTimes(1);
@@ -277,8 +325,8 @@ describe("LED renderer, packets va service", () => {
           releasePayment = resolve;
         })
     );
-    const payment = service.showPayment("75X963QG", 5000);
-    await Promise.resolve();
+    const payment = service.showPayment(LED_ORG_ID, "75X963QG", 5000);
+    await flushLedOperation();
     expect(mocks.sendPackets).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(60000);
     expect(mocks.sendPackets).toHaveBeenCalledTimes(2);
@@ -292,7 +340,7 @@ describe("LED renderer, packets va service", () => {
     mocks.sendPackets.mockImplementation(async () => {
       sentAt.push(Date.now());
     });
-    const service = new LedService();
+    const service = createLedService();
     service.startClockScheduler();
     await vi.advanceTimersByTimeAsync(12749);
     expect(sentAt).toEqual([]);
@@ -305,21 +353,34 @@ describe("LED renderer, packets va service", () => {
     ]);
   });
 
+  it("har bir organization clock va payment holatini alohida saqlaydi", async () => {
+    ledConfigurations.set(2, { orgId: 2, host: "192.168.2.157", port: 10000 });
+    const service = createLedService();
+
+    await service.showPayment(LED_ORG_ID, "01A100AA", 5000);
+    service.startClockScheduler();
+    await vi.advanceTimersByTimeAsync(60000);
+
+    expect(mocks.sendPackets).toHaveBeenCalledTimes(2);
+    expect(mocks.sendPackets.mock.calls[0]?.[1]).toMatchObject({ host: "192.168.1.157" });
+    expect(mocks.sendPackets.mock.calls[1]?.[1]).toMatchObject({ host: "192.168.2.157" });
+  });
+
   it("7. TCP xatosi yuqoriga otilmaydi va log qilinadi", async () => {
     const error = new Error("connection refused");
     mocks.sendPackets.mockRejectedValueOnce(error);
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const service = new LedService();
-    await expect(service.showClock()).resolves.toBeUndefined();
+    const service = createLedService();
+    await expect(service.showClock(LED_ORG_ID)).resolves.toBeUndefined();
     expect(consoleError).toHaveBeenCalledWith("LED_SEND_FAILED", error);
   });
 
   it("8. o'n belgidan uzun plate birinchi o'n belgigacha kesiladi", async () => {
-    const service = new LedService();
-    await service.showPayment("ABCDEFGHIJKL", 5000);
+    const service = createLedService();
+    await service.showPayment(LED_ORG_ID, "ABCDEFGHIJKL", 5000);
     const longPlatePackets = mocks.sendPackets.mock.calls[0][0] as Buffer[];
     mocks.sendPackets.mockClear();
-    await service.showPayment("ABCDEFGHIJ", 5000);
+    await service.showPayment(LED_ORG_ID, "ABCDEFGHIJ", 5000);
     const tenCharacterPackets = mocks.sendPackets.mock.calls[0][0] as Buffer[];
     expect(longPlatePackets).toEqual(tenCharacterPackets);
   });

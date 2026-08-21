@@ -22,6 +22,8 @@ export async function createTestOrganization(overrides: TestOrgOverrides = {}): 
     name: uniqueName,
     is_active: overrides.is_active ?? true,
     timezone: overrides.timezone ?? "Asia/Tashkent",
+    led_host: null,
+    led_port: null,
   });
   return id;
 }
