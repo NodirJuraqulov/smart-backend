@@ -144,12 +144,14 @@ export class LedService {
       const time = DateTime.now().setZone(env.platformDefaultTimezone).toFormat("HH:mm");
       const pixels = renderClock(time);
       const plane1 = pixelsToPlane1(pixels);
-      return await this.send(
+      const sent = await this.send(
         runtime,
         configuration,
         plane1,
         () => this.isCurrentClockGeneration(runtime, generation)
       );
+      if (sent) console.log(`LED_CLOCK_SENT time=${time}`);
+      return sent;
     } catch (error) {
       this.logError(error);
       return false;
@@ -214,12 +216,13 @@ export class LedService {
       const normalizedAmount = String(amount).replace(/\D/g, "");
       const pixels = renderPayment(normalizedPlate, normalizedAmount);
       const plane1 = pixelsToPlane1(pixels);
-      await this.send(
+      const sent = await this.send(
         runtime,
         configuration,
         plane1,
         () => this.isCurrentPaymentGeneration(runtime, generation)
       );
+      if (sent) console.log(`LED_PAYMENT_SENT plate=${normalizedPlate} amount=${normalizedAmount}`);
     } catch (error) {
       this.logError(error);
     }
@@ -245,12 +248,13 @@ export class LedService {
       const normalizedPlate = plate.toUpperCase().replace(/\s/g, "").slice(0, 10);
       const pixels = renderPlateOnly(normalizedPlate);
       const plane1 = pixelsToPlane1(pixels);
-      await this.send(
+      const sent = await this.send(
         runtime,
         configuration,
         plane1,
         () => this.isCurrentPaymentGeneration(runtime, generation)
       );
+      if (sent) console.log(`LED_PLATE_SENT plate=${normalizedPlate}`);
     } catch (error) {
       this.logError(error);
     }

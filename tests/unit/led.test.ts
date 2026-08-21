@@ -67,6 +67,7 @@ async function flushLedOperation(): Promise<void> {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  vi.spyOn(console, "log").mockImplementation(() => undefined);
   mocks.led.enabled = true;
   mocks.sendPackets.mockReset().mockResolvedValue(undefined);
   ledConfigurations.clear();
@@ -115,6 +116,34 @@ describe("LED renderer, packets va service", () => {
 
     expect(mocks.sendPackets).not.toHaveBeenCalled();
     expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it("showClock muvaffaqiyatli bo'lganda qisqa tasdiq logini yozadi", async () => {
+    vi.setSystemTime(new Date("2026-08-21T09:23:00.000Z"));
+    const service = createLedService();
+
+    await service.showClock(LED_ORG_ID);
+
+    expect(console.log).toHaveBeenCalledTimes(1);
+    expect(console.log).toHaveBeenCalledWith("LED_CLOCK_SENT time=14:23");
+  });
+
+  it("showPlateOnly muvaffaqiyatli bo'lganda qisqa tasdiq logini yozadi", async () => {
+    const service = createLedService();
+
+    await service.showPlateOnly(LED_ORG_ID, "01 a123bc");
+
+    expect(console.log).toHaveBeenCalledTimes(1);
+    expect(console.log).toHaveBeenCalledWith("LED_PLATE_SENT plate=01A123BC");
+  });
+
+  it("showPayment muvaffaqiyatli bo'lganda qisqa tasdiq logini yozadi", async () => {
+    const service = createLedService();
+
+    await service.showPayment(LED_ORG_ID, "01 a123bc", 5000);
+
+    expect(console.log).toHaveBeenCalledTimes(1);
+    expect(console.log).toHaveBeenCalledWith("LED_PAYMENT_SENT plate=01A123BC amount=5000");
   });
 
   it("2. payment bitmap tasdiqlangan font va mappingga mos", () => {
@@ -300,17 +329,6 @@ describe("LED renderer, packets va service", () => {
     service.startClockScheduler();
     await vi.advanceTimersByTimeAsync(3000);
     expect(mocks.sendPackets).toHaveBeenCalledTimes(2);
-  });
-
-  it("muvaffaqiyatli LED operatsiyalari batafsil log yozmaydi", async () => {
-    const consoleLog = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const service = createLedService();
-    await service.showPayment(LED_ORG_ID, "01A100AA", 5000);
-    service.scheduleReturnToClock(LED_ORG_ID);
-    await service.showPayment(LED_ORG_ID, "01B200BB", 7000);
-    service.scheduleReturnToClock(LED_ORG_ID);
-    await vi.advanceTimersByTimeAsync(3000);
-    expect(consoleLog).not.toHaveBeenCalled();
   });
 
   it("6. clock scheduler faqat clock holatida yuboradi", async () => {
