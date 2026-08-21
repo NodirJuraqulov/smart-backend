@@ -32,6 +32,7 @@ import medplusAdminRouter from "./modules/medplus/medplusAdmin.routes";
 import cashCollectionsRouter from "./modules/cashCollections/cashCollections.routes";
 import plateFormatsRouter from "./modules/plateFormats/plateFormats.routes";
 import blacklistRouter from "./modules/blacklist/blacklist.routes";
+import forcedOpenHistoryRouter from "./modules/exitCandidates/forcedOpenHistory.routes";
 
 const app = express();
 
@@ -107,6 +108,7 @@ app.use("/api/organizations", medplusAdminRouter);
 app.use("/api/organizations", cashCollectionsRouter);
 app.use("/api/organizations", plateFormatsRouter);
 app.use("/api/organizations", blacklistRouter);
+app.use("/api/organizations", forcedOpenHistoryRouter);
 app.use("/api/parking", parkingRouter);
 app.use("/api/reports", reportsRouter);
 app.use("/api/admin/activity-logs", activityLogsRouter);
