@@ -8,6 +8,7 @@ import { AuthTokenPayload, signAccessToken } from "@/modules/auth/auth.service";
 import cashCollectionsRouter from "@/modules/cashCollections/cashCollections.routes";
 import { getPermissionsMap } from "@/modules/operatorPermissions/operatorPermissions.service";
 import { getOrganizationStats } from "@/modules/organizations/organizations.service";
+import reportsRouter from "@/modules/reports/reports.routes";
 import { createOperator } from "@/modules/users/users.service";
 import * as reportsService from "@/modules/reports/reports.service";
 import {
@@ -44,6 +45,7 @@ let kassirId: number;
 const app = express();
 app.use(express.json());
 app.use("/api/organizations", cashCollectionsRouter);
+app.use("/api/reports", reportsRouter);
 app.use(errorHandler);
 
 const testDb: typeof db = db;
@@ -102,6 +104,12 @@ async function listCollections(actor: AuthTokenPayload, targetOrgId = orgId) {
 async function operatorsList(actor: AuthTokenPayload, targetOrgId = orgId) {
   return testRequest(app)
     .get(`/api/organizations/${targetOrgId}/operators-list`)
+    .set("Authorization", auth(actor));
+}
+
+async function dailyReport(actor: AuthTokenPayload, query = "") {
+  return testRequest(app)
+    .get(`/api/reports/daily${query}`)
     .set("Authorization", auth(actor));
 }
 
@@ -273,7 +281,7 @@ describe("operator darajasidagi inkassatsiya", () => {
 
     const permissions = await getPermissionsMap(orgId, "kassir");
     expect(permissions.reports).toBe(true);
-    expect(Object.entries(permissions).filter(([key]) => key !== "reports").every(([, v]) => v === false)).toBe(
+    expect(Object.entries(permissions).filter(([key]) => key !== "reports").every(([, value]) => !value)).toBe(
       true
     );
   });
@@ -370,6 +378,79 @@ describe("operator darajasidagi inkassatsiya", () => {
       collected_by_name: null,
     });
     expect(Number(response.body.collections[0].collected_amount)).toBe(4000);
+  });
+});
+
+describe("dashboard revenue role scope", () => {
+  it("operator parametrsiz daily endpointda faqat o'zining yig'ilmagan summasini ko'radi", async () => {
+    await addPayment({ org: orgId, amount: 5000, method: "cash", operatorId: operatorA.id });
+    await collect(owner, { operator_id: operatorA.id, collected_amount: 5000 });
+    await addPayment({ org: orgId, amount: 12000, method: "cash", operatorId: operatorA.id });
+    await addPayment({ org: orgId, amount: 3000, method: "online", operatorId: operatorA.id });
+    await addPayment({ org: orgId, amount: 99000, method: "cash", operatorId: operatorB.id });
+
+    const response = await dailyReport(operatorA);
+
+    expect(response.status).toBe(200);
+    expect(response.body.cash_revenue).toBe(12000);
+    expect(response.body.online_revenue).toBe(3000);
+  });
+
+  it("owner parametrsiz daily endpointda barcha operatorlar yig'indisini ko'radi", async () => {
+    await addPayment({ org: orgId, amount: 11000, method: "cash", operatorId: operatorA.id });
+    await addPayment({ org: orgId, amount: 7000, method: "online", operatorId: operatorA.id });
+    await addPayment({ org: orgId, amount: 22000, method: "cash", operatorId: operatorB.id });
+    await addPayment({ org: orgId, amount: 9000, method: "online", operatorId: operatorB.id });
+
+    const response = await dailyReport(owner);
+
+    expect(response.status).toBe(200);
+    expect(response.body.cash_revenue).toBe(33000);
+    expect(response.body.online_revenue).toBe(16000);
+  });
+
+  it("ikki operator bir-birining summasini ko'rmaydi", async () => {
+    await addPayment({ org: orgId, amount: 13000, method: "cash", operatorId: operatorA.id });
+    await addPayment({ org: orgId, amount: 17000, method: "online", operatorId: operatorB.id });
+
+    const [forA, forB] = await Promise.all([dailyReport(operatorA), dailyReport(operatorB)]);
+
+    expect(forA.body).toMatchObject({ cash_revenue: 13000, online_revenue: 0 });
+    expect(forB.body).toMatchObject({ cash_revenue: 0, online_revenue: 17000 });
+  });
+
+  it("kassir va Super Admin barcha operatorlar yig'indisini ko'radi", async () => {
+    await addPayment({ org: orgId, amount: 19000, method: "cash", operatorId: operatorA.id });
+    await addPayment({ org: orgId, amount: 23000, method: "online", operatorId: operatorB.id });
+    const superAdminUser = await createTestUser(null, { role: "super_admin" });
+    const superAdmin: AuthTokenPayload = { id: superAdminUser.id, org_id: null, role: "super_admin" };
+
+    try {
+      const [forKassir, forSuperAdmin] = await Promise.all([
+        dailyReport(kassir),
+        dailyReport(superAdmin, `?org_id=${orgId}`),
+      ]);
+
+      expect(forKassir.body).toMatchObject({ cash_revenue: 19000, online_revenue: 23000 });
+      expect(forSuperAdmin.body).toMatchObject({ cash_revenue: 19000, online_revenue: 23000 });
+    } finally {
+      await testDb("tb_users").where({ id: superAdmin.id }).del();
+    }
+  });
+
+  it("date parametri bilan daily hisobot role'ga qaramasdan umumiy ledgerni qaytaradi", async () => {
+    await addPayment({ org: orgId, amount: 29000, method: "cash", operatorId: operatorA.id });
+    await addPayment({ org: orgId, amount: 31000, method: "online", operatorId: operatorB.id });
+    await collect(owner, { operator_id: operatorA.id, collected_amount: 29000 });
+    const date = DateTime.now().setZone("Asia/Tashkent").toFormat("yyyy-MM-dd");
+
+    const [forOperator, forOwner] = await Promise.all([
+      dailyReport(operatorA, `?date=${date}`),
+      dailyReport(owner, `?date=${date}`),
+    ]);
+
+    expect(forOperator.body).toMatchObject({ cash_revenue: 29000, online_revenue: 31000 });
+    expect(forOwner.body).toMatchObject({ cash_revenue: 29000, online_revenue: 31000 });
   });
 });
 

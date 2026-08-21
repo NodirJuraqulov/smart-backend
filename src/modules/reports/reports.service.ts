@@ -6,7 +6,10 @@ import { ApiError } from "@/utils/ApiError";
 import { assertOrganizationExists } from "@/utils/assertOrganizationExists";
 import { resolveOrgIdRequired } from "@/utils/orgScope";
 import { applyCompletedExitFilter, applyInsideSessionsFilter } from "@/modules/parking/sessionStatus";
-import { getOrgUncollectedRevenueByMethod } from "@/modules/cashCollections/cashCollections.service";
+import {
+  getOperatorUncollectedRevenueByMethod,
+  getOrgUncollectedRevenueByMethod,
+} from "@/modules/cashCollections/cashCollections.service";
 
 function pad(n: number): string {
   return String(n).padStart(2, "0");
@@ -183,7 +186,9 @@ export async function getDailyReport(
   const ledgerRevenue = splitRevenueByPaymentMethod(paymentsRows);
   const pendingRevenue =
     dateParam === undefined && operatorId === undefined
-      ? await getOrgUncollectedRevenueByMethod(orgId)
+      ? actor.role === "operator"
+        ? await getOperatorUncollectedRevenueByMethod(orgId, actor.id)
+        : await getOrgUncollectedRevenueByMethod(orgId)
       : null;
   const cashRevenue = pendingRevenue?.cash ?? ledgerRevenue.cashRevenue;
   const onlineRevenue = pendingRevenue?.online ?? ledgerRevenue.onlineRevenue;

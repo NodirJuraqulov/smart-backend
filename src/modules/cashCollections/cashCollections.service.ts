@@ -198,6 +198,24 @@ export async function getOrgUncollectedRevenueByMethod(
   return db.transaction((trx) => calculateOrgUncollectedRevenueByMethod(orgId, trx));
 }
 
+async function calculateOperatorUncollectedRevenueByMethod(
+  orgId: number,
+  operatorId: number,
+  executor: Knex
+): Promise<RevenueByMethod> {
+  const summary = await buildPendingSummary(orgId, operatorId, new Date(), executor);
+  return { cash: summary.expected_cash_amount, online: summary.online_amount };
+}
+
+export async function getOperatorUncollectedRevenueByMethod(
+  orgId: number,
+  operatorId: number,
+  executor?: Knex
+): Promise<RevenueByMethod> {
+  if (executor) return calculateOperatorUncollectedRevenueByMethod(orgId, operatorId, executor);
+  return db.transaction((trx) => calculateOperatorUncollectedRevenueByMethod(orgId, operatorId, trx));
+}
+
 export async function getOrgUncollectedRevenue(orgId: number, executor?: Knex): Promise<number> {
   const totals = await getOrgUncollectedRevenueByMethod(orgId, executor);
   return totals.cash + totals.online;
