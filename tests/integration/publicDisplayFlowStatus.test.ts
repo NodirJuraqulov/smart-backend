@@ -32,6 +32,12 @@ vi.mock("@/modules/relay/relay.service", async () => {
   };
 });
 
+vi.mock("@/modules/telegram/telegram.service", () => ({
+  telegramService: {
+    sendExitNotification: vi.fn().mockResolvedValue(undefined),
+  },
+}));
+
 const openBarrierMock = openBarrier as MockedFunction<typeof openBarrier>;
 const app = express();
 app.use(express.json());

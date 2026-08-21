@@ -388,6 +388,62 @@ export async function updateLedSettingsHandler(req: Request, res: Response) {
   res.json(settings);
 }
 
+export async function getTelegramSettingsHandler(req: Request, res: Response) {
+  const id = parseId(req, res);
+  if (id === null || !assertOrganizationSettingsScope(req, id, res)) return;
+  res.json(await organizationsService.getTelegramSettings(id));
+}
+
+function parseTelegramChatIds(value: unknown, res: Response): string[] | undefined | null {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0) {
+    res.status(400).json({ message: "telegram_chat_ids bo'sh bo'lmagan Chat ID massiv bo'lishi kerak" });
+    return null;
+  }
+  const chatIds: string[] = [];
+  for (const chatId of value) {
+    if (typeof chatId !== "string" || !/^-?\d+$/.test(chatId.trim())) {
+      res.status(400).json({ message: "telegram_chat_ids bo'sh bo'lmagan Chat ID massiv bo'lishi kerak" });
+      return null;
+    }
+    chatIds.push(chatId.trim());
+  }
+  return chatIds;
+}
+
+export async function updateTelegramSettingsHandler(req: Request, res: Response) {
+  const id = parseId(req, res);
+  if (id === null) return;
+  const telegramBotToken = req.body?.telegram_bot_token;
+  const telegramChatIds = req.body?.telegram_chat_ids;
+  if (telegramBotToken === undefined && telegramChatIds === undefined) {
+    res.status(400).json({ message: "telegram_bot_token yoki telegram_chat_ids yuborilishi kerak" });
+    return;
+  }
+  if (
+    telegramBotToken !== undefined &&
+    telegramBotToken !== null &&
+    (typeof telegramBotToken !== "string" ||
+      !telegramBotToken.trim() ||
+      !/^\d+:[A-Za-z0-9_-]+$/.test(telegramBotToken.trim()))
+  ) {
+    res.status(400).json({ message: "telegram_bot_token noto'g'ri" });
+    return;
+  }
+  const parsedTelegramChatIds = parseTelegramChatIds(telegramChatIds, res);
+  if (parsedTelegramChatIds === null) return;
+  const settings = await organizationsService.updateTelegramSettings(id, {
+    telegram_bot_token:
+      typeof telegramBotToken === "string" ? telegramBotToken.trim() : telegramBotToken,
+    telegram_chat_ids: parsedTelegramChatIds,
+  });
+  await logActivity(req.user!.id, "organization.telegram_settings_updated", "organization", id, {
+    telegram_bot_configured: settings.telegram_bot_configured,
+    telegram_chat_ids: settings.telegram_chat_ids,
+  });
+  res.json(settings);
+}
+
 function parseRelayDirection(value: unknown, field: string, res: Response) {
   if (value === undefined) return undefined;
   if (!value || typeof value !== "object" || Array.isArray(value)) {

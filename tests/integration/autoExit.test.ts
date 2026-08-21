@@ -37,6 +37,12 @@ vi.mock("@/modules/led/led.service", () => ({
   },
 }));
 
+vi.mock("@/modules/telegram/telegram.service", () => ({
+  telegramService: {
+    sendExitNotification: vi.fn().mockResolvedValue(undefined),
+  },
+}));
+
 vi.mock("@/websocket/socketServer", () => ({
   emitEntryDetected: vi.fn(),
   emitEntryBarrierFailed: vi.fn(),

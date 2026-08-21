@@ -30,6 +30,7 @@ import {
 import { ApiError } from "@/utils/ApiError";
 import { resolveOrgIdRequired } from "@/utils/orgScope";
 import { ledService } from "@/modules/led/led.service";
+import { telegramService } from "@/modules/telegram/telegram.service";
 import {
   emitExitCandidateCreated,
   emitExitCandidateResolved,
@@ -152,6 +153,24 @@ function scheduleLedReturnToClock(orgId: number): void {
     ledService.scheduleReturnToClock(orgId);
   } catch (error) {
     console.error("LED_CLOCK_SCHEDULE_FAILED", error);
+  }
+}
+
+function sendTelegramExitNotification(
+  orgId: number,
+  params: {
+    plateNumber: string;
+    amount: number;
+    paymentMethod: PaymentMethod;
+    imageUrl: string | null;
+  }
+): void {
+  try {
+    void telegramService.sendExitNotification(orgId, params).catch(() => {
+      console.error("TELEGRAM_NOTIFICATION_FAILED");
+    });
+  } catch {
+    console.error("TELEGRAM_NOTIFICATION_FAILED");
   }
 }
 
@@ -1008,7 +1027,14 @@ export async function confirmExitCandidate(
       },
       payment,
       resolutionType,
+      webhookEventId: candidate.webhook_event_id,
     };
+  });
+  sendTelegramExitNotification(orgId, {
+    plateNumber: displayPlateNumber(transactionResult.session.plate_number),
+    amount: transactionResult.session.amount,
+    paymentMethod: transactionResult.session.payment_method,
+    imageUrl: `/api/webhook-events/${transactionResult.webhookEventId}/images/overview`,
   });
   try {
     void ledService

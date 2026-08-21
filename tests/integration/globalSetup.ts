@@ -7,6 +7,8 @@ const projectRoot = path.resolve(__dirname, "../..");
 
 export default async function setup() {
   dotenv.config({ path: path.join(projectRoot, ".env.test"), override: true });
+  process.env.ENCRYPTION_KEY ||=
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
   const { DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD } = process.env;
 

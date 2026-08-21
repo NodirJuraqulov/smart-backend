@@ -385,6 +385,17 @@ export interface LedSettingsInput {
   led_port?: number | null;
 }
 
+interface TelegramSettingsRow {
+  id: number;
+  telegram_bot_token: string | null;
+  telegram_chat_ids: string | null;
+}
+
+export interface TelegramSettingsInput {
+  telegram_bot_token?: string | null;
+  telegram_chat_ids?: string[];
+}
+
 async function findLedSettingsOrFail(id: number): Promise<LedSettingsRow> {
   const organization = await db<LedSettingsRow>("tb_organizations")
     .select("id", "led_host", "led_port")
@@ -409,6 +420,52 @@ export async function updateLedSettings(id: number, input: LedSettingsInput) {
   };
   await db("tb_organizations").where({ id }).update(updates);
   return updates;
+}
+
+function parseTelegramChatIds(value: string | null): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) && parsed.every((item) => typeof item === "string") ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+async function findTelegramSettingsOrFail(id: number): Promise<TelegramSettingsRow> {
+  const organization = await db<TelegramSettingsRow>("tb_organizations")
+    .select("id", "telegram_bot_token", "telegram_chat_ids")
+    .where({ id })
+    .first();
+  if (!organization) throw new ApiError("Stoyanka topilmadi", 404);
+  return organization;
+}
+
+function publicTelegramSettings(row: TelegramSettingsRow) {
+  const telegramChatIds = parseTelegramChatIds(row.telegram_chat_ids);
+  return {
+    telegram_bot_configured: Boolean(row.telegram_bot_token),
+    telegram_chat_ids: telegramChatIds,
+  };
+}
+
+export async function getTelegramSettings(id: number) {
+  return publicTelegramSettings(await findTelegramSettingsOrFail(id));
+}
+
+export async function updateTelegramSettings(id: number, input: TelegramSettingsInput) {
+  await findTelegramSettingsOrFail(id);
+  const updates: Record<string, unknown> = {};
+  if (input.telegram_bot_token !== undefined) {
+    updates.telegram_bot_token = input.telegram_bot_token
+      ? encryptSecret(input.telegram_bot_token)
+      : null;
+  }
+  if (input.telegram_chat_ids !== undefined) {
+    updates.telegram_chat_ids = JSON.stringify([...new Set(input.telegram_chat_ids)]);
+  }
+  await db("tb_organizations").where({ id }).update(updates);
+  return getTelegramSettings(id);
 }
 
 async function findCameraRelaySettingsOrFail(id: number): Promise<CameraRelaySettingsRow> {

@@ -24,6 +24,8 @@ export async function createTestOrganization(overrides: TestOrgOverrides = {}): 
     timezone: overrides.timezone ?? "Asia/Tashkent",
     led_host: null,
     led_port: null,
+    telegram_bot_token: null,
+    telegram_chat_ids: null,
   });
   return id;
 }

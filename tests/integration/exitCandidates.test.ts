@@ -35,6 +35,20 @@ const ledMocks = vi.hoisted(() => ({
   scheduleReturnToClock: vi.fn<(orgId: number) => void>(),
 }));
 
+const telegramMocks = vi.hoisted(() => ({
+  sendExitNotification: vi.fn<
+    (
+      orgId: number,
+      params: {
+        plateNumber: string;
+        amount: number;
+        paymentMethod: "cash" | "online";
+        imageUrl: string | null;
+      }
+    ) => Promise<void>
+  >(),
+}));
+
 vi.mock("@/modules/relay/relay.service", () => {
   const createMock = vi.fn as unknown as () => ReturnType<typeof vi.fn>;
   return { openBarrier: createMock() };
@@ -42,6 +56,10 @@ vi.mock("@/modules/relay/relay.service", () => {
 
 vi.mock("@/modules/led/led.service", () => ({
   ledService: ledMocks,
+}));
+
+vi.mock("@/modules/telegram/telegram.service", () => ({
+  telegramService: telegramMocks,
 }));
 
 vi.mock("@/websocket/socketServer", () => {
@@ -223,6 +241,7 @@ beforeEach(async () => {
   ledMocks.showPayment.mockReset().mockResolvedValue(undefined);
   ledMocks.showPlateOnly.mockReset().mockResolvedValue(undefined);
   ledMocks.scheduleReturnToClock.mockReset();
+  telegramMocks.sendExitNotification.mockReset().mockResolvedValue(undefined);
 });
 
 afterEach(async () => {
@@ -334,6 +353,12 @@ describe("exit candidate completion workflow", () => {
     expect(Number(payment.amount)).toBe(10000);
     expect(ledMocks.showPayment).toHaveBeenCalledWith(orgId, "01A100AA", 10000);
     expect(ledMocks.scheduleReturnToClock).toHaveBeenCalledWith(orgId);
+    expect(telegramMocks.sendExitNotification).toHaveBeenCalledWith(orgId, {
+      plateNumber: "01A100AA",
+      amount: 10000,
+      paymentMethod: "cash",
+      imageUrl: `/api/webhook-events/${candidate.webhook_event_id}/images/overview`,
+    });
     expect(openBarrier).toHaveBeenCalledWith(orgId, "exit");
     expect(emitExitCompleted).toHaveBeenCalledWith(
       orgId,
@@ -357,6 +382,22 @@ describe("exit candidate completion workflow", () => {
         barrierStatus: "opened",
       })
     );
+  });
+
+  it("Telegram xatosi confirm javobi va parking yakunlanishiga ta'sir qilmaydi", async () => {
+    const sessionId = await createSession("01T100AA");
+    await postExit("01T100AA");
+    const candidate = await candidateForPlate("01T100AA");
+    telegramMocks.sendExitNotification.mockRejectedValueOnce(new Error("Telegram offline"));
+
+    const response = await confirm(candidate.id, { payment_method: "cash" });
+
+    expect(response.status).toBe(200);
+    expect(response.body.barrier_status).toBe("opened");
+    expect(await queryTable("tb_parking_sessions").where({ id: sessionId }).first()).toMatchObject({
+      status: "completed",
+    });
+    expect(openBarrier).toHaveBeenCalledWith(orgId, "exit");
   });
 
   it("preview-session summani hisoblaydi va LEDni kutmasdan javob qaytaradi", async () => {

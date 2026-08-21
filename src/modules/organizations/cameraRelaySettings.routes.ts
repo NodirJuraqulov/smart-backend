@@ -13,11 +13,13 @@ import {
   updateEmergencyBarrierSettingsHandler,
   getCameraRelaySettingsHandler,
   getLedSettingsHandler,
+  getTelegramSettingsHandler,
   expireStaleExitCandidatesHandler,
   resetTestDataHandler,
   staleSessionsHandler,
   updateCameraRelaySettingsHandler,
   updateLedSettingsHandler,
+  updateTelegramSettingsHandler,
 } from "./organizations.controller";
 
 const router = Router();
@@ -50,5 +52,7 @@ router.get("/:id/camera-relay-settings", isSuperAdminOrOwner, asyncHandler(getCa
 router.patch("/:id/camera-relay-settings", isSuperAdminOrOwner, asyncHandler(updateCameraRelaySettingsHandler));
 router.get("/:id/led-settings", isSuperAdminOrOwner, asyncHandler(getLedSettingsHandler));
 router.patch("/:id/led-settings", isSuperAdmin, asyncHandler(updateLedSettingsHandler));
+router.get("/:id/telegram-settings", isSuperAdminOrOwner, asyncHandler(getTelegramSettingsHandler));
+router.patch("/:id/telegram-settings", isSuperAdmin, asyncHandler(updateTelegramSettingsHandler));
 
 export default router;
