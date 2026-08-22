@@ -30,6 +30,7 @@ import {
 import { ApiError } from "@/utils/ApiError";
 import { resolveOrgIdRequired } from "@/utils/orgScope";
 import { ledService } from "@/modules/led/led.service";
+import { formatDuration } from "@/modules/printer/printer.service";
 import { telegramService } from "@/modules/telegram/telegram.service";
 import {
   emitExitCandidateCreated,
@@ -160,13 +161,50 @@ function sendTelegramExitNotification(
   orgId: number,
   params: {
     plateNumber: string;
-    amount: number;
-    paymentMethod: PaymentMethod;
+    amount: number | null;
+    paymentMethod: PaymentMethod | null;
     imageUrl: string | null;
+    durationText?: string;
   }
 ): void {
   try {
     void telegramService.sendExitNotification(orgId, params).catch(() => {
+      console.error("TELEGRAM_NOTIFICATION_FAILED");
+    });
+  } catch {
+    console.error("TELEGRAM_NOTIFICATION_FAILED");
+  }
+}
+
+function sendForceOpenTelegramNotification(
+  orgId: number,
+  params: {
+    plateNumber: string;
+    webhookEventId: number;
+    resolvedSessionId: number | null;
+    resolvedAt: Date;
+  }
+): void {
+  try {
+    void (async () => {
+      const resolvedSession = params.resolvedSessionId
+        ? await db<{ id: number; org_id: number; entered_at: Date }>("tb_parking_sessions")
+            .select("entered_at")
+            .where({ id: params.resolvedSessionId, org_id: orgId })
+            .first()
+        : null;
+      await telegramService.sendExitNotification(orgId, {
+        plateNumber: params.plateNumber,
+        amount: null,
+        paymentMethod: null,
+        imageUrl: `/api/webhook-events/${params.webhookEventId}/images/overview`,
+        durationText: resolvedSession
+          ? formatDuration(
+              calculateDurationMinutes(new Date(resolvedSession.entered_at), params.resolvedAt)
+            )
+          : "Noma'lum",
+      });
+    })().catch(() => {
       console.error("TELEGRAM_NOTIFICATION_FAILED");
     });
   } catch {
@@ -1035,6 +1073,7 @@ export async function confirmExitCandidate(
     amount: transactionResult.session.amount,
     paymentMethod: transactionResult.session.payment_method,
     imageUrl: `/api/webhook-events/${transactionResult.webhookEventId}/images/overview`,
+    durationText: formatDuration(transactionResult.session.duration_minutes),
   });
   try {
     void ledService
@@ -1111,7 +1150,7 @@ export async function forceOpenExitCandidate(
   if (!FORCE_OPEN_REASONS.has(reason)) throw new ApiError("Majburiy ochish sababi noto'g'ri", 400);
   const note = input.note?.trim().slice(0, 500) || null;
   const enteredPlate = input.enteredPlate ? normalizePlate(input.enteredPlate) || null : null;
-  const plateNumber = await db.transaction(async (trx) => {
+  const transactionResult = await db.transaction(async (trx) => {
     const candidate = await trx<CandidateRow>("tb_exit_candidates")
       .where({ id: candidateId, org_id: orgId })
       .forUpdate()
@@ -1154,9 +1193,15 @@ export async function forceOpenExitCandidate(
         exitImageRef: event?.overview_image_path ?? event?.vehicle_image_path ?? null,
       }),
     });
-    return resolvedPlateNumber;
+    return {
+      plateNumber: resolvedPlateNumber,
+      webhookEventId: candidate.webhook_event_id,
+      resolvedSessionId: candidate.resolved_session_id,
+      resolvedAt,
+    };
   });
-  showLedPlatePreview(orgId, plateNumber);
+  sendForceOpenTelegramNotification(orgId, transactionResult);
+  showLedPlatePreview(orgId, transactionResult.plateNumber);
   scheduleLedReturnToClock(orgId);
   const barrierStatus = await recordBarrierAttempt({
     actorId: actor.id,

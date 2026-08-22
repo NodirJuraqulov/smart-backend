@@ -24,7 +24,7 @@ function formatDateTime(date: Date): string {
   });
 }
 
-function formatDuration(durationMinutes: number): string {
+export function formatDuration(durationMinutes: number): string {
   const hours = Math.floor(durationMinutes / 60);
   const minutes = durationMinutes % 60;
   return `${hours} soat ${minutes} daqiqa`;

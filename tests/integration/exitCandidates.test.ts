@@ -41,9 +41,10 @@ const telegramMocks = vi.hoisted(() => ({
       orgId: number,
       params: {
         plateNumber: string;
-        amount: number;
-        paymentMethod: "cash" | "online";
+        amount: number | null;
+        paymentMethod: "cash" | "online" | null;
         imageUrl: string | null;
+        durationText?: string;
       }
     ) => Promise<void>
   >(),
@@ -108,6 +109,7 @@ interface CompletionSessionRow {
   status: string;
   amount: number | string;
   payment_method: string | null;
+  duration_minutes?: number | null;
   exited_at?: Date | string | null;
   active_plate_key?: string | null;
 }
@@ -347,6 +349,9 @@ describe("exit candidate completion workflow", () => {
       payment_method: "cash",
       active_plate_key: null,
     });
+    if (!session || session.duration_minutes === null || session.duration_minutes === undefined) {
+      throw new Error("Session davomiyligi topilmadi");
+    }
     const payment = await queryTable<PaymentRow>("tb_payments").where({ session_id: sessionId }).first();
     if (!payment) throw new Error("Payment topilmadi");
     expect(payment).toMatchObject({ payment_method: "cash" });
@@ -358,6 +363,7 @@ describe("exit candidate completion workflow", () => {
       amount: 10000,
       paymentMethod: "cash",
       imageUrl: `/api/webhook-events/${candidate.webhook_event_id}/images/overview`,
+      durationText: `${Math.floor(session.duration_minutes / 60)} soat ${session.duration_minutes % 60} daqiqa`,
     });
     expect(openBarrier).toHaveBeenCalledWith(orgId, "exit");
     expect(emitExitCompleted).toHaveBeenCalledWith(
@@ -468,6 +474,58 @@ describe("exit candidate completion workflow", () => {
     expect(ledMocks.scheduleReturnToClock.mock.invocationCallOrder[0]).toBeLessThan(
       openBarrierMock.mock.invocationCallOrder[0]
     );
+    await vi.waitFor(() => {
+      expect(telegramMocks.sendExitNotification).toHaveBeenCalledWith(orgId, {
+        plateNumber: "UNKNOWNP3",
+        amount: null,
+        paymentMethod: null,
+        imageUrl: `/api/webhook-events/${candidate.webhook_event_id}/images/overview`,
+        durationText: "Noma'lum",
+      });
+    });
+  });
+
+  it("force-open resolved session uchun turgan vaqtni hisoblaydi", async () => {
+    const enteredAt = new Date(Date.now() - 134 * 60_000 - 30_000);
+    const sessionId = await createTestActiveSession(orgId, "01F200AA", enteredAt);
+    await postExit("UNKNOWNF2");
+    const candidate = await candidateForPlate("UNKNOWNF2");
+    await db("tb_exit_candidates").where({ id: candidate.id, org_id: orgId }).update({
+      resolved_session_id: sessionId,
+    });
+
+    const response = await testRequest(app)
+      .post(`/api/exit-candidates/${candidate.id}/force-open`)
+      .set("Authorization", authorizationHeader);
+
+    expect(response.status).toBe(200);
+    await vi.waitFor(() => {
+      expect(telegramMocks.sendExitNotification).toHaveBeenCalledWith(orgId, {
+        plateNumber: "UNKNOWNF2",
+        amount: null,
+        paymentMethod: null,
+        imageUrl: `/api/webhook-events/${candidate.webhook_event_id}/images/overview`,
+        durationText: "2 soat 15 daqiqa",
+      });
+    });
+  });
+
+  it("Telegram xatosi force-open javobi va barrier oqimiga ta'sir qilmaydi", async () => {
+    await postExit("UNKNOWNF3");
+    const candidate = await candidateForPlate("UNKNOWNF3");
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    telegramMocks.sendExitNotification.mockRejectedValueOnce(new Error("Telegram offline"));
+
+    const response = await testRequest(app)
+      .post(`/api/exit-candidates/${candidate.id}/force-open`)
+      .set("Authorization", authorizationHeader);
+
+    expect(response.status).toBe(200);
+    expect(response.body.barrier_status).toBe("opened");
+    expect(openBarrier).toHaveBeenCalledWith(orgId, "exit");
+    await vi.waitFor(() => {
+      expect(consoleError).toHaveBeenCalledWith("TELEGRAM_NOTIFICATION_FAILED");
+    });
   });
 
   it("LED xatosi next, preview-session va force-open oqimlarini to'xtatmaydi", async () => {

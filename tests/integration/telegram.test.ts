@@ -48,6 +48,7 @@ describe("Telegram exit notification", () => {
       amount: 15000,
       paymentMethod: "cash",
       imageUrl: "https://example.com/exit.jpg",
+      durationText: "2 soat 15 daqiqa",
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -61,7 +62,26 @@ describe("Telegram exit notification", () => {
       "-987654321",
     ]);
     expect(requests[0].body.caption).toBe(
-      "Mashina raqami: 01A123BC\nSumma: 15000 so'm\nTo'lov turi: Naqd"
+      "Mashina raqami: 01A123BC\nSumma: 15000 so'm\nTo'lov turi: Naqd\nTurgan vaqt: 2 soat 15 daqiqa"
+    );
+  });
+
+  it("majburiy ochish uchun summa, to'lov turi va noma'lum davomiylikni formatlaydi", async () => {
+    await configure("123456789:TEST_token", ["1652032889"]);
+
+    await sendExitNotification(orgId, {
+      plateNumber: "01F123BC",
+      amount: null,
+      paymentMethod: null,
+      imageUrl: null,
+      durationText: "Noma'lum",
+    });
+
+    const request = fetchMock.mock.calls[0];
+    if (!request) throw new Error("Telegram so'rovi yuborilmadi");
+    const body = JSON.parse(String(request[1].body)) as Record<string, unknown>;
+    expect(body.text).toBe(
+      "Mashina raqami: 01F123BC\nSumma: —\nTo'lov turi: Majburiy ochish\nTurgan vaqt: Noma'lum"
     );
   });
 

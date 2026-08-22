@@ -12,9 +12,10 @@ interface TelegramSettingsRow {
 
 interface ExitNotificationParams {
   plateNumber: string;
-  amount: number;
-  paymentMethod: PaymentMethod;
+  amount: number | null;
+  paymentMethod: PaymentMethod | null;
   imageUrl: string | null;
+  durationText?: string;
 }
 
 type NotificationPhoto = { buffer: Buffer } | { url: string } | null;
@@ -40,8 +41,15 @@ function parseChatIds(value: string | null): string[] {
 }
 
 function caption(params: ExitNotificationParams): string {
-  const paymentMethod = params.paymentMethod === "online" ? "Online" : "Naqd";
-  return `Mashina raqami: ${params.plateNumber}\nSumma: ${params.amount} so'm\nTo'lov turi: ${paymentMethod}`;
+  const amount = params.amount === null ? "—" : `${params.amount} so'm`;
+  const paymentMethod =
+    params.paymentMethod === null
+      ? "Majburiy ochish"
+      : params.paymentMethod === "online"
+        ? "Online"
+        : "Naqd";
+  const durationText = params.durationText?.trim() || "Noma'lum";
+  return `Mashina raqami: ${params.plateNumber}\nSumma: ${amount}\nTo'lov turi: ${paymentMethod}\nTurgan vaqt: ${durationText}`;
 }
 
 async function resolvePhoto(orgId: number, imageUrl: string | null): Promise<NotificationPhoto> {
