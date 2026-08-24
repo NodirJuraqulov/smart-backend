@@ -49,6 +49,7 @@ describe("Telegram exit notification", () => {
       paymentMethod: "cash",
       imageUrl: "https://example.com/exit.jpg",
       durationText: "2 soat 15 daqiqa",
+      confirmedByName: "Test Operator",
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -62,7 +63,7 @@ describe("Telegram exit notification", () => {
       "-987654321",
     ]);
     expect(requests[0].body.caption).toBe(
-      "Mashina raqami: 01A123BC\nSumma: 15000 so'm\nTo'lov turi: Naqd\nTurgan vaqt: 2 soat 15 daqiqa"
+      "Mashina raqami: 01A123BC\nSumma: 15000 so'm\nTo'lov turi: Naqd\nTurgan vaqt: 2 soat 15 daqiqa\nTasdiqladi: Test Operator"
     );
   });
 
@@ -75,13 +76,14 @@ describe("Telegram exit notification", () => {
       paymentMethod: null,
       imageUrl: null,
       durationText: "Noma'lum",
+      confirmedByName: "Test Owner",
     });
 
     const request = fetchMock.mock.calls[0];
     if (!request) throw new Error("Telegram so'rovi yuborilmadi");
     const body = JSON.parse(String(request[1].body)) as Record<string, unknown>;
     expect(body.text).toBe(
-      "Mashina raqami: 01F123BC\nSumma: —\nTo'lov turi: Majburiy ochish\nTurgan vaqt: Noma'lum"
+      "Mashina raqami: 01F123BC\nSumma: —\nTo'lov turi: Majburiy ochish\nTurgan vaqt: Noma'lum\nTasdiqladi: Test Owner"
     );
   });
 
@@ -98,6 +100,7 @@ describe("Telegram exit notification", () => {
         amount: 20000,
         paymentMethod: "online",
         imageUrl: null,
+        confirmedByName: "Test Operator",
       })
     ).resolves.toBeUndefined();
 
@@ -113,6 +116,7 @@ describe("Telegram exit notification", () => {
       amount: 0,
       paymentMethod: "cash",
       imageUrl: null,
+      confirmedByName: "Test Operator",
     });
 
     await configure("123456789:TEST_token", null);
@@ -121,6 +125,7 @@ describe("Telegram exit notification", () => {
       amount: 0,
       paymentMethod: "cash",
       imageUrl: null,
+      confirmedByName: "Test Operator",
     });
 
     await configure("123456789:TEST_token", []);
@@ -129,6 +134,7 @@ describe("Telegram exit notification", () => {
       amount: 0,
       paymentMethod: "cash",
       imageUrl: null,
+      confirmedByName: "Test Operator",
     });
 
     expect(fetchMock).not.toHaveBeenCalled();

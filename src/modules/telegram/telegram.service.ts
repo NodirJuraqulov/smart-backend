@@ -16,6 +16,7 @@ interface ExitNotificationParams {
   paymentMethod: PaymentMethod | null;
   imageUrl: string | null;
   durationText?: string;
+  confirmedByName: string;
 }
 
 type NotificationPhoto = { buffer: Buffer } | { url: string } | null;
@@ -49,7 +50,7 @@ function caption(params: ExitNotificationParams): string {
         ? "Online"
         : "Naqd";
   const durationText = params.durationText?.trim() || "Noma'lum";
-  return `Mashina raqami: ${params.plateNumber}\nSumma: ${amount}\nTo'lov turi: ${paymentMethod}\nTurgan vaqt: ${durationText}`;
+  return `Mashina raqami: ${params.plateNumber}\nSumma: ${amount}\nTo'lov turi: ${paymentMethod}\nTurgan vaqt: ${durationText}\nTasdiqladi: ${params.confirmedByName}`;
 }
 
 async function resolvePhoto(orgId: number, imageUrl: string | null): Promise<NotificationPhoto> {

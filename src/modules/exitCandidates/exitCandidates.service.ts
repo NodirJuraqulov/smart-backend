@@ -1,7 +1,7 @@
 import { promises as fs } from "fs";
 import type { Knex } from "knex";
 import { db } from "@/config/db";
-import { AuthTokenPayload } from "@/modules/auth/auth.service";
+import { AuthTokenPayload, getUserById } from "@/modules/auth/auth.service";
 import {
   calculateDurationMinutes,
   calculateTariffSnapshotAmount,
@@ -159,6 +159,7 @@ function scheduleLedReturnToClock(orgId: number): void {
 
 function sendTelegramExitNotification(
   orgId: number,
+  confirmedByUserId: number,
   params: {
     plateNumber: string;
     amount: number | null;
@@ -168,7 +169,13 @@ function sendTelegramExitNotification(
   }
 ): void {
   try {
-    void telegramService.sendExitNotification(orgId, params).catch(() => {
+    void (async () => {
+      const user = await getUserById(confirmedByUserId);
+      await telegramService.sendExitNotification(orgId, {
+        ...params,
+        confirmedByName: user?.name.trim() || "Noma'lum",
+      });
+    })().catch(() => {
       console.error("TELEGRAM_NOTIFICATION_FAILED");
     });
   } catch {
@@ -183,16 +190,20 @@ function sendForceOpenTelegramNotification(
     webhookEventId: number;
     resolvedSessionId: number | null;
     resolvedAt: Date;
+    confirmedByUserId: number;
   }
 ): void {
   try {
     void (async () => {
-      const resolvedSession = params.resolvedSessionId
-        ? await db<{ id: number; org_id: number; entered_at: Date }>("tb_parking_sessions")
-            .select("entered_at")
-            .where({ id: params.resolvedSessionId, org_id: orgId })
-            .first()
-        : null;
+      const [resolvedSession, user] = await Promise.all([
+        params.resolvedSessionId
+          ? db<{ id: number; org_id: number; entered_at: Date }>("tb_parking_sessions")
+              .select("entered_at")
+              .where({ id: params.resolvedSessionId, org_id: orgId })
+              .first()
+          : Promise.resolve(null),
+        getUserById(params.confirmedByUserId),
+      ]);
       await telegramService.sendExitNotification(orgId, {
         plateNumber: params.plateNumber,
         amount: null,
@@ -203,6 +214,7 @@ function sendForceOpenTelegramNotification(
               calculateDurationMinutes(new Date(resolvedSession.entered_at), params.resolvedAt)
             )
           : "Noma'lum",
+        confirmedByName: user?.name.trim() || "Noma'lum",
       });
     })().catch(() => {
       console.error("TELEGRAM_NOTIFICATION_FAILED");
@@ -1068,7 +1080,7 @@ export async function confirmExitCandidate(
       webhookEventId: candidate.webhook_event_id,
     };
   });
-  sendTelegramExitNotification(orgId, {
+  sendTelegramExitNotification(orgId, actor.id, {
     plateNumber: displayPlateNumber(transactionResult.session.plate_number),
     amount: transactionResult.session.amount,
     paymentMethod: transactionResult.session.payment_method,
@@ -1200,7 +1212,10 @@ export async function forceOpenExitCandidate(
       resolvedAt,
     };
   });
-  sendForceOpenTelegramNotification(orgId, transactionResult);
+  sendForceOpenTelegramNotification(orgId, {
+    ...transactionResult,
+    confirmedByUserId: actor.id,
+  });
   showLedPlatePreview(orgId, transactionResult.plateNumber);
   scheduleLedReturnToClock(orgId);
   const barrierStatus = await recordBarrierAttempt({

@@ -45,6 +45,7 @@ const telegramMocks = vi.hoisted(() => ({
         paymentMethod: "cash" | "online" | null;
         imageUrl: string | null;
         durationText?: string;
+        confirmedByName: string;
       }
     ) => Promise<void>
   >(),
@@ -352,18 +353,22 @@ describe("exit candidate completion workflow", () => {
     if (!session || session.duration_minutes === null || session.duration_minutes === undefined) {
       throw new Error("Session davomiyligi topilmadi");
     }
+    const durationMinutes = session.duration_minutes;
     const payment = await queryTable<PaymentRow>("tb_payments").where({ session_id: sessionId }).first();
     if (!payment) throw new Error("Payment topilmadi");
     expect(payment).toMatchObject({ payment_method: "cash" });
     expect(Number(payment.amount)).toBe(10000);
     expect(ledMocks.showPayment).toHaveBeenCalledWith(orgId, "01A100AA", 10000);
     expect(ledMocks.scheduleReturnToClock).toHaveBeenCalledWith(orgId);
-    expect(telegramMocks.sendExitNotification).toHaveBeenCalledWith(orgId, {
-      plateNumber: "01A100AA",
-      amount: 10000,
-      paymentMethod: "cash",
-      imageUrl: `/api/webhook-events/${candidate.webhook_event_id}/images/overview`,
-      durationText: `${Math.floor(session.duration_minutes / 60)} soat ${session.duration_minutes % 60} daqiqa`,
+    await vi.waitFor(() => {
+      expect(telegramMocks.sendExitNotification).toHaveBeenCalledWith(orgId, {
+        plateNumber: "01A100AA",
+        amount: 10000,
+        paymentMethod: "cash",
+        imageUrl: `/api/webhook-events/${candidate.webhook_event_id}/images/overview`,
+        durationText: `${Math.floor(durationMinutes / 60)} soat ${durationMinutes % 60} daqiqa`,
+        confirmedByName: "Test User",
+      });
     });
     expect(openBarrier).toHaveBeenCalledWith(orgId, "exit");
     expect(emitExitCompleted).toHaveBeenCalledWith(
@@ -481,6 +486,7 @@ describe("exit candidate completion workflow", () => {
         paymentMethod: null,
         imageUrl: `/api/webhook-events/${candidate.webhook_event_id}/images/overview`,
         durationText: "Noma'lum",
+        confirmedByName: "Test User",
       });
     });
   });
@@ -506,6 +512,7 @@ describe("exit candidate completion workflow", () => {
         paymentMethod: null,
         imageUrl: `/api/webhook-events/${candidate.webhook_event_id}/images/overview`,
         durationText: "2 soat 15 daqiqa",
+        confirmedByName: "Test User",
       });
     });
   });
