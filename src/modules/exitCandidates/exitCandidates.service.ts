@@ -550,6 +550,7 @@ export async function createExitCandidate(input: {
           .whereIn("status", [...INSIDE_SESSION_STATUSES])
           .orderByRaw("CASE WHEN status = 'active' THEN 0 ELSE 1 END")
           .orderBy("entered_at", "desc")
+          .orderBy("id", "desc")
           .first()
       : undefined;
     if (detectedPlate && !matchingSession) {
@@ -767,6 +768,7 @@ export async function getExitCandidate(
   const suggestions = await sessionSummaryQuery()
     .where({ org_id: orgId, status: "active" })
     .orderBy("entered_at", "desc")
+    .orderBy("id", "desc")
     .limit(100);
   return { candidate, suggestions: suggestions.map(serializeSessionSummary) };
 }
@@ -789,6 +791,7 @@ export async function getNextExitCandidate(actor: AuthTokenPayload, requestedOrg
     ? await sessionSummaryQuery()
         .where({ org_id: orgId, status: "active", plate_number: candidate.detected_plate })
         .orderBy("entered_at", "desc")
+        .orderBy("id", "desc")
         .first()
     : null;
   let matchedSession = null;
@@ -839,7 +842,8 @@ export async function searchExitCandidateSessions(
   const now = new Date();
   const activeSessions = await sessionSummaryQuery()
     .where({ org_id: orgId, status: "active" })
-    .orderBy("entered_at", "asc")
+    .orderBy("entered_at", "desc")
+    .orderBy("id", "desc")
     .limit(30);
   const active_sessions = await Promise.all(
     activeSessions.map(async (session) => {
@@ -866,7 +870,12 @@ export async function searchExitCandidateSessions(
       score: session.plate_number === null ? null : similarityScore(normalized, session.plate_number),
     }))
     .filter((item): item is { session: SessionSummary; score: number } => item.score !== null)
-    .sort((left, right) => right.score - left.score || left.session.id - right.session.id)
+    .sort(
+      (left, right) =>
+        right.score - left.score ||
+        new Date(right.session.entered_at).getTime() - new Date(left.session.entered_at).getTime() ||
+        right.session.id - left.session.id
+    )
     .slice(0, 10);
   const results = await Promise.all(
     scored.map(async ({ session, score }) => {
@@ -893,20 +902,31 @@ export async function previewExitCandidateSession(
   sessionId: number
 ) {
   const orgId = resolveOrgIdRequired(actor, requestedOrgId);
-  const candidate = await db<CandidateRow>("tb_exit_candidates")
-    .select("id", "status")
-    .where({ id: candidateId, org_id: orgId })
-    .first();
-  if (!candidate) throw new ApiError("Chiqish nomzodi topilmadi", 404);
-  if (candidate.status !== "pending") throw new ApiError("Bu chiqish allaqachon hal qilingan", 409);
-  const session = await sessionSummaryQuery()
-    .where({ id: sessionId, org_id: orgId })
-    .whereIn("status", ["active", "awaiting_payment"])
-    .first();
-  if (!session) throw new ApiError("Tanlangan sessiya topilmadi", 404);
-  const preview = calculateSessionTariffPreview(session, new Date());
-  const amount = preview.amount ?? 0;
-  const plateNumber = displayPlateNumber(session.plate_number);
+  const result = await db.transaction(async (trx) => {
+    const candidate = await trx<CandidateRow>("tb_exit_candidates")
+      .select("id", "status")
+      .where({ id: candidateId, org_id: orgId })
+      .forUpdate()
+      .first();
+    if (!candidate) throw new ApiError("Chiqish nomzodi topilmadi", 404);
+    if (candidate.status !== "pending") throw new ApiError("Bu chiqish allaqachon hal qilingan", 409);
+    const session = await sessionSummaryQuery(trx)
+      .where({ id: sessionId, org_id: orgId })
+      .whereIn("status", ["active", "awaiting_payment"])
+      .forUpdate()
+      .first();
+    if (!session) throw new ApiError("Tanlangan sessiya topilmadi", 404);
+    await trx("tb_exit_candidates").where({ id: candidateId, org_id: orgId }).update({
+      resolved_session_id: session.id,
+      updated_at: trx.fn.now(),
+    });
+    const preview = calculateSessionTariffPreview(session, new Date());
+    return {
+      amount: preview.amount ?? 0,
+      plateNumber: displayPlateNumber(session.plate_number),
+    };
+  });
+  const { amount, plateNumber } = result;
   showLedPaymentPreview(orgId, plateNumber, amount);
   return { plateNumber, amount };
 }
@@ -1177,6 +1197,24 @@ export async function forceOpenExitCandidate(
       .where({ id: candidate.webhook_event_id, org_id: orgId })
       .first();
     const resolvedAt = new Date();
+    const resolvedSession = candidate.resolved_session_id
+      ? await trx<SessionSummary>("tb_parking_sessions")
+          .select("id", "entered_at", "status")
+          .where({ id: candidate.resolved_session_id, org_id: orgId })
+          .forUpdate()
+          .first()
+      : null;
+    if (resolvedSession && resolvedSession.status !== "completed") {
+      await trx("tb_parking_sessions").where({ id: resolvedSession.id, org_id: orgId }).update({
+        status: "completed",
+        exited_at: resolvedAt,
+        duration_minutes: calculateDurationMinutes(new Date(resolvedSession.entered_at), resolvedAt),
+        amount: 0,
+        exit_method: "forced",
+        operator_id: actor.id,
+        active_plate_key: null,
+      });
+    }
     await trx("tb_exit_candidates").where({ id: candidateId, org_id: orgId }).update({
       status: "dismissed",
       resolution_type: "forced_open",
@@ -1188,6 +1226,7 @@ export async function forceOpenExitCandidate(
     await trx("tb_webhook_events").where({ id: candidate.webhook_event_id, org_id: orgId }).update({
       processing_result: "exit_candidate_forced_open",
       processing_reason: reason,
+      session_id: resolvedSession?.id ?? null,
     });
     await trx("tb_activity_logs").insert({
       actor_id: actor.id,
@@ -1202,13 +1241,14 @@ export async function forceOpenExitCandidate(
         enteredPlate,
         candidateId,
         webhookEventId: candidate.webhook_event_id,
+        resolvedSessionId: resolvedSession?.id ?? null,
         exitImageRef: event?.overview_image_path ?? event?.vehicle_image_path ?? null,
       }),
     });
     return {
       plateNumber: resolvedPlateNumber,
       webhookEventId: candidate.webhook_event_id,
-      resolvedSessionId: candidate.resolved_session_id,
+      resolvedSessionId: resolvedSession?.id ?? null,
       resolvedAt,
     };
   });
@@ -1230,7 +1270,7 @@ export async function forceOpenExitCandidate(
     orgId,
     status: "dismissed",
     resolutionType: "forced_open",
-    sessionId: null,
+    sessionId: transactionResult.resolvedSessionId,
     barrierStatus,
     plateNumber: resolvedCandidate.detected_plate,
   });

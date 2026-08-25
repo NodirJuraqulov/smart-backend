@@ -112,6 +112,8 @@ interface CompletionSessionRow {
   payment_method: string | null;
   duration_minutes?: number | null;
   exited_at?: Date | string | null;
+  exit_method?: string | null;
+  operator_id?: number | null;
   active_plate_key?: string | null;
 }
 
@@ -395,6 +397,68 @@ describe("exit candidate completion workflow", () => {
     );
   });
 
+  it("bir xil plate uchun eng yangi active sessiyani tanlaydi", async () => {
+    const plate = "01N200AA";
+    const oldSessionId = await createTestActiveSession(
+      orgId,
+      plate,
+      new Date(Date.now() - 4 * 24 * 60 * 60_000)
+    );
+    await db("tb_parking_sessions").where({ id: oldSessionId }).update({
+      active_plate_key: null,
+      tariff_price_per_hour: 5000,
+      tariff_grace_period_minutes: 0,
+      tariff_intervals_snapshot: null,
+    });
+    const newSessionId = await createTestActiveSession(
+      orgId,
+      plate,
+      new Date(Date.now() - 60 * 60_000)
+    );
+    await db("tb_parking_sessions").where({ id: newSessionId }).update({
+      tariff_price_per_hour: 5000,
+      tariff_grace_period_minutes: 0,
+      tariff_intervals_snapshot: null,
+    });
+
+    const webhookResponse = await postExit(plate);
+    const candidate = await candidateForPlate(plate);
+    const nextResponse = await testRequest(app)
+      .get("/api/exit-candidates/next")
+      .set("Authorization", authorizationHeader);
+
+    expect(webhookResponse.status).toBe(200);
+    expect(candidate.matched_session_id).toBe(newSessionId);
+    expect(nextResponse.status).toBe(200);
+    expect(nextResponse.body.matched_session.session_id).toBe(newSessionId);
+
+    const searchResponse = await testRequest(app)
+      .post(`/api/exit-candidates/${candidate.id}/search`)
+      .set("Authorization", authorizationHeader)
+      .send({ plate });
+    expect(searchResponse.status).toBe(200);
+    expect(searchResponse.body.results.map((item: { session_id: string }) => item.session_id)).toEqual([
+      String(newSessionId),
+      String(oldSessionId),
+    ]);
+    expect(searchResponse.body.active_sessions.map((item: { session_id: string }) => item.session_id)).toEqual([
+      String(newSessionId),
+      String(oldSessionId),
+    ]);
+
+    const confirmResponse = await confirm(candidate.id, { payment_method: "cash" });
+    const oldSession = await queryTable<CompletionSessionRow>("tb_parking_sessions")
+      .where({ id: oldSessionId })
+      .first();
+    const newSession = await queryTable<CompletionSessionRow>("tb_parking_sessions")
+      .where({ id: newSessionId })
+      .first();
+
+    expect(confirmResponse.status).toBe(200);
+    expect(oldSession?.status).toBe("active");
+    expect(newSession?.status).toBe("completed");
+  });
+
   it("Telegram xatosi confirm javobi va parking yakunlanishiga ta'sir qilmaydi", async () => {
     const sessionId = await createSession("01T100AA");
     await postExit("01T100AA");
@@ -424,6 +488,9 @@ describe("exit candidate completion workflow", () => {
       .send({ sessionId });
     expect(response.status).toBe(200);
     expect(response.body).toEqual({ plateNumber: "01L100AA", amount: 10000 });
+    expect(
+      await queryTable<CandidateStateRow>("tb_exit_candidates").where({ id: candidate.id }).first()
+    ).toMatchObject({ resolved_session_id: sessionId });
     expect(ledMocks.showPayment).toHaveBeenCalledWith(orgId, "01L100AA", 10000);
     expect(ledMocks.scheduleReturnToClock).not.toHaveBeenCalled();
   });
@@ -491,20 +558,43 @@ describe("exit candidate completion workflow", () => {
     });
   });
 
-  it("force-open resolved session uchun turgan vaqtni hisoblaydi", async () => {
+  it("force-open resolved sessionni yopadi va turgan vaqtni hisoblaydi", async () => {
     const enteredAt = new Date(Date.now() - 134 * 60_000 - 30_000);
     const sessionId = await createTestActiveSession(orgId, "01F200AA", enteredAt);
     await postExit("UNKNOWNF2");
     const candidate = await candidateForPlate("UNKNOWNF2");
-    await db("tb_exit_candidates").where({ id: candidate.id, org_id: orgId }).update({
-      resolved_session_id: sessionId,
-    });
+    const previewResponse = await testRequest(app)
+      .post(`/api/exit-candidates/${candidate.id}/preview-session`)
+      .set("Authorization", authorizationHeader)
+      .send({ sessionId });
 
     const response = await testRequest(app)
       .post(`/api/exit-candidates/${candidate.id}/force-open`)
       .set("Authorization", authorizationHeader);
 
+    expect(previewResponse.status).toBe(200);
     expect(response.status).toBe(200);
+    const session = await queryTable<CompletionSessionRow>("tb_parking_sessions")
+      .where({ id: sessionId })
+      .first();
+    expect(session).toMatchObject({
+      status: "completed",
+      exit_method: "forced",
+      operator_id: actor.id,
+      active_plate_key: null,
+    });
+    expect(Number(session?.amount)).toBe(0);
+    expect(session?.exited_at).not.toBeNull();
+    expect(session?.duration_minutes).toBe(135);
+    expect(await queryTable<PaymentRow>("tb_payments").where({ session_id: sessionId })).toHaveLength(0);
+    expect(emitExitCandidateResolved).toHaveBeenCalledWith(
+      orgId,
+      expect.objectContaining({
+        candidateId: candidate.id,
+        resolutionType: "forced_open",
+        sessionId,
+      })
+    );
     await vi.waitFor(() => {
       expect(telegramMocks.sendExitNotification).toHaveBeenCalledWith(orgId, {
         plateNumber: "UNKNOWNF2",

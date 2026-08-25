@@ -383,6 +383,8 @@ export async function closeStaleActiveSessionOnReentry(
   const staleSession = await executor<SessionRecord>("tb_parking_sessions")
     .select("id", "entered_at")
     .where({ org_id: orgId, plate_number: plateNumber, status: "active" })
+    .orderBy("entered_at", "desc")
+    .orderBy("id", "desc")
     .forUpdate()
     .first();
   if (!staleSession) return false;
@@ -562,6 +564,7 @@ async function completeSession(
     const session = await sessionsBaseQuery(trx)
       .where({ org_id: orgId, plate_number: plateNumber, status: "active" })
       .orderBy("entered_at", "desc")
+      .orderBy("id", "desc")
       .forUpdate()
       .first();
 

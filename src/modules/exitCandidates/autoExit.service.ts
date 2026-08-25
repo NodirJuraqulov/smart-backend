@@ -133,6 +133,7 @@ async function findAutoExitSession(
     .whereIn("status", [...INSIDE_SESSION_STATUSES])
     .orderByRaw("CASE WHEN status = 'active' THEN 0 ELSE 1 END")
     .orderBy("entered_at", "desc")
+    .orderBy("id", "desc")
     .first();
 }
 
