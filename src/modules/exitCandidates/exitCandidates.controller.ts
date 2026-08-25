@@ -78,13 +78,27 @@ function parseSessionId(req: Request, res: Response): number | undefined | null 
   return sessionId;
 }
 
-function parsePaymentMethod(req: Request, res: Response): "cash" | "online" | undefined | null {
+type PaymentMethod = "cash" | "online";
+type ExitPaymentMethod = PaymentMethod | "emergency";
+
+function parsePaymentMethod(req: Request, res: Response, allowEmergency: true): ExitPaymentMethod | undefined | null;
+function parsePaymentMethod(req: Request, res: Response, allowEmergency?: false): PaymentMethod | undefined | null;
+function parsePaymentMethod(
+  req: Request,
+  res: Response,
+  allowEmergency = false
+): ExitPaymentMethod | undefined | null {
   if (req.body?.payment_method === undefined) return undefined;
-  if (req.body.payment_method !== "cash" && req.body.payment_method !== "online") {
-    res.status(400).json({ message: "payment_method 'cash' yoki 'online' bo'lishi kerak" });
-    return null;
+  if (req.body.payment_method === "cash" || req.body.payment_method === "online") {
+    return req.body.payment_method;
   }
-  return req.body.payment_method;
+  if (allowEmergency && req.body.payment_method === "emergency") return "emergency";
+  res.status(400).json({
+    message: allowEmergency
+      ? "payment_method 'cash', 'online' yoki 'emergency' bo'lishi kerak"
+      : "payment_method 'cash' yoki 'online' bo'lishi kerak",
+  });
+  return null;
 }
 
 export async function confirmHandler(req: Request, res: Response) {
@@ -94,7 +108,7 @@ export async function confirmHandler(req: Request, res: Response) {
   if (orgId === null) return;
   const sessionId = parseSessionId(req, res);
   if (sessionId === null) return;
-  const paymentMethod = parsePaymentMethod(req, res);
+  const paymentMethod = parsePaymentMethod(req, res, true);
   if (paymentMethod === null) return;
   res.json(await service.confirmExitCandidate(req.user!, orgId, id, { sessionId, paymentMethod }));
 }
@@ -117,11 +131,16 @@ export async function forceOpenHandler(req: Request, res: Response) {
     res.status(400).json({ message: "entered_plate matn bo'lishi kerak" });
     return;
   }
+  if (body.is_emergency !== undefined && typeof body.is_emergency !== "boolean") {
+    res.status(400).json({ message: "is_emergency boolean bo'lishi kerak" });
+    return;
+  }
   res.json(
     await service.forceOpenExitCandidate(req.user!, orgId, id, {
       reason: body.reason as service.ForceOpenReason | undefined,
       note: body.note,
       enteredPlate: body.entered_plate,
+      isEmergency: body.is_emergency,
     })
   );
 }

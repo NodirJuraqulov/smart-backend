@@ -43,6 +43,8 @@ import {
 type CandidateStatus = "pending" | "accepted" | "dismissed" | "expired";
 type ResolutionType = "exact" | "reassigned" | "dismissed" | "forced_open";
 type PaymentMethod = "cash" | "online";
+type ExitPaymentMethod = PaymentMethod | "emergency";
+type ExitMethod = "auto" | "manual" | "forced" | "auto_closed_on_reentry" | "emergency";
 export type ForceOpenReason =
   | "plate_not_found"
   | "camera_misread"
@@ -84,6 +86,7 @@ interface SessionSummary {
   amount: string | number | null;
   duration_minutes: number | null;
   payment_method: PaymentMethod;
+  exit_method: ExitMethod | null;
   tariff_price_per_hour: string | null;
   tariff_grace_period_minutes: number | null;
   tariff_intervals_snapshot: TariffIntervalSnapshot[] | string | null;
@@ -166,6 +169,7 @@ function sendTelegramExitNotification(
     paymentMethod: PaymentMethod | null;
     imageUrl: string | null;
     durationText?: string;
+    exitMethod?: "emergency";
   }
 ): void {
   try {
@@ -191,6 +195,7 @@ function sendForceOpenTelegramNotification(
     resolvedSessionId: number | null;
     resolvedAt: Date;
     confirmedByUserId: number;
+    isEmergency: boolean;
   }
 ): void {
   try {
@@ -206,8 +211,9 @@ function sendForceOpenTelegramNotification(
       ]);
       await telegramService.sendExitNotification(orgId, {
         plateNumber: params.plateNumber,
-        amount: null,
+        amount: params.isEmergency ? 0 : null,
         paymentMethod: null,
+        ...(params.isEmergency ? { exitMethod: "emergency" as const } : {}),
         imageUrl: `/api/webhook-events/${params.webhookEventId}/images/overview`,
         durationText: resolvedSession
           ? formatDuration(
@@ -280,6 +286,7 @@ function sessionSummaryQuery(executor = db) {
     "amount",
     "duration_minutes",
     "payment_method",
+    "exit_method",
     "tariff_price_per_hour",
     "tariff_grace_period_minutes",
     "tariff_intervals_snapshot",
@@ -935,7 +942,7 @@ export async function confirmExitCandidate(
   actor: AuthTokenPayload,
   requestedOrgId: number | undefined,
   candidateId: number,
-  input: { sessionId?: number; paymentMethod?: PaymentMethod }
+  input: { sessionId?: number; paymentMethod?: ExitPaymentMethod }
 ) {
   const orgId = resolveOrgIdRequired(actor, requestedOrgId);
   const transactionResult = await db.transaction(async (trx) => {
@@ -958,25 +965,31 @@ export async function confirmExitCandidate(
     if (!session || session.status !== "active") {
       throw new ApiError("Tanlangan faol sessiya topilmadi", 409);
     }
+    const isEmergency = input.paymentMethod === "emergency";
     if (
       session.session_source === "regular" &&
       input.paymentMethod !== "cash" &&
-      input.paymentMethod !== "online"
+      input.paymentMethod !== "online" &&
+      !isEmergency
     ) {
-      throw new ApiError("payment_method 'cash' yoki 'online' bo'lishi kerak", 400);
+      throw new ApiError("payment_method 'cash', 'online' yoki 'emergency' bo'lishi kerak", 400);
     }
     const exitedAt = new Date();
     const durationMinutes = calculateDurationMinutes(new Date(session.entered_at), exitedAt);
     const snapshotAmount = calculateTariffSnapshotAmount(session, durationMinutes);
-    if (session.session_source === "regular" && snapshotAmount === null) {
+    if (session.session_source === "regular" && !isEmergency && snapshotAmount === null) {
       throw new ApiError("Sessiyaning kirish vaqtidagi tarif snapshoti topilmadi", 409);
     }
-    let amount = session.session_source === "regular" ? snapshotAmount! : 0;
-    const paymentMethod = session.session_source === "regular" ? input.paymentMethod! : session.payment_method;
+    let amount = session.session_source === "regular" && !isEmergency ? snapshotAmount! : 0;
+    const paymentMethod =
+      session.session_source === "regular" && !isEmergency
+        ? (input.paymentMethod as PaymentMethod)
+        : session.payment_method;
+    const exitMethod: ExitMethod = isEmergency ? "emergency" : "auto";
 
     let inpatientFreeExit = false;
     let appliedClinicDiscount: { id: number; discountPercent: number; originalAmount: number } | null = null;
-    if (session.session_source === "regular" && session.plate_number) {
+    if (session.session_source === "regular" && !isEmergency && session.plate_number) {
       const todayDate = getOrgTodayDate(organization?.timezone);
       const inpatientVehicle = await findActiveInpatientVehicleForExit(
         orgId,
@@ -1002,7 +1015,7 @@ export async function confirmExitCandidate(
       }
     }
     let payment: { id: number; amount: number; payment_method: PaymentMethod; paid_at: Date } | null = null;
-    if (session.session_source === "regular" && !inpatientFreeExit) {
+    if (session.session_source === "regular" && !isEmergency && !inpatientFreeExit) {
       const [paymentId] = await trx("tb_payments").insert({
         org_id: orgId,
         session_id: session.id,
@@ -1019,7 +1032,7 @@ export async function confirmExitCandidate(
       duration_minutes: durationMinutes,
       amount,
       payment_method: paymentMethod,
-      exit_method: "auto",
+      exit_method: exitMethod,
       operator_id: actor.id,
       active_plate_key: null,
     });
@@ -1052,7 +1065,13 @@ export async function confirmExitCandidate(
         newStatus: "completed",
         operatorId: actor.id,
         amount,
-        paymentMethod: session.session_source === "regular" ? paymentMethod : null,
+        paymentMethod:
+          session.session_source === "regular"
+            ? isEmergency
+              ? "emergency"
+              : paymentMethod
+            : null,
+        exitMethod,
       }),
     });
     if (inpatientFreeExit) {
@@ -1093,6 +1112,7 @@ export async function confirmExitCandidate(
         duration_minutes: durationMinutes,
         amount,
         payment_method: paymentMethod,
+        exit_method: exitMethod,
         active_plate_key: null,
       },
       payment,
@@ -1103,7 +1123,13 @@ export async function confirmExitCandidate(
   sendTelegramExitNotification(orgId, actor.id, {
     plateNumber: displayPlateNumber(transactionResult.session.plate_number),
     amount: transactionResult.session.amount,
-    paymentMethod: transactionResult.session.payment_method,
+    paymentMethod:
+      transactionResult.session.exit_method === "emergency"
+        ? null
+        : transactionResult.session.payment_method,
+    ...(transactionResult.session.exit_method === "emergency"
+      ? { exitMethod: "emergency" as const }
+      : {}),
     imageUrl: `/api/webhook-events/${transactionResult.webhookEventId}/images/overview`,
     durationText: formatDuration(transactionResult.session.duration_minutes),
   });
@@ -1140,9 +1166,11 @@ export async function confirmExitCandidate(
     plateNumber: displayPlateNumber(transactionResult.session.plate_number),
     amount: transactionResult.session.amount,
     paymentMethod:
-      transactionResult.session.session_source === "regular"
+      transactionResult.session.session_source === "regular" &&
+      transactionResult.session.exit_method !== "emergency"
         ? transactionResult.session.payment_method
         : null,
+    exitMethod: transactionResult.session.exit_method,
     barrierStatus,
     sessionSource: transactionResult.session.session_source,
     durationMinutes: transactionResult.session.duration_minutes,
@@ -1158,9 +1186,11 @@ export async function confirmExitCandidate(
     sessionSource: transactionResult.session.session_source,
     amount: transactionResult.session.amount,
     paymentMethod:
-      transactionResult.session.session_source === "regular"
+      transactionResult.session.session_source === "regular" &&
+      transactionResult.session.exit_method !== "emergency"
         ? transactionResult.session.payment_method
         : null,
+    exitMethod: transactionResult.session.exit_method,
     durationMinutes: transactionResult.session.duration_minutes,
   });
   return {
@@ -1175,12 +1205,18 @@ export async function forceOpenExitCandidate(
   actor: AuthTokenPayload,
   requestedOrgId: number | undefined,
   candidateId: number,
-  input: { reason?: ForceOpenReason; note?: string; enteredPlate?: string }
+  input: { reason?: ForceOpenReason; note?: string; enteredPlate?: string; isEmergency?: boolean }
 ) {
   const orgId = resolveOrgIdRequired(actor, requestedOrgId);
-  const reason = input.reason ?? "other";
+  const isEmergency = input.isEmergency === true;
+  const reason = input.reason ?? (isEmergency ? "emergency" : "other");
   if (!FORCE_OPEN_REASONS.has(reason)) throw new ApiError("Majburiy ochish sababi noto'g'ri", 400);
   const note = input.note?.trim().slice(0, 500) || null;
+  const resolutionNote = isEmergency
+    ? note
+      ? `emergency: ${note}`.slice(0, 500)
+      : "emergency"
+    : note;
   const enteredPlate = input.enteredPlate ? normalizePlate(input.enteredPlate) || null : null;
   const transactionResult = await db.transaction(async (trx) => {
     const candidate = await trx<CandidateRow>("tb_exit_candidates")
@@ -1210,7 +1246,7 @@ export async function forceOpenExitCandidate(
         exited_at: resolvedAt,
         duration_minutes: calculateDurationMinutes(new Date(resolvedSession.entered_at), resolvedAt),
         amount: 0,
-        exit_method: "forced",
+        exit_method: isEmergency ? "emergency" : "forced",
         operator_id: actor.id,
         active_plate_key: null,
       });
@@ -1220,7 +1256,7 @@ export async function forceOpenExitCandidate(
       resolution_type: "forced_open",
       resolved_by: actor.id,
       resolved_at: resolvedAt,
-      resolution_note: note,
+      resolution_note: resolutionNote,
       updated_at: resolvedAt,
     });
     await trx("tb_webhook_events").where({ id: candidate.webhook_event_id, org_id: orgId }).update({
@@ -1238,11 +1274,13 @@ export async function forceOpenExitCandidate(
         orgId,
         reason,
         note,
+        isEmergency,
         enteredPlate,
         candidateId,
         webhookEventId: candidate.webhook_event_id,
         resolvedSessionId: resolvedSession?.id ?? null,
         exitImageRef: event?.overview_image_path ?? event?.vehicle_image_path ?? null,
+        exitMethod: resolvedSession ? (isEmergency ? "emergency" : "forced") : null,
       }),
     });
     return {
@@ -1250,6 +1288,7 @@ export async function forceOpenExitCandidate(
       webhookEventId: candidate.webhook_event_id,
       resolvedSessionId: resolvedSession?.id ?? null,
       resolvedAt,
+      isEmergency,
     };
   });
   sendForceOpenTelegramNotification(orgId, {
@@ -1273,6 +1312,7 @@ export async function forceOpenExitCandidate(
     sessionId: transactionResult.resolvedSessionId,
     barrierStatus,
     plateNumber: resolvedCandidate.detected_plate,
+    exitMethod: transactionResult.isEmergency ? "emergency" : "forced",
   });
   return { candidate: resolvedCandidate, barrier_status: barrierStatus };
 }

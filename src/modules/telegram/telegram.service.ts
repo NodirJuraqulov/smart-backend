@@ -14,6 +14,7 @@ interface ExitNotificationParams {
   plateNumber: string;
   amount: number | null;
   paymentMethod: PaymentMethod | null;
+  exitMethod?: "emergency";
   imageUrl: string | null;
   durationText?: string;
   confirmedByName: string;
@@ -44,7 +45,9 @@ function parseChatIds(value: string | null): string[] {
 function caption(params: ExitNotificationParams): string {
   const amount = params.amount === null ? "—" : `${params.amount} so'm`;
   const paymentMethod =
-    params.paymentMethod === null
+    params.exitMethod === "emergency"
+      ? "Tez yordam"
+      : params.paymentMethod === null
       ? "Majburiy ochish"
       : params.paymentMethod === "online"
         ? "Online"

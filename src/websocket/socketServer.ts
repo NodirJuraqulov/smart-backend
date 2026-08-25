@@ -42,6 +42,7 @@ export interface ExitCandidateResolvedPayload {
   sessionSource?: "regular" | "subscription" | "vip" | null;
   amount?: number | null;
   paymentMethod?: "cash" | "online" | null;
+  exitMethod?: "auto" | "manual" | "forced" | "auto_closed_on_reentry" | "emergency" | null;
   durationMinutes?: number | null;
 }
 
@@ -51,6 +52,7 @@ export interface ExitCompletedPayload {
   plateNumber: string;
   amount: number;
   paymentMethod: "cash" | "online" | null;
+  exitMethod?: "auto" | "manual" | "forced" | "auto_closed_on_reentry" | "emergency" | null;
   barrierStatus: ExitBarrierStatus;
   sessionSource?: "regular" | "subscription" | "vip" | null;
   durationMinutes?: number | null;

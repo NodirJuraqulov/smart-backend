@@ -48,7 +48,7 @@ export interface SessionRecord {
   amount: string | null;
   status: "active" | "completed" | "awaiting_payment";
   entry_method: "auto" | "manual";
-  exit_method: "auto" | "manual" | "forced" | "auto_closed_on_reentry" | null;
+  exit_method: "auto" | "manual" | "forced" | "auto_closed_on_reentry" | "emergency" | null;
   image_entry: string | null;
   image_exit: string | null;
   entry_overview_image_path: string | null;

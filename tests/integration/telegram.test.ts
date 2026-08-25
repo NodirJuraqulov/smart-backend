@@ -87,6 +87,27 @@ describe("Telegram exit notification", () => {
     );
   });
 
+  it("emergency chiqishni Tez yordam deb formatlaydi", async () => {
+    await configure("123456789:TEST_token", ["1652032889"]);
+
+    await sendExitNotification(orgId, {
+      plateNumber: "01E123BC",
+      amount: 0,
+      paymentMethod: null,
+      exitMethod: "emergency",
+      imageUrl: null,
+      durationText: "5 daqiqa",
+      confirmedByName: "Test Owner",
+    });
+
+    const request = fetchMock.mock.calls[0];
+    if (!request) throw new Error("Telegram so'rovi yuborilmadi");
+    const body = JSON.parse(String(request[1].body)) as Record<string, unknown>;
+    expect(body.text).toBe(
+      "Mashina raqami: 01E123BC\nSumma: 0 so'm\nTo'lov turi: Tez yordam\nTurgan vaqt: 5 daqiqa\nTasdiqladi: Test Owner"
+    );
+  });
+
   it("bir Chat ID xato bersa ikkinchisiga yuborishda davom etadi", async () => {
     await configure("123456789:TEST_token", ["111", "222"]);
     fetchMock

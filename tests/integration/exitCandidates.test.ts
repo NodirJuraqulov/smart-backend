@@ -43,6 +43,7 @@ const telegramMocks = vi.hoisted(() => ({
         plateNumber: string;
         amount: number | null;
         paymentMethod: "cash" | "online" | null;
+        exitMethod?: "emergency";
         imageUrl: string | null;
         durationText?: string;
         confirmedByName: string;
@@ -459,6 +460,60 @@ describe("exit candidate completion workflow", () => {
     expect(newSession?.status).toBe("completed");
   });
 
+  it("emergency confirm regular sessiyani pulsiz to'liq yopadi", async () => {
+    const sessionId = await createSession("01E100AA");
+    await postExit("01E100AA");
+    const candidate = await candidateForPlate("01E100AA");
+    ledMocks.showPlateOnly.mockClear();
+
+    const response = await confirm(candidate.id, { payment_method: "emergency" });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      session: {
+        id: sessionId,
+        status: "completed",
+        amount: 0,
+        exit_method: "emergency",
+      },
+      payment: null,
+      barrier_status: "opened",
+    });
+    const session = await queryTable<CompletionSessionRow>("tb_parking_sessions")
+      .where({ id: sessionId })
+      .first();
+    expect(session).toMatchObject({
+      status: "completed",
+      exit_method: "emergency",
+      active_plate_key: null,
+    });
+    expect(Number(session?.amount)).toBe(0);
+    expect(await queryTable<PaymentRow>("tb_payments").where({ session_id: sessionId })).toHaveLength(0);
+    expect(ledMocks.showPayment).toHaveBeenCalledWith(orgId, "01E100AA", 0);
+    expect(ledMocks.showPlateOnly).not.toHaveBeenCalled();
+    expect(openBarrier).toHaveBeenCalledWith(orgId, "exit");
+    expect(emitExitCompleted).toHaveBeenCalledWith(
+      orgId,
+      expect.objectContaining({
+        sessionId,
+        amount: 0,
+        paymentMethod: null,
+        exitMethod: "emergency",
+      })
+    );
+    await vi.waitFor(() => {
+      expect(telegramMocks.sendExitNotification).toHaveBeenCalledWith(
+        orgId,
+        expect.objectContaining({
+          plateNumber: "01E100AA",
+          amount: 0,
+          paymentMethod: null,
+          exitMethod: "emergency",
+        })
+      );
+    });
+  });
+
   it("Telegram xatosi confirm javobi va parking yakunlanishiga ta'sir qilmaydi", async () => {
     const sessionId = await createSession("01T100AA");
     await postExit("01T100AA");
@@ -605,6 +660,88 @@ describe("exit candidate completion workflow", () => {
         confirmedByName: "Test User",
       });
     });
+  });
+
+  it("emergency force-open resolved sessionni emergency bilan yopadi", async () => {
+    const sessionId = await createSession("01E200AA");
+    await postExit("UNKNOWNEM2");
+    const candidate = await candidateForPlate("UNKNOWNEM2");
+    const preview = await testRequest(app)
+      .post(`/api/exit-candidates/${candidate.id}/preview-session`)
+      .set("Authorization", authorizationHeader)
+      .send({ sessionId });
+
+    const response = await testRequest(app)
+      .post(`/api/exit-candidates/${candidate.id}/force-open`)
+      .set("Authorization", authorizationHeader)
+      .send({ is_emergency: true });
+
+    expect(preview.status).toBe(200);
+    expect(response.status).toBe(200);
+    const session = await queryTable<CompletionSessionRow>("tb_parking_sessions")
+      .where({ id: sessionId })
+      .first();
+    expect(session).toMatchObject({
+      status: "completed",
+      exit_method: "emergency",
+      active_plate_key: null,
+    });
+    expect(Number(session?.amount)).toBe(0);
+    expect(await queryTable<PaymentRow>("tb_payments").where({ session_id: sessionId })).toHaveLength(0);
+    expect(response.body.candidate).toMatchObject({
+      status: "dismissed",
+      resolution_type: "forced_open",
+      resolution_note: "emergency",
+    });
+    expect(ledMocks.showPlateOnly).toHaveBeenCalledWith(orgId, "UNKNOWNEM2");
+    expect(openBarrier).toHaveBeenCalledWith(orgId, "exit");
+    await vi.waitFor(() => {
+      expect(telegramMocks.sendExitNotification).toHaveBeenCalledWith(
+        orgId,
+        expect.objectContaining({
+          plateNumber: "UNKNOWNEM2",
+          amount: 0,
+          paymentMethod: null,
+          exitMethod: "emergency",
+        })
+      );
+    });
+  });
+
+  it("emergency force-open sessiyasiz candidatega emergency belgisini yozadi", async () => {
+    await postExit("UNKNOWNEM3");
+    const candidate = await candidateForPlate("UNKNOWNEM3");
+
+    const response = await testRequest(app)
+      .post(`/api/exit-candidates/${candidate.id}/force-open`)
+      .set("Authorization", authorizationHeader)
+      .send({ is_emergency: true, note: "103 chaqiruvi" });
+
+    expect(response.status).toBe(200);
+    expect(response.body.candidate).toMatchObject({
+      status: "dismissed",
+      resolution_type: "forced_open",
+      resolved_session_id: null,
+      resolution_note: "emergency: 103 chaqiruvi",
+    });
+    const event = await queryTable("tb_webhook_events")
+      .where({ id: candidate.webhook_event_id })
+      .first();
+    expect(event).toMatchObject({
+      processing_result: "exit_candidate_forced_open",
+      processing_reason: "emergency",
+      session_id: null,
+    });
+    const audit = await queryTable<ActivityLogRow>("tb_activity_logs")
+      .where({ action: "exit_candidate.forced_open", target_id: candidate.id })
+      .first();
+    expect(audit?.details).toMatchObject({
+      isEmergency: true,
+      resolvedSessionId: null,
+      exitMethod: null,
+    });
+    expect(ledMocks.showPlateOnly).toHaveBeenCalledWith(orgId, "UNKNOWNEM3");
+    expect(openBarrier).toHaveBeenCalledWith(orgId, "exit");
   });
 
   it("Telegram xatosi force-open javobi va barrier oqimiga ta'sir qilmaydi", async () => {
