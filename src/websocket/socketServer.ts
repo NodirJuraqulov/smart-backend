@@ -35,7 +35,14 @@ export interface ExitCandidateResolvedPayload {
   candidateId: number;
   orgId: number;
   status: "accepted" | "dismissed" | "expired";
-  resolutionType: "exact" | "reassigned" | "dismissed" | "forced_open" | null;
+  resolutionType:
+    | "exact"
+    | "reassigned"
+    | "dismissed"
+    | "forced_open"
+    | "emergency_forced_open"
+    | "emergency_confirmed"
+    | null;
   sessionId: number | null;
   barrierStatus: ExitBarrierStatus | null;
   plateNumber?: string | null;

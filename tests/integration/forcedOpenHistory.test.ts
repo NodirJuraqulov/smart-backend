@@ -33,7 +33,7 @@ function authorization(actor: AuthTokenPayload): string {
 async function createCandidate(input: {
   orgId?: number;
   plateNumber: string;
-  resolutionType: "forced_open" | "exact" | "reassigned";
+  resolutionType: "forced_open" | "emergency_forced_open" | "exact" | "reassigned";
   resolvedAt: Date;
   resolvedBy: number;
   note?: string | null;
@@ -53,7 +53,10 @@ async function createCandidate(input: {
     detected_plate: input.plateNumber,
     confidence: 95,
     camera_event_at: input.resolvedAt,
-    status: input.resolutionType === "forced_open" ? "dismissed" : "accepted",
+    status:
+      input.resolutionType === "forced_open" || input.resolutionType === "emergency_forced_open"
+        ? "dismissed"
+        : "accepted",
     resolution_type: input.resolutionType,
     resolved_by: input.resolvedBy,
     resolved_at: input.resolvedAt,
@@ -117,6 +120,7 @@ describe("GET /api/organizations/:id/forced-open-history", () => {
           resolved_at: resolvedAt.toISOString(),
           resolved_by: { id: operator.id, name: "Test User" },
           resolution_note: "Kirish sessiyasi topilmadi",
+          is_emergency: false,
           image_url: expect.stringMatching(
             new RegExp(`^/api/webhook-events/\\d+/images/overview$`)
           ),
@@ -124,6 +128,33 @@ describe("GET /api/organizations/:id/forced-open-history", () => {
       ]);
       expect(response.body.pagination).toEqual({ page: 1, limit: 20, total: 1, total_pages: 1 });
     }
+  });
+
+  it("forced_open va emergency_forced_open yozuvlarini emergency belgisi bilan qaytaradi", async () => {
+    const ordinaryId = await createCandidate({
+      plateNumber: "01F100AA",
+      resolutionType: "forced_open",
+      resolvedAt: new Date("2026-08-21T08:30:00.000Z"),
+      resolvedBy: operator.id,
+    });
+    const emergencyId = await createCandidate({
+      plateNumber: "01E100AA",
+      resolutionType: "emergency_forced_open",
+      resolvedAt: new Date("2026-08-21T08:31:00.000Z"),
+      resolvedBy: operator.id,
+      note: "emergency",
+    });
+
+    const response = await request(app)
+      .get(`/api/organizations/${orgId}/forced-open-history`)
+      .set("Authorization", authorization(owner));
+
+    expect(response.status).toBe(200);
+    expect(response.body.history).toEqual([
+      expect.objectContaining({ id: emergencyId, is_emergency: true }),
+      expect.objectContaining({ id: ordinaryId, is_emergency: false }),
+    ]);
+    expect(response.body.pagination).toEqual({ page: 1, limit: 20, total: 2, total_pages: 1 });
   });
 
   it("exact va reassigned candidate yozuvlarini ro'yxatga kiritmaydi", async () => {

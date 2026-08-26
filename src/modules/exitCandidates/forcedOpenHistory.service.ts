@@ -8,6 +8,7 @@ interface ForcedOpenHistoryRow {
   webhook_event_id: number;
   detected_plate: string | null;
   suggested_plate: string | null;
+  resolution_type: "forced_open" | "emergency_forced_open";
   resolved_at: Date;
   resolved_by: number | null;
   resolved_by_name: string | null;
@@ -39,7 +40,8 @@ export async function listForcedOpenHistory(
   await assertOrganizationExists(orgId);
 
   const [{ count }] = await db("tb_exit_candidates")
-    .where({ org_id: orgId, resolution_type: "forced_open" })
+    .where({ org_id: orgId })
+    .whereIn("resolution_type", ["forced_open", "emergency_forced_open"])
     .count<{ count: string }[]>("id as count");
   const total = Number(count);
 
@@ -51,6 +53,7 @@ export async function listForcedOpenHistory(
       "tb_exit_candidates.webhook_event_id",
       "tb_exit_candidates.detected_plate",
       "tb_exit_candidates.suggested_plate",
+      "tb_exit_candidates.resolution_type",
       "tb_exit_candidates.resolved_at",
       "tb_exit_candidates.resolved_by",
       "resolver.name as resolved_by_name",
@@ -59,10 +62,8 @@ export async function listForcedOpenHistory(
       "tb_webhook_events.vehicle_image_path",
       "tb_webhook_events.plate_image_path"
     )
-    .where({
-      "tb_exit_candidates.org_id": orgId,
-      "tb_exit_candidates.resolution_type": "forced_open",
-    })
+    .where({ "tb_exit_candidates.org_id": orgId })
+    .whereIn("tb_exit_candidates.resolution_type", ["forced_open", "emergency_forced_open"])
     .orderBy("tb_exit_candidates.resolved_at", "desc")
     .orderBy("tb_exit_candidates.id", "desc")
     .limit(input.limit)
@@ -81,6 +82,7 @@ export async function listForcedOpenHistory(
               name: row.resolved_by_name,
             },
       resolution_note: row.resolution_note,
+      is_emergency: row.resolution_type === "emergency_forced_open",
       image_url: imageUrl(row),
     })),
     pagination: {

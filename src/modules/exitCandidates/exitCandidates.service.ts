@@ -41,7 +41,13 @@ import {
 } from "@/websocket/socketServer";
 
 type CandidateStatus = "pending" | "accepted" | "dismissed" | "expired";
-type ResolutionType = "exact" | "reassigned" | "dismissed" | "forced_open";
+type ResolutionType =
+  | "exact"
+  | "reassigned"
+  | "dismissed"
+  | "forced_open"
+  | "emergency_forced_open"
+  | "emergency_confirmed";
 type PaymentMethod = "cash" | "online";
 type ExitPaymentMethod = PaymentMethod | "emergency";
 type ExitMethod = "auto" | "manual" | "forced" | "auto_closed_on_reentry" | "emergency";
@@ -1036,7 +1042,11 @@ export async function confirmExitCandidate(
       operator_id: actor.id,
       active_plate_key: null,
     });
-    const resolutionType: ResolutionType = input.sessionId === undefined ? "exact" : "reassigned";
+    const resolutionType: ResolutionType = isEmergency
+      ? "emergency_confirmed"
+      : input.sessionId === undefined
+        ? "exact"
+        : "reassigned";
     const resolvedAt = new Date();
     await trx("tb_exit_candidates").where({ id: candidate.id, org_id: orgId }).update({
       status: "accepted",
@@ -1048,13 +1058,16 @@ export async function confirmExitCandidate(
     });
     await trx("tb_webhook_events").where({ id: candidate.webhook_event_id, org_id: orgId }).update({
       processing_result: "exit_completed",
-      processing_reason: `candidate_${resolutionType}_confirmed`,
+      processing_reason:
+        resolutionType === "emergency_confirmed"
+          ? "candidate_emergency_confirmed"
+          : `candidate_${resolutionType}_confirmed`,
       session_id: session.id,
       processed_at: trx.fn.now(),
     });
     await trx("tb_activity_logs").insert({
       actor_id: actor.id,
-      action: resolutionType === "exact" ? "exit_candidate.accepted" : "exit_candidate.reassigned",
+      action: input.sessionId === undefined ? "exit_candidate.accepted" : "exit_candidate.reassigned",
       target_type: "exit_candidate",
       target_id: candidate.id,
       details: JSON.stringify({
@@ -1253,7 +1266,7 @@ export async function forceOpenExitCandidate(
     }
     await trx("tb_exit_candidates").where({ id: candidateId, org_id: orgId }).update({
       status: "dismissed",
-      resolution_type: "forced_open",
+      resolution_type: isEmergency ? "emergency_forced_open" : "forced_open",
       resolved_by: actor.id,
       resolved_at: resolvedAt,
       resolution_note: resolutionNote,
@@ -1308,7 +1321,7 @@ export async function forceOpenExitCandidate(
     candidateId,
     orgId,
     status: "dismissed",
-    resolutionType: "forced_open",
+    resolutionType: transactionResult.isEmergency ? "emergency_forced_open" : "forced_open",
     sessionId: transactionResult.resolvedSessionId,
     barrierStatus,
     plateNumber: resolvedCandidate.detected_plate,

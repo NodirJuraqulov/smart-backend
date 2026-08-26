@@ -47,7 +47,14 @@ interface ExitCandidateDisplayRow {
   id: number;
   detected_plate: string | null;
   status: "pending" | "accepted" | "dismissed" | "expired";
-  resolution_type: "exact" | "reassigned" | "dismissed" | "forced_open" | null;
+  resolution_type:
+    | "exact"
+    | "reassigned"
+    | "dismissed"
+    | "forced_open"
+    | "emergency_forced_open"
+    | "emergency_confirmed"
+    | null;
   matched_session_id: number | null;
   resolved_session_id: number | null;
   resolved_at: Date | null;

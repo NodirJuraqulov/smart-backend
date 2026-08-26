@@ -470,6 +470,9 @@ describe("exit candidate completion workflow", () => {
 
     expect(response.status).toBe(200);
     expect(response.body).toMatchObject({
+      candidate: {
+        resolution_type: "emergency_confirmed",
+      },
       session: {
         id: sessionId,
         status: "completed",
@@ -690,7 +693,7 @@ describe("exit candidate completion workflow", () => {
     expect(await queryTable<PaymentRow>("tb_payments").where({ session_id: sessionId })).toHaveLength(0);
     expect(response.body.candidate).toMatchObject({
       status: "dismissed",
-      resolution_type: "forced_open",
+      resolution_type: "emergency_forced_open",
       resolution_note: "emergency",
     });
     expect(ledMocks.showPlateOnly).toHaveBeenCalledWith(orgId, "UNKNOWNEM2");
@@ -720,7 +723,7 @@ describe("exit candidate completion workflow", () => {
     expect(response.status).toBe(200);
     expect(response.body.candidate).toMatchObject({
       status: "dismissed",
-      resolution_type: "forced_open",
+      resolution_type: "emergency_forced_open",
       resolved_session_id: null,
       resolution_note: "emergency: 103 chaqiruvi",
     });
