@@ -4,7 +4,7 @@ import jwt from "jsonwebtoken";
 import { db } from "@/config/db";
 import { env } from "@/config/env";
 
-export type UserRole = "super_admin" | "operator" | "owner" | "kassir";
+export type UserRole = "super_admin" | "operator" | "owner" | "kassir" | "registrator";
 
 interface UserRecord {
   id: number;

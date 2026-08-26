@@ -35,12 +35,16 @@ interface PermissionRecord {
   org_id: number;
   role: PermissionRole;
   section_key: string;
-  can_view: boolean;
+  can_view: boolean | number;
 }
 
 interface PermissionInput {
   section_key: string;
   can_view: boolean;
+}
+
+function toBoolean(value: boolean | number): boolean {
+  return value === true || value === 1;
 }
 
 export async function seedDefaultPermissions(trx: Knex, orgId: number): Promise<void> {
@@ -62,7 +66,7 @@ export async function listPermissions(orgId: number, role: PermissionRole = "ope
     .where({ org_id: orgId, role })
     .select("section_key", "can_view")
     .orderBy("section_key", "asc");
-  return rows.map((row) => ({ section_key: row.section_key, can_view: !!row.can_view }));
+  return rows.map((row) => ({ section_key: row.section_key, can_view: toBoolean(row.can_view) }));
 }
 
 export async function updatePermissions(
@@ -111,7 +115,7 @@ export async function hasPermission(
     .where({ org_id: orgId, role, section_key: sectionKey })
     .first();
 
-  return permission ? !!permission.can_view : defaultCanView(role, sectionKey as SectionKey);
+  return permission ? toBoolean(permission.can_view) : defaultCanView(role, sectionKey as SectionKey);
 }
 
 export async function canAccessSection(
@@ -119,6 +123,7 @@ export async function canAccessSection(
   orgId: number | null,
   sectionKey: string
 ): Promise<boolean> {
+  if (role === "registrator") return false;
   if (!isPermissionRole(role)) return true;
   return hasPermission(orgId, sectionKey, role);
 }
@@ -127,6 +132,9 @@ export async function getPermissionsMap(
   orgId: number | null,
   role: UserRole
 ): Promise<Record<string, boolean>> {
+  if (role === "registrator") {
+    return Object.fromEntries(SECTION_KEYS.map((key) => [key, false])) as Record<string, boolean>;
+  }
   if (!isPermissionRole(role) || !orgId) {
     return Object.fromEntries(SECTION_KEYS.map((key) => [key, true])) as Record<string, boolean>;
   }
@@ -140,7 +148,7 @@ export async function getPermissionsMap(
     .select("section_key", "can_view");
 
   for (const row of rows) {
-    map[row.section_key] = !!row.can_view;
+    map[row.section_key] = toBoolean(row.can_view);
   }
 
   return map;

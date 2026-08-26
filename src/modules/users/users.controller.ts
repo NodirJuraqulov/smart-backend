@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import { logActivity } from "@/utils/activityLog";
 import { parseId } from "@/utils/httpParams";
+import { resolveOrgIdRequired } from "@/utils/orgScope";
 import { assertValidLogin, assertValidPassword } from "@/utils/validation";
 import * as usersService from "./users.service";
 
@@ -17,17 +18,29 @@ export async function createHandler(req: Request, res: Response) {
     return;
   }
 
-  if (role !== undefined && role !== "operator" && role !== "kassir") {
-    res.status(400).json({ message: "role 'operator' yoki 'kassir' bo'lishi kerak" });
+  if (role !== undefined && role !== "operator" && role !== "kassir" && role !== "registrator") {
+    res.status(400).json({ message: "role 'operator', 'kassir' yoki 'registrator' bo'lishi kerak" });
     return;
   }
+
+  const requestedOrgId = Number(org_id);
+  if (!Number.isInteger(requestedOrgId) || requestedOrgId < 1) {
+    res.status(400).json({ message: "org_id noto'g'ri" });
+    return;
+  }
+  const targetOrgId = resolveOrgIdRequired(req.user!, requestedOrgId);
 
   assertValidLogin(login);
   assertValidPassword(password);
 
-  const operator = await usersService.createOperator({ org_id, name, login, password, role });
+  const operator = await usersService.createOperator({ org_id: targetOrgId, name, login, password, role });
 
-  await logActivity(req.user!.id, "user.created", "user", operator.id, { org_id, name, login, role });
+  await logActivity(req.user!.id, "user.created", "user", operator.id, {
+    org_id: targetOrgId,
+    name,
+    login,
+    role,
+  });
 
   res.status(201).json({ operator });
 }

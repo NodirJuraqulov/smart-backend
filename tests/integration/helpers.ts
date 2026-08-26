@@ -68,7 +68,7 @@ export async function createTestSettings(orgId: number, overrides: TestSettingsO
 interface TestUserOverrides {
   login?: string;
   password?: string;
-  role?: "super_admin" | "operator" | "owner" | "kassir";
+  role?: "super_admin" | "operator" | "owner" | "kassir" | "registrator";
   is_active?: boolean;
 }
 

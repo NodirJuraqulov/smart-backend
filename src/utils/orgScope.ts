@@ -1,7 +1,7 @@
 import { AuthTokenPayload } from "@/modules/auth/auth.service";
 import { ApiError } from "@/utils/ApiError";
 
-const ORG_SCOPED_ROLES = ["operator", "owner", "kassir"] as const;
+const ORG_SCOPED_ROLES = ["operator", "owner", "kassir", "registrator"] as const;
 
 export function isOrgScopedRole(role: AuthTokenPayload["role"]): boolean {
   return (ORG_SCOPED_ROLES as readonly string[]).includes(role);

@@ -1,15 +1,15 @@
 import { Router } from "express";
 import { asyncHandler } from "@/middleware/asyncHandler";
-import { isAuth, isSuperAdmin } from "@/middleware/auth.middleware";
+import { isAuth, isSuperAdmin, isSuperAdminOrOwner } from "@/middleware/auth.middleware";
 import { blockHandler, createHandler, listHandler, updateHandler } from "./users.controller";
 
 const router = Router();
 
-router.use(isAuth, isSuperAdmin);
+router.use(isAuth);
 
-router.get("/", asyncHandler(listHandler));
-router.post("/", asyncHandler(createHandler));
-router.put("/:id", asyncHandler(updateHandler));
-router.patch("/:id/block", asyncHandler(blockHandler));
+router.get("/", isSuperAdmin, asyncHandler(listHandler));
+router.post("/", isSuperAdminOrOwner, asyncHandler(createHandler));
+router.put("/:id", isSuperAdmin, asyncHandler(updateHandler));
+router.patch("/:id/block", isSuperAdmin, asyncHandler(blockHandler));
 
 export default router;

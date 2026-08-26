@@ -551,6 +551,12 @@ function assertInScope(actor: AuthTokenPayload, session: SessionRecord) {
   }
 }
 
+function assertRegistratorCanViewSession(actor: AuthTokenPayload, session: SessionRecord) {
+  if (actor.role === "registrator" && session.status !== "active") {
+    throw new ApiError("Registrator faqat faol sessiyalarni ko'ra oladi", 403);
+  }
+}
+
 async function completeSession(
   orgId: number,
   plateNumber: string,
@@ -848,6 +854,9 @@ function applySessionFilters<T extends Knex.QueryBuilder>(query: T, orgId: numbe
 }
 
 export async function listSessions(actor: AuthTokenPayload, filters: ListSessionsFilters) {
+  if (actor.role === "registrator" && filters.status !== "active") {
+    throw new ApiError("Registrator faqat status='active' sessiyalarni ko'ra oladi", 403);
+  }
   const orgId = resolveOrgIdFilter(actor, filters.org_id);
 
   const [{ count }] = await applySessionFilters(db("tb_parking_sessions"), orgId, filters).count<
@@ -875,6 +884,7 @@ export async function listSessions(actor: AuthTokenPayload, filters: ListSession
 export async function getSessionById(actor: AuthTokenPayload, id: number) {
   const session = await findSessionOrFail(id);
   assertInScope(actor, session);
+  assertRegistratorCanViewSession(actor, session);
   return withCurrentEstimate(session);
 }
 
@@ -891,6 +901,7 @@ export async function getSessionImage(
 ) {
   const session = await findSessionOrFail(id);
   assertInScope(actor, session);
+  assertRegistratorCanViewSession(actor, session);
   const columns = {
     "entry-overview": session.entry_overview_image_path,
     "entry-vehicle": session.entry_vehicle_image_path,

@@ -10,14 +10,14 @@ interface UserRow {
   name: string;
   login: string;
   password: string;
-  role: "super_admin" | "operator" | "owner" | "kassir";
+  role: "super_admin" | "operator" | "owner" | "kassir" | "registrator";
   is_active: boolean;
   created_at: Date;
 }
 
-export type ManagedUserRole = "operator" | "kassir";
+export type ManagedUserRole = "operator" | "kassir" | "registrator";
 
-const MANAGED_ROLES = ["operator", "owner", "kassir"] as const;
+const MANAGED_ROLES = ["operator", "owner", "kassir", "registrator"] as const;
 
 interface CreateOperatorInput {
   org_id: number;

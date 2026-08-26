@@ -6,6 +6,19 @@ import { env } from "@/config/env";
 import { AuthTokenPayload } from "@/modules/auth/auth.service";
 import { canAccessSection } from "@/modules/operatorPermissions/operatorPermissions.service";
 
+const REGISTRATOR_SESSION_DETAIL = /^\/api\/parking\/sessions\/\d+\/?$/;
+const REGISTRATOR_SESSION_IMAGE =
+  /^\/api\/parking\/sessions\/\d+\/images\/(?:entry-overview|entry-vehicle|entry-plate|exit-overview|exit-vehicle|exit-plate)\/?$/;
+
+function canRegistratorAccess(req: Request): boolean {
+  if (req.method !== "GET") return false;
+  const path = req.originalUrl.split("?")[0];
+  if (path === "/api/parking/sessions" || path === "/api/parking/sessions/") {
+    return req.query.status === "active";
+  }
+  return REGISTRATOR_SESSION_DETAIL.test(path) || REGISTRATOR_SESSION_IMAGE.test(path);
+}
+
 async function isAuthHandler(req: Request, res: Response, next: NextFunction) {
   const header = req.headers.authorization;
   if (!header || !header.startsWith("Bearer ")) {
@@ -35,6 +48,11 @@ async function isAuthHandler(req: Request, res: Response, next: NextFunction) {
       res.status(401).json({ message: "Stoyanka bloklangan" });
       return;
     }
+  }
+
+  if (payload.role === "registrator" && !canRegistratorAccess(req)) {
+    res.status(403).json({ message: "Ruxsat yo'q — registrator faqat faol sessiyalarni ko'ra oladi" });
+    return;
   }
 
   req.user = payload;
