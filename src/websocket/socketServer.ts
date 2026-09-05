@@ -4,6 +4,7 @@ import { Server as SocketIOServer, Socket } from "socket.io";
 import { db } from "@/config/db";
 import { env } from "@/config/env";
 import { AuthTokenPayload } from "@/modules/auth/auth.service";
+import type { PaymentMethod } from "@/modules/payment/paymentMethod";
 import {
   PublicEntryDisplayStatus,
   PublicExitDisplayStatus,
@@ -42,13 +43,14 @@ export interface ExitCandidateResolvedPayload {
     | "forced_open"
     | "emergency_forced_open"
     | "emergency_confirmed"
+    | "card_payment_initiated"
     | null;
   sessionId: number | null;
   barrierStatus: ExitBarrierStatus | null;
   plateNumber?: string | null;
   sessionSource?: "regular" | "subscription" | "vip" | null;
   amount?: number | null;
-  paymentMethod?: "cash" | "online" | null;
+  paymentMethod?: PaymentMethod | null;
   exitMethod?: "auto" | "manual" | "forced" | "auto_closed_on_reentry" | "emergency" | null;
   durationMinutes?: number | null;
 }
@@ -58,7 +60,7 @@ export interface ExitCompletedPayload {
   sessionId: number;
   plateNumber: string;
   amount: number;
-  paymentMethod: "cash" | "online" | null;
+  paymentMethod: PaymentMethod | null;
   exitMethod?: "auto" | "manual" | "forced" | "auto_closed_on_reentry" | "emergency" | null;
   barrierStatus: ExitBarrierStatus;
   sessionSource?: "regular" | "subscription" | "vip" | null;
@@ -98,6 +100,33 @@ export interface EntryBarrierFailedPayload {
   sessionId: number;
   plateNumber: string;
   detail: string;
+}
+
+export interface ExitPaymentDeclinedPayload {
+  orgId: number;
+  sessionId: number | null;
+  operationNumber: string;
+  reason: "declined" | "timeout";
+  errorMessage: string | null;
+}
+
+export interface CardPaymentStartedPayload {
+  sessionId: number;
+  candidateId: number | null;
+  operationNumber: string;
+  plateNumber: string;
+}
+
+export interface ExitAwaitingPaymentPayload {
+  orgId: number;
+  sessionId: number;
+  candidateId: number | null;
+  plateNumber: string;
+  amount: number;
+  paymentMethod: "card";
+  status: "awaiting_payment";
+  operationNumber: string;
+  retry?: boolean;
 }
 
 export interface BlacklistAttemptPayload {
@@ -263,8 +292,36 @@ export function emitBlacklistAttempt(orgId: number, payload: BlacklistAttemptPay
   getIO()?.to(`org_${orgId}`).emit("blacklist_attempt", payload);
 }
 
-export function emitExitAwaitingPayment(orgId: number, payload: unknown): void {
+export function emitExitAwaitingPayment(orgId: number, payload: ExitAwaitingPaymentPayload): void {
   getIO()?.to(`org_${orgId}`).emit("exit_awaiting_payment", payload);
+  emitPublicExitStatusChanged(orgId, {
+    state: "awaiting_payment",
+    plate: payload.plateNumber,
+    session_source: "regular",
+    amount: payload.amount,
+    payment_method: "card",
+    duration_minutes: null,
+    barrier_status: null,
+    updated_at: new Date().toISOString(),
+  });
+}
+
+export function emitExitPaymentDeclined(orgId: number, payload: ExitPaymentDeclinedPayload): void {
+  getIO()?.to(`org_${orgId}`).emit("exit_payment_declined", payload);
+  emitPublicExitStatusChanged(orgId, {
+    state: "declined",
+    plate: null,
+    session_source: "regular",
+    amount: null,
+    payment_method: "card",
+    duration_minutes: null,
+    barrier_status: null,
+    updated_at: new Date().toISOString(),
+  });
+}
+
+export function emitCardPaymentStarted(orgId: number, payload: CardPaymentStartedPayload): void {
+  getIO()?.to(`org_${orgId}`).emit("card_payment_started", payload);
 }
 
 export function emitExitCompleted(orgId: number, payload: ExitCompletedPayload): void {
@@ -310,6 +367,7 @@ export function emitExitCandidateResolved(orgId: number, payload: ExitCandidateR
     });
     return;
   }
+  if (payload.resolutionType === "card_payment_initiated") return;
   const barrierState = publicDisplayStateForBarrier(payload.barrierStatus);
   emitPublicExitStatusChanged(orgId, {
     state:

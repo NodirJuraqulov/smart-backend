@@ -74,6 +74,12 @@ export async function confirmCashPaymentHandler(req: Request, res: Response) {
   res.json(result);
 }
 
+export async function retryCardPaymentHandler(req: Request, res: Response) {
+  const id = parseId(req, res);
+  if (id === null) return;
+  res.json(await parkingService.retryCardPayment(req.user!, id));
+}
+
 export async function sessionsHandler(req: Request, res: Response) {
   const orgId = parseOptionalOrgIdFromQuery(req, res);
   if (orgId === null) return;
@@ -146,8 +152,8 @@ export async function updatePaymentMethodHandler(req: Request, res: Response) {
   if (id === null) return;
 
   const { payment_method } = req.body ?? {};
-  if (payment_method !== "cash" && payment_method !== "online") {
-    res.status(400).json({ message: "payment_method 'cash' yoki 'online' bo'lishi kerak" });
+  if (payment_method !== "cash" && payment_method !== "online" && payment_method !== "card") {
+    res.status(400).json({ message: "payment_method 'cash', 'online' yoki 'card' bo'lishi kerak" });
     return;
   }
 

@@ -36,6 +36,7 @@ interface PendingSummary {
 export interface RevenueByMethod {
   cash: number;
   online: number;
+  card: number;
 }
 
 function safeAmount(value: string | number | null | undefined): number {
@@ -110,11 +111,13 @@ async function sumOperatorPaymentsByMethod(
 
   let cash = 0;
   let online = 0;
+  let card = 0;
   for (const row of rows) {
     if (row.payment_method === "online") online += safeAmount(row.total);
     else if (row.payment_method === "cash") cash += safeAmount(row.total);
+    else if (row.payment_method === "card") card += safeAmount(row.total);
   }
-  return { cash, online };
+  return { cash, online, card };
 }
 
 async function sumNonOperatorPaymentsByMethod(
@@ -139,11 +142,13 @@ async function sumNonOperatorPaymentsByMethod(
 
   let cash = 0;
   let online = 0;
+  let card = 0;
   for (const row of rows) {
     if (row.payment_method === "online") online += safeAmount(row.total);
     else if (row.payment_method === "cash") cash += safeAmount(row.total);
+    else if (row.payment_method === "card") card += safeAmount(row.total);
   }
-  return { cash, online };
+  return { cash, online, card };
 }
 
 async function buildPendingSummary(
@@ -174,17 +179,31 @@ async function calculateOrgUncollectedRevenueByMethod(
   const baseline = legacyPeriodEnd ?? new Date(organization.created_at);
   const periodEnd = new Date();
   const operators = await executor("tb_users").select("id").where({ org_id: orgId, role: "operator" });
-  const [summaries, nonOperatorTotals] = await Promise.all([
+  const [summaries, operatorCardTotals, nonOperatorTotals] = await Promise.all([
     Promise.all(
       operators.map((operator) => buildPendingSummary(orgId, Number(operator.id), periodEnd, executor))
+    ),
+    Promise.all(
+      operators.map(async (operator) => {
+        const periodStart = await resolveOperatorPeriodStart(orgId, Number(operator.id), executor);
+        const totals = await sumOperatorPaymentsByMethod(
+          orgId,
+          Number(operator.id),
+          periodStart,
+          periodEnd,
+          executor
+        );
+        return totals.card;
+      })
     ),
     sumNonOperatorPaymentsByMethod(orgId, baseline, periodEnd, executor),
   ]);
 
   return summaries.reduce(
-    (total, summary) => ({
+    (total, summary, index) => ({
       cash: total.cash + summary.expected_cash_amount,
       online: total.online + summary.online_amount,
+      card: total.card + (operatorCardTotals[index] ?? 0),
     }),
     nonOperatorTotals
   );
@@ -204,7 +223,8 @@ async function calculateOperatorUncollectedRevenueByMethod(
   executor: Knex
 ): Promise<RevenueByMethod> {
   const summary = await buildPendingSummary(orgId, operatorId, new Date(), executor);
-  return { cash: summary.expected_cash_amount, online: summary.online_amount };
+  const totals = await sumOperatorPaymentsByMethod(orgId, operatorId, summary.period_start, summary.period_end, executor);
+  return { cash: summary.expected_cash_amount, online: summary.online_amount, card: totals.card };
 }
 
 export async function getOperatorUncollectedRevenueByMethod(
@@ -218,7 +238,7 @@ export async function getOperatorUncollectedRevenueByMethod(
 
 export async function getOrgUncollectedRevenue(orgId: number, executor?: Knex): Promise<number> {
   const totals = await getOrgUncollectedRevenueByMethod(orgId, executor);
-  return totals.cash + totals.online;
+  return totals.cash + totals.online + totals.card;
 }
 
 export async function listOrganizationOperators(

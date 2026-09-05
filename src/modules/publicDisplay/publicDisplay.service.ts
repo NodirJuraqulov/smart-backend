@@ -1,6 +1,7 @@
 import { db } from "@/config/db";
 import { ApiError } from "@/utils/ApiError";
 import { applyInsideSessionsFilter } from "@/modules/parking/sessionStatus";
+import type { PaymentMethod } from "@/modules/payment/paymentMethod";
 import {
   PublicBarrierStatus,
   PublicEntryDisplayStatus,
@@ -54,6 +55,7 @@ interface ExitCandidateDisplayRow {
     | "forced_open"
     | "emergency_forced_open"
     | "emergency_confirmed"
+    | "card_payment_initiated"
     | null;
   matched_session_id: number | null;
   resolved_session_id: number | null;
@@ -65,8 +67,9 @@ interface ExitCandidateDisplayRow {
   resolved_plate: string | null;
   resolved_source: "regular" | "subscription" | "vip" | null;
   resolved_amount: string | number | null;
-  resolved_payment_method: "cash" | "online" | null;
+  resolved_payment_method: PaymentMethod | null;
   resolved_duration_minutes: number | null;
+  resolved_status: "active" | "awaiting_payment" | "completed" | null;
 }
 
 interface CompletedSessionDisplayRow {
@@ -74,7 +77,7 @@ interface CompletedSessionDisplayRow {
   plate_number: string | null;
   session_source: "regular" | "subscription" | "vip";
   amount: string | number | null;
-  payment_method: "cash" | "online";
+  payment_method: PaymentMethod;
   duration_minutes: number | null;
   exited_at: Date;
 }
@@ -277,7 +280,8 @@ async function getLatestExitCandidate(orgId: number): Promise<ExitCandidateDispl
       "resolved.session_source as resolved_source",
       "resolved.amount as resolved_amount",
       "resolved.payment_method as resolved_payment_method",
-      "resolved.duration_minutes as resolved_duration_minutes"
+      "resolved.duration_minutes as resolved_duration_minutes",
+      "resolved.status as resolved_status"
     )
     .where("candidate.org_id", orgId)
     .orderBy("candidate.updated_at", "desc")
@@ -327,6 +331,21 @@ async function exitCandidateStatus(
       : idleExitStatus(now);
   }
   if (candidate.status === "expired") return idleExitStatus(now);
+  if (
+    candidate.resolution_type === "card_payment_initiated" &&
+    candidate.resolved_status === "awaiting_payment"
+  ) {
+    return {
+      state: "awaiting_payment",
+      plate,
+      session_source: source,
+      amount: numberOrNull(candidate.resolved_amount),
+      payment_method: source === "regular" ? candidate.resolved_payment_method : null,
+      duration_minutes: candidate.resolved_duration_minutes,
+      barrier_status: null,
+      updated_at: eventAt.toISOString(),
+    };
+  }
   const barrier = await getLatestBarrierAudit(orgId, "exit_candidate", candidate.id, EXIT_BARRIER_ACTIONS);
   const updatedAt = latestDate(eventAt, barrier.createdAt) ?? eventAt;
   if (candidate.status === "dismissed" && barrier.status === null) {

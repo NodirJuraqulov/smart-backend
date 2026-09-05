@@ -1,8 +1,7 @@
 import { db } from "@/config/db";
 import { readWebhookEventImages } from "@/modules/webhook/webhookEventImage.service";
 import { decryptSecret } from "@/utils/encryption";
-
-type PaymentMethod = "cash" | "online";
+import type { PaymentMethod } from "@/modules/payment/paymentMethod";
 
 interface TelegramSettingsRow {
   id: number;
@@ -51,7 +50,9 @@ function caption(params: ExitNotificationParams): string {
       ? "Majburiy ochish"
       : params.paymentMethod === "online"
         ? "Online"
-        : "Naqd";
+        : params.paymentMethod === "card"
+          ? "Karta"
+          : "Naqd";
   const durationText = params.durationText?.trim() || "Noma'lum";
   return `Mashina raqami: ${params.plateNumber}\nSumma: ${amount}\nTo'lov turi: ${paymentMethod}\nTurgan vaqt: ${durationText}\nTasdiqladi: ${params.confirmedByName}`;
 }

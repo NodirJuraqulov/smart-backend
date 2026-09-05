@@ -6,6 +6,7 @@ import { ApiError } from "@/utils/ApiError";
 import { assertOrganizationExists } from "@/utils/assertOrganizationExists";
 import { resolveOrgIdRequired } from "@/utils/orgScope";
 import { applyCompletedExitFilter, applyInsideSessionsFilter } from "@/modules/parking/sessionStatus";
+import type { PaymentMethod } from "@/modules/payment/paymentMethod";
 import {
   getOperatorUncollectedRevenueByMethod,
   getOrgUncollectedRevenueByMethod,
@@ -52,7 +53,7 @@ interface PaymentRow {
   org_id: number;
   paid_at: Date;
   amount: string;
-  payment_method: "cash" | "online";
+  payment_method: PaymentMethod;
 }
 
 type PaymentLedgerRow = Pick<PaymentRow, "paid_at" | "amount" | "payment_method">;
@@ -95,17 +96,21 @@ function safeAmount(value: string | number | null | undefined): number {
 function splitRevenueByPaymentMethod(paymentsRows: PaymentLedgerRow[]): {
   cashRevenue: number;
   onlineRevenue: number;
+  cardRevenue: number;
 } {
   let cashRevenue = 0;
   let onlineRevenue = 0;
+  let cardRevenue = 0;
   for (const row of paymentsRows) {
     if (row.payment_method === "online") {
       onlineRevenue += safeAmount(row.amount);
     } else if (row.payment_method === "cash") {
       cashRevenue += safeAmount(row.amount);
+    } else if (row.payment_method === "card") {
+      cardRevenue += safeAmount(row.amount);
     }
   }
-  return { cashRevenue, onlineRevenue };
+  return { cashRevenue, onlineRevenue, cardRevenue };
 }
 
 async function getSubscriptionRevenue(
@@ -192,7 +197,8 @@ export async function getDailyReport(
       : null;
   const cashRevenue = pendingRevenue?.cash ?? ledgerRevenue.cashRevenue;
   const onlineRevenue = pendingRevenue?.online ?? ledgerRevenue.onlineRevenue;
-  const regularRevenue = cashRevenue + onlineRevenue;
+  const cardRevenue = pendingRevenue?.card ?? ledgerRevenue.cardRevenue;
+  const regularRevenue = cashRevenue + onlineRevenue + cardRevenue;
 
   let busiestHour: string | null = null;
   const maxEntries = Math.max(...hourlyEntries);
@@ -208,6 +214,7 @@ export async function getDailyReport(
     total_exits: exitsRows.length,
     cash_revenue: cashRevenue,
     online_revenue: onlineRevenue,
+    card_revenue: cardRevenue,
     regular_revenue: regularRevenue,
     subscription_revenue: subscriptionRevenue,
     vip_revenue: 0,
@@ -289,8 +296,8 @@ export async function getMonthlyReport(
     });
   }
 
-  const { cashRevenue, onlineRevenue } = splitRevenueByPaymentMethod(paymentsRows);
-  const regularRevenue = cashRevenue + onlineRevenue;
+  const { cashRevenue, onlineRevenue, cardRevenue } = splitRevenueByPaymentMethod(paymentsRows);
+  const regularRevenue = cashRevenue + onlineRevenue + cardRevenue;
 
   return {
     org_id: orgId,
@@ -300,6 +307,7 @@ export async function getMonthlyReport(
     total_exits: exitsRows.length,
     cash_revenue: cashRevenue,
     online_revenue: onlineRevenue,
+    card_revenue: cardRevenue,
     regular_revenue: regularRevenue,
     subscription_revenue: subscriptionRevenue,
     vip_revenue: 0,
@@ -372,8 +380,8 @@ export async function getYearlyReport(
     });
   }
 
-  const { cashRevenue, onlineRevenue } = splitRevenueByPaymentMethod(paymentsRows);
-  const regularRevenue = cashRevenue + onlineRevenue;
+  const { cashRevenue, onlineRevenue, cardRevenue } = splitRevenueByPaymentMethod(paymentsRows);
+  const regularRevenue = cashRevenue + onlineRevenue + cardRevenue;
 
   return {
     org_id: orgId,
@@ -382,6 +390,7 @@ export async function getYearlyReport(
     total_exits: exitsRows.length,
     cash_revenue: cashRevenue,
     online_revenue: onlineRevenue,
+    card_revenue: cardRevenue,
     regular_revenue: regularRevenue,
     subscription_revenue: subscriptionRevenue,
     vip_revenue: 0,
@@ -399,7 +408,7 @@ interface GroupedCountRow {
 
 interface GroupedPaymentRow {
   bucket: string;
-  payment_method: "cash" | "online";
+  payment_method: PaymentMethod;
   total: string | null;
 }
 
@@ -519,8 +528,9 @@ async function getRangeReport(
   const exitMap = new Map(exits.map((row) => [row.bucket, Number(row.count)]));
   const cashMap = new Map<string, number>();
   const onlineMap = new Map<string, number>();
+  const cardMap = new Map<string, number>();
   for (const row of payments) {
-    const map = row.payment_method === "online" ? onlineMap : cashMap;
+    const map = row.payment_method === "online" ? onlineMap : row.payment_method === "card" ? cardMap : cashMap;
     map.set(row.bucket, (map.get(row.bucket) ?? 0) + safeAmount(row.total));
   }
 
@@ -547,6 +557,7 @@ async function getRangeReport(
   const items = buckets.map(({ key: bucket }) => {
     const cashRevenue = cashMap.get(bucket) ?? 0;
     const onlineRevenue = onlineMap.get(bucket) ?? 0;
+    const cardRevenue = cardMap.get(bucket) ?? 0;
     const subscriptionRevenue = subscriptionMap.get(bucket) ?? 0;
     return {
       [granularity === "daily" ? "date" : granularity === "monthly" ? "month" : "year"]:
@@ -555,10 +566,11 @@ async function getRangeReport(
       exits: exitMap.get(bucket) ?? 0,
       cash_revenue: cashRevenue,
       online_revenue: onlineRevenue,
-      regular_revenue: cashRevenue + onlineRevenue,
+      card_revenue: cardRevenue,
+      regular_revenue: cashRevenue + onlineRevenue + cardRevenue,
       subscription_revenue: subscriptionRevenue,
       vip_revenue: 0,
-      revenue: cashRevenue + onlineRevenue + subscriptionRevenue,
+      revenue: cashRevenue + onlineRevenue + cardRevenue + subscriptionRevenue,
     };
   });
 
@@ -568,6 +580,7 @@ async function getRangeReport(
       total_exits: sum.total_exits + item.exits,
       cash_revenue: sum.cash_revenue + item.cash_revenue,
       online_revenue: sum.online_revenue + item.online_revenue,
+      card_revenue: sum.card_revenue + item.card_revenue,
       regular_revenue: sum.regular_revenue + item.regular_revenue,
       subscription_revenue: sum.subscription_revenue + item.subscription_revenue,
       vip_revenue: 0,
@@ -578,6 +591,7 @@ async function getRangeReport(
       total_exits: 0,
       cash_revenue: 0,
       online_revenue: 0,
+      card_revenue: 0,
       regular_revenue: 0,
       subscription_revenue: 0,
       vip_revenue: 0,

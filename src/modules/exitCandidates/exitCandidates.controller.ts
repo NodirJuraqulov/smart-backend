@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import type { PaymentMethod } from "@/modules/payment/paymentMethod";
 import { parseId, parseOptionalOrgIdFromQuery } from "@/utils/httpParams";
 import * as service from "./exitCandidates.service";
 
@@ -78,18 +79,21 @@ function parseSessionId(req: Request, res: Response): number | undefined | null 
   return sessionId;
 }
 
-type PaymentMethod = "cash" | "online";
-type ExitPaymentMethod = PaymentMethod | "emergency";
+type CandidatePaymentMethod = Exclude<PaymentMethod, "card">;
+type ExitPaymentMethod = CandidatePaymentMethod | "emergency";
 
 function parsePaymentMethod(req: Request, res: Response, allowEmergency: true): ExitPaymentMethod | undefined | null;
-function parsePaymentMethod(req: Request, res: Response, allowEmergency?: false): PaymentMethod | undefined | null;
+function parsePaymentMethod(req: Request, res: Response, allowEmergency?: false): CandidatePaymentMethod | undefined | null;
 function parsePaymentMethod(
   req: Request,
   res: Response,
   allowEmergency = false
 ): ExitPaymentMethod | undefined | null {
   if (req.body?.payment_method === undefined) return undefined;
-  if (req.body.payment_method === "cash" || req.body.payment_method === "online") {
+  if (
+    req.body.payment_method === "cash" ||
+    req.body.payment_method === "online"
+  ) {
     return req.body.payment_method;
   }
   if (allowEmergency && req.body.payment_method === "emergency") return "emergency";

@@ -1,4 +1,5 @@
 import { printer as ThermalPrinter, types as PrinterTypes } from "node-thermal-printer";
+import type { PaymentMethod } from "@/modules/payment/paymentMethod";
 
 const PRINTER_PORT = 9100;
 const PRINTER_TIMEOUT_MS = 5000;
@@ -10,7 +11,7 @@ export interface ReceiptData {
   exitedAt: Date;
   durationMinutes: number;
   amount: number;
-  paymentMethod: "cash" | "online";
+  paymentMethod: PaymentMethod;
   issuedAt: Date;
 }
 
@@ -30,8 +31,8 @@ export function formatDuration(durationMinutes: number): string {
   return `${hours} soat ${minutes} daqiqa`;
 }
 
-function formatPaymentMethod(paymentMethod: "cash" | "online"): string {
-  return paymentMethod === "cash" ? "Naqd" : "Онлайн";
+function formatPaymentMethod(paymentMethod: PaymentMethod): string {
+  return paymentMethod === "cash" ? "Naqd" : paymentMethod === "online" ? "Онлайн" : "Karta";
 }
 
 function buildReceipt(printer: ThermalPrinter, data: ReceiptData): void {

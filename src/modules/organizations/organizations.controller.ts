@@ -8,6 +8,7 @@ import { assertValidLogin, assertValidPassword } from "@/utils/validation";
 import * as organizationsService from "./organizations.service";
 import { resetOrganizationTestData } from "./organizationTestDataReset.service";
 import { expirePendingExitCandidatesForOrganization } from "@/modules/exitCandidates/exitCandidatesExpiry.service";
+import { paymentTerminalManager } from "@/modules/paymentTerminal/PaymentTerminalManager";
 import {
   emergencyBarrierOpen,
   getEmergencyBarrierSettings,
@@ -342,7 +343,10 @@ export async function regenerateWebhookTokenHandler(req: Request, res: Response)
 }
 
 function assertOrganizationSettingsScope(req: Request, id: number, res: Response): boolean {
-  if (req.user?.role === "owner" && req.user.org_id !== id) {
+  if (
+    (req.user?.role === "owner" || req.user?.role === "operator") &&
+    req.user.org_id !== id
+  ) {
     res.status(404).json({ message: "Stoyanka topilmadi" });
     return false;
   }
@@ -385,6 +389,85 @@ export async function updateLedSettingsHandler(req: Request, res: Response) {
     led_port: ledPort,
   });
   await logActivity(req.user!.id, "organization.led_settings_updated", "organization", id, settings);
+  res.json(settings);
+}
+
+export async function getCardTerminalSettingsHandler(req: Request, res: Response) {
+  const id = parseId(req, res);
+  if (id === null || !assertOrganizationSettingsScope(req, id, res)) return;
+  const settings = await organizationsService.getCardTerminalSettings(id);
+  if (req.user?.role === "operator") {
+    res.json({ card_terminal_enabled: settings.card_terminal_enabled });
+    return;
+  }
+  res.json(settings);
+}
+
+function parseOptionalTerminalText(value: unknown, field: string, res: Response) {
+  if (value === undefined) return undefined;
+  if (value === null || value === "") return null;
+  if (typeof value !== "string" || !value.trim() || value.trim().length > 64) {
+    res.status(400).json({ message: `${field} 64 belgigacha bo'lgan matn yoki null bo'lishi kerak` });
+    return false;
+  }
+  return value.trim();
+}
+
+export async function updateCardTerminalSettingsHandler(req: Request, res: Response) {
+  const id = parseId(req, res);
+  if (id === null) return;
+  if (paymentTerminalManager.isBusy(id)) {
+    res.status(409).json({ message: "Faol karta to'lovi tugamaguncha terminal sozlamasini o'zgartirib bo'lmaydi" });
+    return;
+  }
+  const enabled = req.body?.card_terminal_enabled;
+  const ip = req.body?.card_terminal_ip;
+  const port = req.body?.card_terminal_port;
+  if (
+    enabled === undefined &&
+    ip === undefined &&
+    port === undefined &&
+    req.body?.card_terminal_id === undefined &&
+    req.body?.card_terminal_merchant_id === undefined
+  ) {
+    res.status(400).json({ message: "Kamida bitta karta terminali sozlamasi yuborilishi kerak" });
+    return;
+  }
+  if (enabled !== undefined && typeof enabled !== "boolean") {
+    res.status(400).json({ message: "card_terminal_enabled boolean bo'lishi kerak" });
+    return;
+  }
+  if (ip !== undefined && ip !== null && ip !== "" && (typeof ip !== "string" || isIP(ip.trim()) === 0)) {
+    res.status(400).json({ message: "card_terminal_ip to'g'ri IP manzil yoki null bo'lishi kerak" });
+    return;
+  }
+  if (port !== undefined && port !== null && (!Number.isInteger(port) || port < 1 || port > 65535)) {
+    res.status(400).json({ message: "card_terminal_port 1-65535 oralig'ida yoki null bo'lishi kerak" });
+    return;
+  }
+  const terminalId = parseOptionalTerminalText(req.body?.card_terminal_id, "card_terminal_id", res);
+  if (terminalId === false) return;
+  const merchantId = parseOptionalTerminalText(
+    req.body?.card_terminal_merchant_id,
+    "card_terminal_merchant_id",
+    res
+  );
+  if (merchantId === false) return;
+  const settings = await organizationsService.updateCardTerminalSettings(id, {
+    card_terminal_enabled: enabled,
+    card_terminal_ip: typeof ip === "string" ? ip.trim() || null : ip,
+    card_terminal_port: port,
+    card_terminal_id: terminalId,
+    card_terminal_merchant_id: merchantId,
+  });
+  await logActivity(req.user!.id, "organization.card_terminal_settings_updated", "organization", id, {
+    card_terminal_enabled: settings.card_terminal_enabled,
+    card_terminal_ip: settings.card_terminal_ip,
+    card_terminal_port: settings.card_terminal_port,
+    card_terminal_id: settings.card_terminal_id,
+    card_terminal_merchant_id: settings.card_terminal_merchant_id,
+  });
+  await paymentTerminalManager.reloadTerminal(id);
   res.json(settings);
 }
 

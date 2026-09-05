@@ -380,6 +380,24 @@ interface LedSettingsRow {
   led_port: number | null;
 }
 
+interface CardTerminalSettingsRow {
+  id: number;
+  card_terminal_enabled: boolean;
+  card_terminal_ip: string | null;
+  card_terminal_port: number | null;
+  card_terminal_id: string | null;
+  card_terminal_merchant_id: string | null;
+  card_terminal_keepalive_interval_seconds: number | null;
+}
+
+export interface CardTerminalSettingsInput {
+  card_terminal_enabled?: boolean;
+  card_terminal_ip?: string | null;
+  card_terminal_port?: number | null;
+  card_terminal_id?: string | null;
+  card_terminal_merchant_id?: string | null;
+}
+
 export interface LedSettingsInput {
   led_host?: string | null;
   led_port?: number | null;
@@ -420,6 +438,51 @@ export async function updateLedSettings(id: number, input: LedSettingsInput) {
   };
   await db("tb_organizations").where({ id }).update(updates);
   return updates;
+}
+
+async function findCardTerminalSettingsOrFail(id: number): Promise<CardTerminalSettingsRow> {
+  const organization = await db<CardTerminalSettingsRow>("tb_organizations")
+    .select(
+      "id",
+      "card_terminal_enabled",
+      "card_terminal_ip",
+      "card_terminal_port",
+      "card_terminal_id",
+      "card_terminal_merchant_id",
+      "card_terminal_keepalive_interval_seconds"
+    )
+    .where({ id })
+    .first();
+  if (!organization) throw new ApiError("Stoyanka topilmadi", 404);
+  return organization;
+}
+
+export async function getCardTerminalSettings(id: number) {
+  const settings = await findCardTerminalSettingsOrFail(id);
+  return { ...settings, card_terminal_enabled: Boolean(settings.card_terminal_enabled) };
+}
+
+export async function updateCardTerminalSettings(id: number, input: CardTerminalSettingsInput) {
+  const current = await findCardTerminalSettingsOrFail(id);
+  const nextEnabled = input.card_terminal_enabled ?? current.card_terminal_enabled;
+  const nextIp = input.card_terminal_ip === undefined ? current.card_terminal_ip : input.card_terminal_ip;
+  if (nextEnabled && !nextIp) {
+    throw new ApiError("Karta terminalini yoqish uchun card_terminal_ip majburiy", 400);
+  }
+  const updates: CardTerminalSettingsInput = {};
+  if (input.card_terminal_enabled !== undefined) {
+    updates.card_terminal_enabled = input.card_terminal_enabled;
+  }
+  if (input.card_terminal_ip !== undefined) updates.card_terminal_ip = input.card_terminal_ip;
+  if (input.card_terminal_port !== undefined) updates.card_terminal_port = input.card_terminal_port;
+  if (input.card_terminal_id !== undefined) updates.card_terminal_id = input.card_terminal_id;
+  if (input.card_terminal_merchant_id !== undefined) {
+    updates.card_terminal_merchant_id = input.card_terminal_merchant_id;
+  }
+  if (Object.keys(updates).length > 0) {
+    await db("tb_organizations").where({ id }).update(updates);
+  }
+  return getCardTerminalSettings(id);
 }
 
 function parseTelegramChatIds(value: string | null): string[] {

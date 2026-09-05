@@ -6,6 +6,7 @@ import { ApiError } from "@/utils/ApiError";
 import { isDuplicateKeyError } from "@/utils/dbErrors";
 import { isOrgScopedRole, resolveOrgIdFilter, resolveOrgIdRequired } from "@/utils/orgScope";
 import {
+  emitCardPaymentStarted,
   emitEntryDetected,
   emitExitCompleted,
   emitRelayFailed,
@@ -25,6 +26,13 @@ import {
   saveParkingImages,
 } from "./parkingImage.service";
 import { applyInsideSessionsFilter, INSIDE_SESSION_STATUSES } from "./sessionStatus";
+import type { PaymentMethod } from "@/modules/payment/paymentMethod";
+import { paymentTerminalManager } from "@/modules/paymentTerminal/PaymentTerminalManager";
+import {
+  abortActiveCardPaymentInBackground,
+  createPaymentTerminalOperation,
+  runCardPaymentInBackground,
+} from "@/modules/paymentTerminal/paymentTerminalOperations.service";
 
 export type SessionSource = "regular" | "subscription" | "vip";
 
@@ -62,7 +70,7 @@ export interface SessionRecord {
   tariff_price_per_hour: string | null;
   tariff_grace_period_minutes: number | null;
   tariff_intervals_snapshot: TariffIntervalSnapshot[] | string | null;
-  payment_method: "cash" | "online";
+  payment_method: PaymentMethod;
   created_at: Date;
 }
 
@@ -564,7 +572,7 @@ async function completeSession(
   exitMethod: "auto" | "manual",
   imageExit: string | null,
   exitedAt: Date,
-  paymentMethod: "cash" | "online" = "cash"
+  paymentMethod: PaymentMethod = "cash"
 ) {
   return db.transaction(async (trx) => {
     const session = await sessionsBaseQuery(trx)
@@ -759,10 +767,101 @@ export async function entryManual(
 
 export async function exitManual(
   actor: AuthTokenPayload,
-  input: { org_id?: number; plate_number: string; payment_method?: "cash" | "online" }
+  input: { org_id?: number; plate_number: string; payment_method?: PaymentMethod }
 ) {
   const orgId = resolveOrgIdRequired(actor, input.org_id);
   const operatorId = isOrgScopedRole(actor.role) ? actor.id : null;
+  if (input.payment_method === "card") {
+    const existing = await sessionsBaseQuery(db)
+      .where({ org_id: orgId, plate_number: input.plate_number, status: "active" })
+      .orderBy("entered_at", "desc")
+      .orderBy("id", "desc")
+      .first();
+    if (existing?.session_source === "regular") {
+      const lease = await paymentTerminalManager.acquire(orgId);
+      try {
+        const result = await db.transaction(async (trx) => {
+          await trx("tb_organizations").select("id").where({ id: orgId }).forUpdate().first();
+          const session = await sessionsBaseQuery(trx)
+            .where({ org_id: orgId, plate_number: input.plate_number, status: "active" })
+            .orderBy("entered_at", "desc")
+            .orderBy("id", "desc")
+            .forUpdate()
+            .first();
+          if (!session) {
+            throw new ApiError(`"${input.plate_number}" nomeri uchun faol sessiya topilmadi`, 404);
+          }
+          const exitedAt = new Date();
+          const durationMinutes = calculateDurationMinutes(new Date(session.entered_at), exitedAt);
+          let amount: number;
+          const intervalsSnapshot = parseIntervalsSnapshot(session.tariff_intervals_snapshot);
+          if (intervalsSnapshot) {
+            amount = calculateAmount(durationMinutes, 0, 0, intervalsSnapshot);
+          } else if (session.tariff_price_per_hour !== null) {
+            amount = calculateAmount(
+              durationMinutes,
+              Number(session.tariff_price_per_hour),
+              session.tariff_grace_period_minutes ?? 0
+            );
+          } else {
+            const tariff = await findTariff(trx, orgId);
+            amount = calculateAmount(
+              durationMinutes,
+              Number(tariff.price_per_hour),
+              tariff.grace_period_minutes
+            );
+          }
+          const operation = await createPaymentTerminalOperation(trx, {
+            orgId,
+            sessionId: session.id,
+            candidateId: null,
+            operatorId,
+            amountSom: amount,
+          });
+          await trx("tb_activity_logs").insert({
+            actor_id: operatorId,
+            action: "parking.card_payment_initiated",
+            target_type: "session",
+            target_id: session.id,
+            details: JSON.stringify({
+              orgId,
+              operationNumber: operation.operationNumber,
+              amount,
+              plateNumber: session.plate_number,
+            }),
+          });
+          return {
+            operation,
+            session: {
+              ...session,
+              duration_minutes: durationMinutes,
+              amount: String(amount),
+            },
+          };
+        });
+        runCardPaymentInBackground(
+          result.operation.id,
+          result.operation.operationNumber,
+          lease
+        );
+        emitCardPaymentStarted(orgId, {
+          sessionId: result.session.id,
+          candidateId: null,
+          operationNumber: result.operation.operationNumber,
+          plateNumber: displayPlateNumber(result.session.plate_number),
+        });
+        return {
+          session: { ...result.session, plate_number: displayPlateNumber(result.session.plate_number) },
+          payment: null,
+          barrier_status: null,
+          operation_number: result.operation.operationNumber,
+        };
+      } catch (error) {
+        lease.release();
+        throw error;
+      }
+    }
+  }
   const result = await completeSession(
     orgId,
     input.plate_number,
@@ -770,7 +869,7 @@ export async function exitManual(
     "manual",
     null,
     new Date(),
-    input.payment_method ?? "cash"
+    input.payment_method === "card" ? "cash" : input.payment_method ?? "cash"
   );
 
   const barrierStatus = await openBarrierOrWarn(orgId, "exit", input.plate_number);
@@ -789,6 +888,10 @@ export async function exitManual(
     barrierStatus,
     sessionSource: result.session.session_source,
     durationMinutes: result.session.duration_minutes,
+  });
+  abortActiveCardPaymentInBackground({
+    orgId,
+    sessionId: result.session.id,
   });
 
   return {
@@ -1040,6 +1143,10 @@ export async function confirmCashPayment(actor: AuthTokenPayload, id: number) {
     amount: Number(result.session.amount),
     actorId: actor.id,
   });
+  abortActiveCardPaymentInBackground({
+    orgId: result.session.org_id,
+    sessionId: result.session.id,
+  });
 
   return {
     ...result,
@@ -1047,10 +1154,84 @@ export async function confirmCashPayment(actor: AuthTokenPayload, id: number) {
   };
 }
 
+export async function retryCardPayment(actor: AuthTokenPayload, id: number) {
+  const existing = await findSessionOrFail(id);
+  assertInScope(actor, existing);
+  if (existing.status === "completed") throw new ApiError("Sessiya allaqachon yopilgan", 409);
+  if (existing.status !== "active") throw new ApiError("Sessiya faol emas", 409);
+  const latest = await db("payment_terminal_operations")
+    .select("status", "candidate_id", "requested_amount_som")
+    .where({ session_id: id, org_id: existing.org_id })
+    .orderBy("id", "desc")
+    .first();
+  if (!latest) throw new ApiError("Oldingi karta operatsiyasi topilmadi", 404);
+  if (!["DECLINED", "TIMEOUT"].includes(latest.status)) {
+    throw new ApiError("Karta to'lovini faqat rad etilgan yoki vaqt tugagan operatsiyadan keyin qayta boshlash mumkin", 409);
+  }
+  if (latest.candidate_id) {
+    const candidate = await db("tb_exit_candidates")
+      .select("status")
+      .where({ id: latest.candidate_id, org_id: existing.org_id })
+      .first();
+    if (!candidate || candidate.status !== "pending") {
+      throw new ApiError("Chiqish nomzodi allaqachon hal qilingan", 409);
+    }
+  }
+  const lease = await paymentTerminalManager.acquire(existing.org_id);
+  try {
+    const operation = await db.transaction(async (trx) => {
+      await trx("tb_organizations").select("id").where({ id: existing.org_id }).forUpdate().first();
+      const session = await sessionsBaseQuery(trx).where({ id }).forUpdate().first();
+      if (!session) throw new ApiError("Sessiya topilmadi", 404);
+      if (session.status === "completed") throw new ApiError("Sessiya allaqachon yopilgan", 409);
+      if (session.status !== "active") throw new ApiError("Sessiya faol emas", 409);
+      const lockedLatest = await trx("payment_terminal_operations")
+        .select("status", "candidate_id", "requested_amount_som")
+        .where({ session_id: id, org_id: session.org_id })
+        .orderBy("id", "desc")
+        .forUpdate()
+        .first();
+      if (!lockedLatest || !["DECLINED", "TIMEOUT"].includes(lockedLatest.status)) {
+        throw new ApiError("Karta to'lovini hozir qayta boshlash mumkin emas", 409);
+      }
+      if (lockedLatest.candidate_id) {
+        const candidate = await trx("tb_exit_candidates")
+          .select("status")
+          .where({ id: lockedLatest.candidate_id, org_id: session.org_id })
+          .forUpdate()
+          .first();
+        if (!candidate || candidate.status !== "pending") {
+          throw new ApiError("Chiqish nomzodi allaqachon hal qilingan", 409);
+        }
+      }
+      const created = await createPaymentTerminalOperation(trx, {
+        orgId: session.org_id,
+        sessionId: session.id,
+        candidateId: lockedLatest.candidate_id ? Number(lockedLatest.candidate_id) : null,
+        operatorId: isOrgScopedRole(actor.role) ? actor.id : null,
+        amountSom: Number(lockedLatest.requested_amount_som),
+      });
+      return {
+        ...created,
+        candidateId: lockedLatest.candidate_id ? Number(lockedLatest.candidate_id) : null,
+      };
+    });
+    runCardPaymentInBackground(operation.id, operation.operationNumber, lease);
+    return {
+      session_id: id,
+      status: "active" as const,
+      operation_number: operation.operationNumber,
+    };
+  } catch (error) {
+    lease.release();
+    throw error;
+  }
+}
+
 export async function updateSessionPaymentMethod(
   actor: AuthTokenPayload,
   id: number,
-  paymentMethod: "cash" | "online"
+  paymentMethod: PaymentMethod
 ) {
   const session = await findSessionOrFail(id);
   assertInScope(actor, session);
@@ -1071,7 +1252,7 @@ export async function updateSessionPaymentMethod(
 export async function forceCloseSession(
   actor: AuthTokenPayload,
   id: number,
-  input: { exited_at?: string; amount?: number; payment_method?: "cash" | "online" }
+  input: { exited_at?: string; amount?: number; payment_method?: PaymentMethod }
 ) {
   const session = await findSessionOrFail(id);
   assertInScope(actor, session);
@@ -1099,9 +1280,10 @@ export async function forceCloseSession(
   if (
     input.payment_method !== undefined &&
     input.payment_method !== "cash" &&
-    input.payment_method !== "online"
+    input.payment_method !== "online" &&
+    input.payment_method !== "card"
   ) {
-    throw new ApiError("payment_method 'cash' yoki 'online' bo'lishi kerak", 400);
+    throw new ApiError("payment_method 'cash', 'online' yoki 'card' bo'lishi kerak", 400);
   }
 
   const operatorId = isOrgScopedRole(actor.role) ? actor.id : null;

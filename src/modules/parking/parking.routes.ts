@@ -13,6 +13,7 @@ import {
   exitManualHandler,
   forceCloseHandler,
   printReceiptHandler,
+  retryCardPaymentHandler,
   sessionDetailHandler,
   sessionImageHandler,
   sessionsHandler,
@@ -34,6 +35,7 @@ router.get("/sessions/:id/images/:kind", asyncHandler(sessionImageHandler));
 router.post("/sessions/:id/force-close", asyncHandler(forceCloseHandler));
 router.post("/sessions/:id/print-receipt", isOperatorOrOwner, asyncHandler(printReceiptHandler));
 router.post("/sessions/:id/confirm-cash-payment", isOperatorOrOwner, asyncHandler(confirmCashPaymentHandler));
+router.post("/sessions/:id/retry-card-payment", isOperatorOrOwner, asyncHandler(retryCardPaymentHandler));
 router.post("/sessions/:id/payment-method", asyncHandler(updatePaymentMethodHandler));
 
 if (env.nodeEnv !== "production") {

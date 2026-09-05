@@ -12,12 +12,14 @@ import {
   getEmergencyBarrierSettingsHandler,
   updateEmergencyBarrierSettingsHandler,
   getCameraRelaySettingsHandler,
+  getCardTerminalSettingsHandler,
   getLedSettingsHandler,
   getTelegramSettingsHandler,
   expireStaleExitCandidatesHandler,
   resetTestDataHandler,
   staleSessionsHandler,
   updateCameraRelaySettingsHandler,
+  updateCardTerminalSettingsHandler,
   updateLedSettingsHandler,
   updateTelegramSettingsHandler,
 } from "./organizations.controller";
@@ -50,6 +52,12 @@ router.patch(
 router.get("/:id/stale-sessions", isSuperAdminOrOwner, asyncHandler(staleSessionsHandler));
 router.get("/:id/camera-relay-settings", isSuperAdminOrOwner, asyncHandler(getCameraRelaySettingsHandler));
 router.patch("/:id/camera-relay-settings", isSuperAdminOrOwner, asyncHandler(updateCameraRelaySettingsHandler));
+router.get(
+  "/:id/card-terminal-settings",
+  isSuperAdminOrOperatorOrOwner,
+  asyncHandler(getCardTerminalSettingsHandler)
+);
+router.patch("/:id/card-terminal-settings", isSuperAdmin, asyncHandler(updateCardTerminalSettingsHandler));
 router.get("/:id/led-settings", isSuperAdminOrOwner, asyncHandler(getLedSettingsHandler));
 router.patch("/:id/led-settings", isSuperAdmin, asyncHandler(updateLedSettingsHandler));
 router.get("/:id/telegram-settings", isSuperAdminOrOwner, asyncHandler(getTelegramSettingsHandler));

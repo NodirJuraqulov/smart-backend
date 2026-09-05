@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import type { PaymentMethod } from "@/modules/payment/paymentMethod";
 
 export function parseId(req: Request, res: Response): number | null {
   const id = Number(req.params.id);
@@ -29,13 +30,12 @@ export function parseOptionalOrgIdFromBody(req: Request, res: Response): number 
   return orgId;
 }
 
-export function parsePaymentMethod(req: Request, res: Response): "cash" | "online" | null {
+export function parsePaymentMethod(req: Request, res: Response): PaymentMethod | null {
   const value = req.body?.payment_method;
   if (value === undefined) return "cash";
-  if (value !== "cash" && value !== "online") {
-    res.status(400).json({ message: "payment_method 'cash' yoki 'online' bo'lishi kerak" });
+  if (value !== "cash" && value !== "online" && value !== "card") {
+    res.status(400).json({ message: "payment_method 'cash', 'online' yoki 'card' bo'lishi kerak" });
     return null;
   }
   return value;
 }
-

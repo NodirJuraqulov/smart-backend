@@ -32,7 +32,15 @@ import { resolveOrgIdRequired } from "@/utils/orgScope";
 import { ledService } from "@/modules/led/led.service";
 import { formatDuration } from "@/modules/printer/printer.service";
 import { telegramService } from "@/modules/telegram/telegram.service";
+import { paymentTerminalManager } from "@/modules/paymentTerminal/PaymentTerminalManager";
+import type { PaymentMethod } from "@/modules/payment/paymentMethod";
 import {
+  abortActiveCardPaymentInBackground,
+  createPaymentTerminalOperation,
+  runCardPaymentInBackground,
+} from "@/modules/paymentTerminal/paymentTerminalOperations.service";
+import {
+  emitCardPaymentStarted,
   emitExitCandidateCreated,
   emitExitCandidateResolved,
   emitExitCompleted,
@@ -47,9 +55,9 @@ type ResolutionType =
   | "dismissed"
   | "forced_open"
   | "emergency_forced_open"
-  | "emergency_confirmed";
-type PaymentMethod = "cash" | "online";
-type ExitPaymentMethod = PaymentMethod | "emergency";
+  | "emergency_confirmed"
+  | "card_payment_initiated";
+type ExitPaymentMethod = Exclude<PaymentMethod, "card"> | "emergency";
 type ExitMethod = "auto" | "manual" | "forced" | "auto_closed_on_reentry" | "emergency";
 export type ForceOpenReason =
   | "plate_not_found"
@@ -242,6 +250,161 @@ function calculateSessionTariffPreview(session: SessionSummary, at: Date) {
     durationMinutes,
     amount: calculateTariffSnapshotAmount(session, durationMinutes),
   };
+}
+
+interface CandidateCardOperationRow {
+  id: number;
+  org_id: number;
+  session_id: number | null;
+  candidate_id: number | null;
+  operator_id: number | null;
+  operation_number: string;
+  requested_amount_som: string | number;
+  approved_amount_som: string | number | null;
+  status: string;
+}
+
+class StaleCardPaymentError extends Error {
+  constructor(
+    readonly operation: CandidateCardOperationRow,
+    readonly sessionStatus: string,
+    readonly candidateStatus: string
+  ) {
+    super("STALE_CARD_PAYMENT");
+  }
+}
+
+async function resolveAutomaticCardAmount(
+  orgId: number,
+  session: SessionSummary,
+  amount: number,
+  timezone: string | null | undefined,
+  executor: Knex
+): Promise<number> {
+  if (!session.plate_number) return amount;
+  const inpatientVehicle = await findActiveInpatientVehicleForExit(
+    orgId,
+    session.plate_number,
+    getOrgTodayDate(timezone),
+    executor
+  );
+  if (inpatientVehicle) return 0;
+  const discount = await findPendingClinicDiscountForExit(
+    orgId,
+    session.plate_number,
+    getOrgTodayRange(timezone),
+    executor
+  );
+  if (!discount) return amount;
+  return Math.round((amount * (100 - discount.discount_percent)) / 100 * 100) / 100;
+}
+
+async function startAutomaticCardPayment(
+  orgId: number,
+  candidate: Pick<CandidateRow, "id" | "status">,
+  session: SessionSummary,
+  amount: number
+): Promise<void> {
+  if (session.session_source !== "regular" || !Number.isFinite(amount) || amount <= 0) return;
+  const settings = await db("tb_organizations")
+    .select(
+      "id",
+      "timezone",
+      "card_terminal_enabled",
+      "card_terminal_ip",
+      "card_terminal_port"
+    )
+    .where({ id: orgId })
+    .first();
+  if (!settings?.card_terminal_enabled || paymentTerminalManager.isBusy(orgId)) return;
+  const payableAmount = await resolveAutomaticCardAmount(
+    orgId,
+    session,
+    amount,
+    settings.timezone,
+    db
+  );
+  if (payableAmount <= 0 || paymentTerminalManager.isBusy(orgId)) return;
+  let lease;
+  try {
+    lease = paymentTerminalManager.acquireConfigured({
+      id: orgId,
+      card_terminal_enabled: Boolean(settings.card_terminal_enabled),
+      card_terminal_ip: settings.card_terminal_ip ?? null,
+      card_terminal_port: settings.card_terminal_port ?? null,
+    });
+  } catch {
+    return;
+  }
+  try {
+    const operation = await db.transaction(async (trx) => {
+      const lockedCandidate = await trx<CandidateRow>("tb_exit_candidates")
+        .select("id", "status")
+        .where({ id: candidate.id, org_id: orgId })
+        .forUpdate()
+        .first();
+      const lockedSession = await trx<SessionSummary>("tb_parking_sessions")
+        .select("id", "status", "session_source")
+        .where({ id: session.id, org_id: orgId })
+        .forUpdate()
+        .first();
+      if (
+        lockedCandidate?.status !== "pending" ||
+        lockedSession?.status !== "active" ||
+        lockedSession.session_source !== "regular"
+      ) {
+        return null;
+      }
+      const existing = await trx("payment_terminal_operations")
+        .select("id")
+        .where({ org_id: orgId })
+        .andWhere((builder) => {
+          builder.where({ candidate_id: candidate.id }).orWhere({ session_id: session.id });
+        })
+        .first();
+      if (existing) return null;
+      return createPaymentTerminalOperation(trx, {
+        orgId,
+        sessionId: session.id,
+        candidateId: candidate.id,
+        operatorId: null,
+        amountSom: payableAmount,
+      });
+    });
+    if (!operation) {
+      lease.release();
+      return;
+    }
+    runCardPaymentInBackground(operation.id, operation.operationNumber, lease);
+    emitCardPaymentStarted(orgId, {
+      sessionId: session.id,
+      candidateId: candidate.id,
+      operationNumber: operation.operationNumber,
+      plateNumber: displayPlateNumber(session.plate_number),
+    });
+  } catch (error) {
+    lease.release();
+    console.error(
+      `CARD_PAYMENT_AUTO_START_FAILED org_id=${orgId} candidate_id=${candidate.id}`,
+      error
+    );
+  }
+}
+
+export async function tryAutoStartCardPayment(
+  orgId: number,
+  candidate: Pick<CandidateRow, "id" | "status">,
+  session: SessionSummary,
+  amount: number
+): Promise<void> {
+  try {
+    await startAutomaticCardPayment(orgId, candidate, session, amount);
+  } catch (error) {
+    console.error(
+      `CARD_PAYMENT_AUTO_START_FAILED org_id=${orgId} candidate_id=${candidate.id}`,
+      error
+    );
+  }
 }
 
 function eventImageUrl(eventId: number, kind: "overview" | "vehicle" | "plate", imagePath?: string | null) {
@@ -533,6 +696,28 @@ export async function recordBarrierAttempt(input: {
   return status;
 }
 
+function autoStartCardPaymentForCandidate(
+  orgId: number,
+  candidate: Pick<CandidateRow, "id" | "status">,
+  sessionId: number
+): void {
+  setImmediate(() => {
+    void (async () => {
+      const session = await sessionSummaryQuery()
+        .where({ id: sessionId, org_id: orgId, status: "active" })
+        .first();
+      if (!session) return;
+      const preview = calculateSessionTariffPreview(session, new Date());
+      await tryAutoStartCardPayment(orgId, candidate, session, preview.amount ?? 0);
+    })().catch((error) => {
+      console.error(
+        `CARD_PAYMENT_CANDIDATE_TRIGGER_FAILED org_id=${orgId} candidate_id=${candidate.id}`,
+        error
+      );
+    });
+  });
+}
+
 export async function createExitCandidate(input: {
   orgId: number;
   webhookEventId: number;
@@ -548,7 +733,13 @@ export async function createExitCandidate(input: {
       .where({ webhook_event_id: input.webhookEventId, org_id: input.orgId })
       .first();
     if (existingByEvent) {
-      return { candidateId: existingByEvent.id, created: false, coalesced: false, skipped: false as const };
+      return {
+        candidateId: existingByEvent.id,
+        matchedSessionId: existingByEvent.matched_session_id,
+        created: false,
+        coalesced: false,
+        skipped: false as const,
+      };
     }
     const webhookEvent = await trx("tb_webhook_events")
       .select("camera_event_at", "created_at")
@@ -676,7 +867,13 @@ export async function createExitCandidate(input: {
         processing_reason: "pending_candidate_exists",
         session_id: matchedSession?.id ?? pending.matched_session_id ?? null,
       });
-      return { candidateId: pending.id, created: false, coalesced: true, skipped: false as const };
+      return {
+        candidateId: pending.id,
+        matchedSessionId: matchedSession?.id ?? pending.matched_session_id,
+        created: false,
+        coalesced: true,
+        skipped: false as const,
+      };
     }
     const [candidateId] = await trx("tb_exit_candidates").insert({
       org_id: input.orgId,
@@ -710,10 +907,19 @@ export async function createExitCandidate(input: {
         confidence: input.confidence,
       }),
     });
-    return { candidateId, created: true, coalesced: false, skipped: false as const };
+    return {
+      candidateId,
+      matchedSessionId: matchedSession?.id ?? null,
+      created: true,
+      coalesced: false,
+      skipped: false as const,
+    };
   });
   if (result.skipped) return result;
   const candidate = await getCandidateByInternalId(input.orgId, result.candidateId);
+  if (result.matchedSessionId) {
+    autoStartCardPaymentForCandidate(input.orgId, candidate, result.matchedSessionId);
+  }
   if (result.created) {
     emitExitCandidateCreated(input.orgId, {
       candidateId: candidate.id,
@@ -817,6 +1023,7 @@ export async function getNextExitCandidate(actor: AuthTokenPayload, requestedOrg
       lastLedCandidatePreviewByOrg.set(orgId, candidate.id);
       showLedPaymentPreview(orgId, displayPlateNumber(session.plate_number), preview.amount);
     }
+    await tryAutoStartCardPayment(orgId, candidate, session, preview.amount ?? 0);
     matchedSession = {
       session_id: session.id,
       plate_number: session.plate_number,
@@ -942,6 +1149,256 @@ export async function previewExitCandidateSession(
   const { amount, plateNumber } = result;
   showLedPaymentPreview(orgId, plateNumber, amount);
   return { plateNumber, amount };
+}
+
+export async function completeCardPaymentForCandidate(
+  orgId: number,
+  operationNumber: string,
+  rawFinRequestHex: string,
+  rawFinResponseHex: string | null
+): Promise<void> {
+  let completed;
+  try {
+    completed = await db.transaction(async (trx) => {
+      const operation = await trx<CandidateCardOperationRow>("payment_terminal_operations")
+        .where({ org_id: orgId, operation_number: operationNumber })
+        .forUpdate()
+        .first();
+      if (!operation) throw new ApiError("Terminal operatsiyasi topilmadi", 404);
+      if (operation.candidate_id === null || operation.session_id === null) {
+        throw new ApiError("Terminal operatsiyasi candidate sessiyasiga bog'lanmagan", 409);
+      }
+      const candidate = await trx<CandidateRow>("tb_exit_candidates")
+        .where({ id: operation.candidate_id, org_id: orgId })
+        .forUpdate()
+        .first();
+      const session = await sessionSummaryQuery(trx)
+        .where({ id: operation.session_id, org_id: orgId })
+        .forUpdate()
+        .first();
+      if (!candidate || !session) throw new ApiError("Candidate yoki sessiya topilmadi", 404);
+      if (candidate.status !== "pending" || session.status !== "active") {
+        throw new StaleCardPaymentError(operation, session.status, candidate.status);
+      }
+      if (operation.status !== "APPROVED") return null;
+      const approvedAmount = Number(operation.approved_amount_som);
+      if (!Number.isFinite(approvedAmount) || approvedAmount <= 0) {
+        throw new ApiError("Terminal tasdiqlagan summa noto'g'ri", 409);
+      }
+      const resolvedAt = new Date();
+      const durationMinutes = calculateDurationMinutes(new Date(session.entered_at), resolvedAt);
+      const resolutionType: ResolutionType =
+        candidate.matched_session_id === session.id ? "exact" : "reassigned";
+      await trx("payment_terminal_operations")
+        .where({ id: operation.id, status: "APPROVED" })
+        .update({
+          status: "FIN_CONFIRMED",
+          raw_fin_request_hex: rawFinRequestHex,
+          raw_fin_response_hex: rawFinResponseHex,
+          error_message: null,
+          updated_at: trx.fn.now(),
+        });
+      await trx("tb_parking_sessions").where({ id: session.id, org_id: orgId }).update({
+        status: "completed",
+        exited_at: resolvedAt,
+        duration_minutes: durationMinutes,
+        amount: approvedAmount,
+        payment_method: "card",
+        exit_method: "auto",
+        operator_id: operation.operator_id,
+        active_plate_key: null,
+      });
+      const [paymentId] = await trx("tb_payments").insert({
+        org_id: orgId,
+        session_id: session.id,
+        amount: approvedAmount,
+        payment_method: "card",
+        paid_at: resolvedAt,
+        operator_id: operation.operator_id,
+      });
+      await trx("tb_exit_candidates").where({ id: candidate.id, org_id: orgId }).update({
+        status: "accepted",
+        resolution_type: resolutionType,
+        resolved_session_id: session.id,
+        resolved_by: operation.operator_id,
+        resolved_at: resolvedAt,
+        updated_at: resolvedAt,
+      });
+      await trx("tb_webhook_events").where({ id: candidate.webhook_event_id, org_id: orgId }).update({
+        processing_result: "exit_completed",
+        processing_reason: `candidate_${resolutionType}_confirmed`,
+        session_id: session.id,
+        processed_at: trx.fn.now(),
+      });
+      const organization = await trx("tb_organizations")
+        .select("timezone")
+        .where({ id: orgId })
+        .first();
+      if (session.plate_number) {
+        const discount = await findPendingClinicDiscountForExit(
+          orgId,
+          session.plate_number,
+          getOrgTodayRange(organization?.timezone),
+          trx
+        );
+        if (discount) {
+          await markClinicDiscountUsed(discount.id, session.id, resolvedAt, trx);
+          await trx("tb_activity_logs").insert({
+            actor_id: operation.operator_id,
+            action: "clinic_discount_applied",
+            target_type: "exit_candidate",
+            target_id: candidate.id,
+            details: JSON.stringify({
+              orgId,
+              sessionId: session.id,
+              discountId: discount.id,
+              discountPercent: discount.discount_percent,
+              discountedAmount: approvedAmount,
+            }),
+          });
+        }
+      }
+      await trx("tb_activity_logs").insert({
+        actor_id: operation.operator_id,
+        action: resolutionType === "exact" ? "exit_candidate.accepted" : "exit_candidate.reassigned",
+        target_type: "exit_candidate",
+        target_id: candidate.id,
+        details: JSON.stringify({
+          orgId,
+          detectedPlate: candidate.detected_plate,
+          selectedSessionId: session.id,
+          oldStatus: "active",
+          newStatus: "completed",
+          operatorId: operation.operator_id,
+          amount: approvedAmount,
+          paymentMethod: "card",
+          exitMethod: "auto",
+          operationNumber,
+        }),
+      });
+      await trx("tb_activity_logs").insert({
+        actor_id: operation.operator_id,
+        action: "payment_terminal.card_payment_confirmed",
+        target_type: "session",
+        target_id: session.id,
+        details: JSON.stringify({ orgId, operationNumber, amount: approvedAmount }),
+      });
+      return {
+        operation,
+        candidate,
+        resolutionType,
+        webhookEventId: candidate.webhook_event_id,
+        session: {
+          ...session,
+          status: "completed" as const,
+          exited_at: resolvedAt,
+          duration_minutes: durationMinutes,
+          amount: approvedAmount,
+          payment_method: "card" as const,
+          exit_method: "auto" as const,
+        },
+        payment: {
+          id: paymentId,
+          amount: approvedAmount,
+          payment_method: "card" as const,
+          paid_at: resolvedAt,
+        },
+      };
+    });
+  } catch (error) {
+    if (!(error instanceof StaleCardPaymentError)) throw error;
+    const updated = await db("payment_terminal_operations")
+      .where({ id: error.operation.id })
+      .whereIn("status", ["APPROVED", "ABORTED"])
+      .update({
+        status: "STALE_IGNORED",
+        raw_fin_request_hex: rawFinRequestHex,
+        raw_fin_response_hex: rawFinResponseHex,
+        error_message: "Sessiya allaqachon boshqa usul bilan yopilgan",
+        updated_at: db.fn.now(),
+      });
+    if (updated) {
+      await db("tb_activity_logs").insert({
+        actor_id: error.operation.operator_id,
+        action: "payment_terminal.manual_reconciliation_required",
+        target_type: "session",
+        target_id: error.operation.session_id,
+        details: JSON.stringify({
+          orgId,
+          operationNumber,
+          reason: "stale_card_payment",
+          sessionStatus: error.sessionStatus,
+          candidateStatus: error.candidateStatus,
+        }),
+      });
+    }
+    console.error(
+      `STALE CARD PAYMENT: operation=${operationNumber}, session allaqachon boshqa usul bilan yopilgan, pul terminal orqali olingan bo'lishi mumkin — QO'LDA TEKSHIRING`
+    );
+    return;
+  }
+  if (!completed) return;
+  const plateNumber = displayPlateNumber(completed.session.plate_number);
+  void (async () => {
+    const user = completed.operation.operator_id
+      ? await getUserById(completed.operation.operator_id).catch(() => null)
+      : null;
+    await telegramService.sendExitNotification(orgId, {
+      plateNumber,
+      amount: Number(completed.session.amount),
+      paymentMethod: "card",
+      imageUrl: `/api/webhook-events/${completed.webhookEventId}/images/overview`,
+      durationText: formatDuration(completed.session.duration_minutes),
+      confirmedByName: user?.name.trim() || "Karta terminali",
+    });
+  })().catch(() => console.error("TELEGRAM_NOTIFICATION_FAILED"));
+  try {
+    void ledService.showPayment(orgId, plateNumber, Number(completed.session.amount)).catch((error) => {
+      console.error("LED_PAYMENT_FAILED", error);
+    });
+  } catch (error) {
+    console.error("LED_PAYMENT_FAILED", error);
+  }
+  scheduleLedReturnToClock(orgId);
+  const barrierStatus = await recordBarrierAttempt({
+    actorId: completed.operation.operator_id,
+    orgId,
+    candidateId: completed.candidate.id,
+    sessionId: completed.session.id,
+    retryAttempt: false,
+  });
+  if (barrierStatus === "failed") {
+    emitRelayFailed(orgId, {
+      direction: "exit",
+      plateNumber,
+      message: "Shlagbaum avtomatik ochilmadi, qo'lda oching",
+    });
+  }
+  emitExitCompleted(orgId, {
+    orgId,
+    sessionId: completed.session.id,
+    plateNumber,
+    amount: Number(completed.session.amount),
+    paymentMethod: "card",
+    exitMethod: "auto",
+    barrierStatus,
+    sessionSource: completed.session.session_source,
+    durationMinutes: completed.session.duration_minutes,
+  });
+  emitExitCandidateResolved(orgId, {
+    candidateId: completed.candidate.id,
+    orgId,
+    status: "accepted",
+    resolutionType: completed.resolutionType,
+    sessionId: completed.session.id,
+    barrierStatus,
+    plateNumber,
+    sessionSource: completed.session.session_source,
+    amount: Number(completed.session.amount),
+    paymentMethod: "card",
+    exitMethod: "auto",
+    durationMinutes: completed.session.duration_minutes,
+  });
 }
 
 export async function confirmExitCandidate(
@@ -1206,6 +1663,16 @@ export async function confirmExitCandidate(
     exitMethod: transactionResult.session.exit_method,
     durationMinutes: transactionResult.session.duration_minutes,
   });
+  if (
+    transactionResult.session.payment_method === "cash" ||
+    transactionResult.session.payment_method === "online"
+  ) {
+    abortActiveCardPaymentInBackground({
+      orgId,
+      sessionId: transactionResult.session.id,
+      candidateId,
+    });
+  }
   return {
     candidate: await getCandidateByInternalId(orgId, candidateId),
     session: serializeSessionSummary(transactionResult.session),
@@ -1369,7 +1836,7 @@ export function acceptExitCandidate(
   actor: AuthTokenPayload,
   requestedOrgId: number | undefined,
   candidateId: number,
-  paymentMethod?: PaymentMethod
+  paymentMethod?: Exclude<PaymentMethod, "card">
 ) {
   console.warn(`Deprecated exit candidate accept endpoint ishlatildi: candidate_id=${candidateId}`);
   return confirmExitCandidate(actor, requestedOrgId, candidateId, { paymentMethod });
@@ -1380,7 +1847,7 @@ export function reassignExitCandidate(
   requestedOrgId: number | undefined,
   candidateId: number,
   sessionId: number,
-  paymentMethod?: PaymentMethod
+  paymentMethod?: Exclude<PaymentMethod, "card">
 ) {
   console.warn(`Deprecated exit candidate reassign endpoint ishlatildi: candidate_id=${candidateId}`);
   return confirmExitCandidate(actor, requestedOrgId, candidateId, { sessionId, paymentMethod });

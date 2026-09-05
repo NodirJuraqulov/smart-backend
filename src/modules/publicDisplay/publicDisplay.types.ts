@@ -1,4 +1,12 @@
-export type PublicDisplayState = "idle" | "awaiting_operator" | "completed" | "barrier_failed" | "declined";
+import type { PaymentMethod } from "@/modules/payment/paymentMethod";
+
+export type PublicDisplayState =
+  | "idle"
+  | "awaiting_operator"
+  | "awaiting_payment"
+  | "completed"
+  | "barrier_failed"
+  | "declined";
 
 export type PublicBarrierStatus = "opened" | "failed" | "disabled" | "not_configured";
 
@@ -18,6 +26,6 @@ export interface PublicEntryDisplayStatus {
 export interface PublicExitDisplayStatus extends PublicEntryDisplayStatus {
   session_source: "regular" | "subscription" | "vip" | null;
   amount: number | null;
-  payment_method: "cash" | "online" | null;
+  payment_method: PaymentMethod | null;
   duration_minutes: number | null;
 }

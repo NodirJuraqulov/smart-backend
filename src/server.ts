@@ -14,6 +14,7 @@ import { scheduleInpatientVehiclesExpiryJob } from "./jobs/inpatientVehiclesExpi
 import { initSocketServer } from "./websocket/socketServer";
 import { resumePlateFormatChecks } from "./modules/plateFormats/plateFormatCheck.service";
 import { ledService } from "./modules/led/led.service";
+import { paymentTerminalManager } from "./modules/paymentTerminal/PaymentTerminalManager";
 
 process.on("uncaughtException", (error) => {
   console.error("KUTILMAGAN XATO:", error);
@@ -56,6 +57,9 @@ httpServer.listen(env.port, () => {
   resumePlateFormatChecks().catch((err) => {
     console.error("Davlat raqami format tekshiruvlarini tiklashda xato:", err);
   });
+  void paymentTerminalManager.start().catch((error) => {
+    console.error("VTK_MANAGER_START_FAILED", error);
+  });
 });
 
 const SHUTDOWN_TIMEOUT_MS = 10_000;
@@ -80,6 +84,7 @@ async function gracefulShutdown(signal: string): Promise<void> {
   await Promise.race([closeHttpServer, timeout]);
 
   io.close();
+  await paymentTerminalManager.stop();
   await db.destroy();
   console.log("DB ulanishlari yopildi");
 
