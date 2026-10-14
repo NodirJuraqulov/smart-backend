@@ -1,6 +1,7 @@
 import { promises as fs } from "fs";
 import type { Knex } from "knex";
 import { db } from "@/config/db";
+import { env } from "@/config/env";
 import { AuthTokenPayload, getUserById } from "@/modules/auth/auth.service";
 import {
   calculateDurationMinutes,
@@ -47,6 +48,7 @@ import {
   emitPublicExitStatusChanged,
   emitRelayFailed,
 } from "@/websocket/socketServer";
+import { canonicalizePlate, plateDistance, similarityPercent } from "./plateMatch";
 
 type CandidateStatus = "pending" | "accepted" | "dismissed" | "expired";
 type ResolutionType =
@@ -567,6 +569,33 @@ async function findFuzzyActiveSession(trx: Knex.Transaction, orgId: number, dete
   return matches.length === 1 ? matches[0] : undefined;
 }
 
+async function findV2ActiveSession(
+  trx: Knex.Transaction,
+  orgId: number,
+  detectedPlate: string,
+  cameraEventAt: Date
+) {
+  const canonicalDetectedPlate = canonicalizePlate(detectedPlate);
+  if (canonicalDetectedPlate.length < 3) return undefined;
+  const sessions = await trx<SessionSummary>("tb_parking_sessions")
+    .select("id", "status", "plate_number")
+    .where({ org_id: orgId, status: "active" })
+    .whereNotNull("plate_number")
+    .andWhere("entered_at", "<", cameraEventAt);
+  const matchesAtDistance = (distance: number) =>
+    sessions.filter(
+      (session) =>
+        canonicalizePlate(session.plate_number ?? "").length >= 3 &&
+        plateDistance(canonicalDetectedPlate, session.plate_number ?? "") === distance
+    );
+  const canonicalMatches = matchesAtDistance(0);
+  if (canonicalMatches.length > 0) {
+    return canonicalMatches.length === 1 ? canonicalMatches[0] : undefined;
+  }
+  const distanceOneMatches = matchesAtDistance(1);
+  return distanceOneMatches.length === 1 ? distanceOneMatches[0] : undefined;
+}
+
 async function findFuzzyResolvedCandidate(
   trx: Knex.Transaction,
   orgId: number,
@@ -758,7 +787,9 @@ export async function createExitCandidate(input: {
           .first()
       : undefined;
     if (detectedPlate && !matchingSession) {
-      matchingSession = await findFuzzyActiveSession(trx, input.orgId, detectedPlate);
+      matchingSession = env.exitMatchV2Enabled
+        ? await findV2ActiveSession(trx, input.orgId, detectedPlate, cameraEventAt)
+        : await findFuzzyActiveSession(trx, input.orgId, detectedPlate);
     }
     if (matchingSession?.status === "awaiting_payment") {
       await trx("tb_webhook_events").where({ id: input.webhookEventId, org_id: input.orgId }).update({
@@ -917,7 +948,18 @@ export async function createExitCandidate(input: {
   });
   if (result.skipped) return result;
   const candidate = await getCandidateByInternalId(input.orgId, result.candidateId);
-  if (result.matchedSessionId) {
+  let autoCardEligible = !!result.matchedSessionId;
+  if (env.exitMatchV2Enabled && result.matchedSessionId) {
+    const matchedSession = await db<SessionSummary>("tb_parking_sessions")
+      .select("plate_number")
+      .where({ id: result.matchedSessionId, org_id: input.orgId })
+      .first();
+    autoCardEligible =
+      !!candidate.detected_plate &&
+      !!matchedSession?.plate_number &&
+      plateDistance(candidate.detected_plate, matchedSession.plate_number) === 0;
+  }
+  if (result.matchedSessionId && autoCardEligible) {
     autoStartCardPaymentForCandidate(input.orgId, candidate, result.matchedSessionId);
   }
   if (result.created) {
@@ -1079,6 +1121,52 @@ export async function searchExitCandidateSessions(
       };
     })
   );
+  if (env.exitMatchV2Enabled) {
+    const searchPlate = plate !== undefined
+      ? normalizePlate(plate)
+      : candidate.detected_plate ?? candidate.suggested_plate ?? "";
+    if (canonicalizePlate(searchPlate).length < 3) return { results: [], active_sessions };
+    const sessions = await sessionSummaryQuery()
+      .where({ org_id: orgId, status: "active" })
+      .whereNotNull("plate_number");
+    const scored = sessions
+      .map((session) => {
+        const distance = plateDistance(searchPlate, session.plate_number ?? "");
+        return {
+          session,
+          distance,
+          score: similarityPercent(searchPlate, session.plate_number ?? ""),
+        };
+      })
+      .filter(
+        (item) =>
+          canonicalizePlate(item.session.plate_number ?? "").length >= 3 && item.distance <= 2
+      )
+      .sort(
+        (left, right) =>
+          right.score - left.score ||
+          new Date(right.session.entered_at).getTime() - new Date(left.session.entered_at).getTime() ||
+          right.session.id - left.session.id
+      )
+      .slice(0, 10);
+    const results = await Promise.all(
+      scored.map(async ({ session, score }) => {
+        const durationMinutes = calculateDurationMinutes(new Date(session.entered_at), now);
+        return {
+          session_id: String(session.id),
+          plate_number: displayPlateNumber(session.plate_number),
+          entered_at: new Date(session.entered_at).toISOString(),
+          session_source: session.session_source,
+          similarity_score: score,
+          similarity: score,
+          duration_minutes: durationMinutes,
+          tariff_snapshot_amount: calculateTariffSnapshotAmount(session, durationMinutes) ?? 0,
+          entry_images: await entryImages(actor, session),
+        };
+      })
+    );
+    return { results, active_sessions };
+  }
   const normalized = plate ? normalizePlate(plate) : "";
   if (!normalized) return { results: [], active_sessions };
   const sessions = await sessionSummaryQuery()

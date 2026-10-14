@@ -7,6 +7,7 @@ import sharp from "sharp";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { DateTime } from "luxon";
 import { db } from "@/config/db";
+import { env } from "@/config/env";
 import { errorHandler } from "@/middleware/errorHandler";
 import { AuthTokenPayload, signAccessToken } from "@/modules/auth/auth.service";
 import exitCandidatesRouter from "@/modules/exitCandidates/exitCandidates.routes";
@@ -227,6 +228,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
+  env.exitMatchV2Enabled = false;
   orgId = await createTestOrganization({ timezone: "Asia/Tashkent" });
   otherOrgId = await createTestOrganization({ timezone: "Asia/Tashkent" });
   webhookToken = `candidate-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -251,6 +253,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  env.exitMatchV2Enabled = false;
   vi.restoreAllMocks();
   await clearWebhookDedupeCache(orgId);
   await fs.rm(path.join(process.cwd(), "uploads", "parking-events", String(orgId)), {
@@ -924,6 +927,89 @@ describe("exit candidate completion workflow", () => {
       .send({ plate: "01A124BX" });
     expect(response.status).toBe(200);
     expect(response.body.results).toEqual([]);
+  });
+
+  it("V2 qidiruv body bo'lmasa candidate nomeri bilan distance=2 sessiyani qaytaradi", async () => {
+    env.exitMatchV2Enabled = true;
+    const sessionId = await createSession("01A123BC");
+    await postExit("01A123DE");
+    const candidate = await candidateForPlate("01A123DE");
+    const response = await testRequest(app)
+      .post(`/api/exit-candidates/${candidate.id}/search`)
+      .set("Authorization", authorizationHeader)
+      .send({});
+    expect(response.status).toBe(200);
+    expect(response.body.results[0]).toMatchObject({
+      session_id: String(sessionId),
+      plate_number: "01A123BC",
+      similarity: 75,
+      similarity_score: 75,
+      tariff_snapshot_amount: 10000,
+      entry_images: { image_available: false },
+    });
+  });
+
+  it("V2 qo'lda kiritilgan nomerni candidate nomeridan ustun qo'yadi", async () => {
+    env.exitMatchV2Enabled = true;
+    const sessionId = await createSession("01A777AA");
+    await postExit("WRONG777");
+    const candidate = await candidateForPlate("WRONG777");
+    const response = await testRequest(app)
+      .post(`/api/exit-candidates/${candidate.id}/search`)
+      .set("Authorization", authorizationHeader)
+      .send({ plate: "01A777AB" });
+    expect(response.status).toBe(200);
+    expect(response.body.results[0]).toMatchObject({
+      session_id: String(sessionId),
+      similarity: 88,
+    });
+  });
+
+  it("V2 detected plate null bo'lsa suggested plate bilan avtomatik qidiradi", async () => {
+    env.exitMatchV2Enabled = true;
+    const sessionId = await createSession("01A888AA");
+    await postExit(null);
+    const candidate = await queryTable<TestCandidateRow>("tb_exit_candidates")
+      .where({ org_id: orgId })
+      .orderBy("id", "desc")
+      .first();
+    if (!candidate) throw new Error("Null plate candidate topilmadi");
+    expect(candidate.matched_session_id).toBeNull();
+    await db("tb_exit_candidates").where({ id: candidate.id }).update({ suggested_plate: "01A888AB" });
+    const response = await testRequest(app)
+      .post(`/api/exit-candidates/${candidate.id}/search`)
+      .set("Authorization", authorizationHeader)
+      .send({});
+    expect(response.status).toBe(200);
+    expect(response.body.results[0]).toMatchObject({
+      session_id: String(sessionId),
+      similarity: 88,
+    });
+  });
+
+  it("V2 qidiruv natijalarini similarity bo'yicha saralaydi, distance=3 ni chiqarib maksimal 10 qaytaradi", async () => {
+    env.exitMatchV2Enabled = true;
+    const inputPlate = "01A555AA";
+    for (const suffix of ["C", "D", "E", "F", "H", "J", "K", "L", "M", "N", "P"]) {
+      await createSession(`${inputPlate.slice(0, -1)}${suffix}`);
+    }
+    const exactId = await createSession(inputPlate);
+    const farId = await createSession("99Z999ZZ");
+    await postExit("WRONG778");
+    const candidate = await candidateForPlate("WRONG778");
+    const response = await testRequest(app)
+      .post(`/api/exit-candidates/${candidate.id}/search`)
+      .set("Authorization", authorizationHeader)
+      .send({ plate: inputPlate });
+    expect(response.status).toBe(200);
+    expect(response.body.results).toHaveLength(10);
+    expect(response.body.results[0]).toMatchObject({ session_id: String(exactId), similarity: 100 });
+    expect(response.body.results.some((item: { session_id: string }) => item.session_id === String(farId))).toBe(false);
+    expect(response.body.results.map((item: { similarity: number }) => item.similarity)).toEqual(
+      [...response.body.results]
+        .map((item: { similarity: number }) => item.similarity)
+        .sort((left: number, right: number) => right - left)
+    );
   });
 
   it("7. session_id bilan confirm reassigned sessiyani yakunlaydi", async () => {

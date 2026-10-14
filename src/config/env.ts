@@ -10,6 +10,11 @@ function required(name: string): string {
   return value;
 }
 
+function positiveInteger(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 export function stripTrailingSlashes(url: string): string {
   return url.replace(/\/+$/, "");
 }
@@ -55,6 +60,16 @@ export const env = {
   platformDefaultTimezone: process.env.PLATFORM_DEFAULT_TIMEZONE || "Asia/Tashkent",
 
   publicBaseUrl: resolvePublicBaseUrl(),
+
+  exitMatchV2Enabled: process.env.EXIT_MATCH_V2_ENABLED === "true",
+  forcedOpenAvgLossSom: positiveInteger(process.env.FORCED_OPEN_AVG_LOSS_SOM, 10000),
+
+  staleSessionCleanup: {
+    enabled: process.env.STALE_SESSION_CLEANUP_ENABLED === "true",
+    keepDays: positiveInteger(process.env.STALE_SESSION_CLEANUP_KEEP_DAYS, 2),
+    maxPerRun: positiveInteger(process.env.STALE_SESSION_CLEANUP_MAX_PER_RUN, 1000),
+    cron: process.env.STALE_SESSION_CLEANUP_CRON || "30 3 * * *",
+  },
 
   payments: {
     paymeEnabled: process.env.PAYME_ENABLED === "true",

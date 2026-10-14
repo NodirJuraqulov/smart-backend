@@ -1,6 +1,7 @@
 import { DateTime } from "luxon";
 import type { Knex } from "knex";
 import { db } from "@/config/db";
+import { env } from "@/config/env";
 import { AuthTokenPayload } from "@/modules/auth/auth.service";
 import { ApiError } from "@/utils/ApiError";
 import { assertOrganizationExists } from "@/utils/assertOrganizationExists";
@@ -58,6 +59,23 @@ interface PaymentRow {
 
 type PaymentLedgerRow = Pick<PaymentRow, "paid_at" | "amount" | "payment_method">;
 
+interface ExitControlRow {
+  camera_event_at: Date;
+  resolution_type: string | null;
+  matched_session_id: number | null;
+  resolved_session_id: number | null;
+  session_source: "regular" | "vip" | "subscription" | null;
+}
+
+interface ExitControlDay {
+  date: string;
+  not_found_count: number;
+  forced_open_count: number;
+  forced_open_unknown_or_regular: number;
+  forced_open_vip_or_subscription: number;
+  estimated_loss_som: number;
+}
+
 function unixSeconds(value: Date): number {
   return Math.floor(value.getTime() / 1000);
 }
@@ -69,6 +87,103 @@ function timestampRange(column: string, start: Date, endExclusive: Date) {
     column,
     unixSeconds(endExclusive),
   ]);
+}
+
+export async function getExitControlReport(
+  actor: AuthTokenPayload,
+  requestedOrgId: number | undefined,
+  fromParam: string | undefined,
+  toParam: string | undefined
+) {
+  const orgId = resolveOrgIdRequired(actor, requestedOrgId);
+  await assertOrganizationExists(orgId);
+  const timezone = await getOrgTimezone(orgId);
+  if (!fromParam || !toParam) {
+    throw new ApiError("from va to majburiy", 400);
+  }
+  if (!isValidDateString(fromParam, timezone) || !isValidDateString(toParam, timezone)) {
+    throw new ApiError("from va to formati noto'g'ri (YYYY-MM-DD)", 400);
+  }
+  const fromDate = DateTime.fromISO(fromParam, { zone: timezone }).startOf("day");
+  const toDate = DateTime.fromISO(toParam, { zone: timezone }).startOf("day");
+  const dayCount = Math.floor(toDate.diff(fromDate, "days").days) + 1;
+  if (dayCount < 1) {
+    throw new ApiError("from sanasi to sanasidan keyin bo'lishi mumkin emas", 400);
+  }
+  if (dayCount > 93) {
+    throw new ApiError("Sana oralig'i 93 kundan oshmasligi kerak", 400);
+  }
+  const rows = await db<ExitControlRow>("tb_exit_candidates as candidate")
+    .leftJoin("tb_parking_sessions as session", function joinResolvedSession() {
+      this.on(
+        "session.id",
+        "=",
+        db.raw("COALESCE(??, ??)", [
+          "candidate.resolved_session_id",
+          "candidate.matched_session_id",
+        ])
+      );
+    })
+    .where({ "candidate.org_id": orgId })
+    .where(timestampRange("candidate.camera_event_at", fromDate.toJSDate(), toDate.plus({ days: 1 }).toJSDate()))
+    .select(
+      "candidate.camera_event_at",
+      "candidate.resolution_type",
+      "candidate.matched_session_id",
+      "candidate.resolved_session_id",
+      "session.session_source"
+    );
+  const avgLossSom = env.forcedOpenAvgLossSom;
+  const days: ExitControlDay[] = Array.from({ length: dayCount }, (_, index) => ({
+    date: fromDate.plus({ days: index }).toFormat("yyyy-MM-dd"),
+    not_found_count: 0,
+    forced_open_count: 0,
+    forced_open_unknown_or_regular: 0,
+    forced_open_vip_or_subscription: 0,
+    estimated_loss_som: 0,
+  }));
+  const daysByDate = new Map(days.map((day) => [day.date, day]));
+  for (const row of rows) {
+    const date = DateTime.fromJSDate(new Date(row.camera_event_at)).setZone(timezone).toFormat("yyyy-MM-dd");
+    const day = daysByDate.get(date);
+    if (!day) continue;
+    const sessionId = row.resolved_session_id ?? row.matched_session_id;
+    if (sessionId === null) day.not_found_count += 1;
+    if (row.resolution_type !== "emergency_forced_open") continue;
+    day.forced_open_count += 1;
+    if (row.session_source === "vip" || row.session_source === "subscription") {
+      day.forced_open_vip_or_subscription += 1;
+    } else {
+      day.forced_open_unknown_or_regular += 1;
+      day.estimated_loss_som += avgLossSom;
+    }
+  }
+  const totals = days.reduce(
+    (summary, day) => ({
+      not_found_count: summary.not_found_count + day.not_found_count,
+      forced_open_count: summary.forced_open_count + day.forced_open_count,
+      forced_open_unknown_or_regular:
+        summary.forced_open_unknown_or_regular + day.forced_open_unknown_or_regular,
+      forced_open_vip_or_subscription:
+        summary.forced_open_vip_or_subscription + day.forced_open_vip_or_subscription,
+      estimated_loss_som: summary.estimated_loss_som + day.estimated_loss_som,
+    }),
+    {
+      not_found_count: 0,
+      forced_open_count: 0,
+      forced_open_unknown_or_regular: 0,
+      forced_open_vip_or_subscription: 0,
+      estimated_loss_som: 0,
+    }
+  );
+  return {
+    estimated: true,
+    avg_loss_som: avgLossSom,
+    from: fromParam,
+    to: toParam,
+    days,
+    totals,
+  };
 }
 
 function applyOperatorFilter<T extends Knex.QueryBuilder>(query: T, operatorId?: number): T {

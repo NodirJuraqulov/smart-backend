@@ -2,6 +2,7 @@ import express from "express";
 import request from "supertest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "@/config/db";
+import { env } from "@/config/env";
 import { errorHandler } from "@/middleware/errorHandler";
 import { AuthTokenPayload, signAccessToken } from "@/modules/auth/auth.service";
 import exitCandidatesRouter from "@/modules/exitCandidates/exitCandidates.routes";
@@ -195,6 +196,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
+  env.exitMatchV2Enabled = false;
   backgroundMocks.run.mockReset();
   orgId = await createTestOrganization();
   await seedTestOperatorPermissions(orgId);
@@ -218,6 +220,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  env.exitMatchV2Enabled = false;
   await cleanupOrganization(orgId);
   vi.restoreAllMocks();
   vi.clearAllMocks();
@@ -260,6 +263,83 @@ describe("Card payment oqimi", () => {
     });
     const operations = await db("payment_terminal_operations").where({ session_id: sessionId });
     expect(operations).toHaveLength(1);
+  });
+
+  it("V2 canonical distance=0 sessiya uchun avtomatik VRP boshlaydi", async () => {
+    env.exitMatchV2Enabled = true;
+    await enableTerminal();
+    executeBackgroundCardPayments();
+    const sessionId = await createTestActiveSession(
+      orgId,
+      "01O200BI",
+      new Date(Date.now() - 70 * 60 * 1000)
+    );
+    await db("tb_parking_sessions").where({ id: sessionId }).update({
+      tariff_price_per_hour: 3000,
+      tariff_grace_period_minutes: 0,
+    });
+    const webhookEventId = await createExitWebhookEvent("01020081");
+    const result = await createExitCandidate({
+      orgId,
+      webhookEventId,
+      detectedPlate: "01020081",
+      confidence: 99,
+    });
+    expect(result).toMatchObject({ matchedSessionId: sessionId });
+    await vi.waitFor(() => {
+      expect(terminal.startPayment).toHaveBeenCalledWith("1", 6000);
+    });
+  });
+
+  it("V2 distance=1 sessiya matched bo'lsa avtomatik VRP boshlamaydi", async () => {
+    env.exitMatchV2Enabled = true;
+    await enableTerminal();
+    executeBackgroundCardPayments();
+    const sessionId = await createTestActiveSession(
+      orgId,
+      "01C200AA",
+      new Date(Date.now() - 70 * 60 * 1000)
+    );
+    await db("tb_parking_sessions").where({ id: sessionId }).update({
+      tariff_price_per_hour: 3000,
+      tariff_grace_period_minutes: 0,
+    });
+    const webhookEventId = await createExitWebhookEvent("01C200AB");
+    const result = await createExitCandidate({
+      orgId,
+      webhookEventId,
+      detectedPlate: "01C200AB",
+      confidence: 99,
+    });
+    expect(result).toMatchObject({ matchedSessionId: sessionId });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(terminal.startPayment).not.toHaveBeenCalled();
+    expect(await db("payment_terminal_operations").where({ session_id: sessionId })).toHaveLength(0);
+  });
+
+  it("flag o'chiq bo'lsa legacy distance=1 sessiya uchun avtomatik VRP boshlaydi", async () => {
+    await enableTerminal();
+    executeBackgroundCardPayments();
+    const sessionId = await createTestActiveSession(
+      orgId,
+      "01C201AA",
+      new Date(Date.now() - 70 * 60 * 1000)
+    );
+    await db("tb_parking_sessions").where({ id: sessionId }).update({
+      tariff_price_per_hour: 3000,
+      tariff_grace_period_minutes: 0,
+    });
+    const webhookEventId = await createExitWebhookEvent("01C201AB");
+    const result = await createExitCandidate({
+      orgId,
+      webhookEventId,
+      detectedPlate: "01C201AB",
+      confidence: 99,
+    });
+    expect(result).toMatchObject({ matchedSessionId: sessionId });
+    await vi.waitFor(() => {
+      expect(terminal.startPayment).toHaveBeenCalledWith("1", 6000);
+    });
   });
 
   it("takroriy candidate signali coalesced bo'lganda faqat bitta operation yaratadi", async () => {

@@ -91,3 +91,12 @@ export async function yearlyHandler(req: Request, res: Response) {
         );
   res.json(report);
 }
+
+export async function exitControlHandler(req: Request, res: Response) {
+  const orgId = parseOptionalOrgIdFromQuery(req, res);
+  if (orgId === null) return;
+  const from = typeof req.query.from === "string" ? req.query.from : undefined;
+  const to = typeof req.query.to === "string" ? req.query.to : undefined;
+  const report = await reportsService.getExitControlReport(req.user!, orgId, from, to);
+  res.json(report);
+}

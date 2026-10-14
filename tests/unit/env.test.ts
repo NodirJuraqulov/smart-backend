@@ -1,5 +1,27 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { collectProductionSafetyErrors, stripTrailingSlashes } from "@/config/env";
+
+const exitControlEnvNames = [
+  "EXIT_MATCH_V2_ENABLED",
+  "FORCED_OPEN_AVG_LOSS_SOM",
+  "STALE_SESSION_CLEANUP_ENABLED",
+  "STALE_SESSION_CLEANUP_KEEP_DAYS",
+  "STALE_SESSION_CLEANUP_MAX_PER_RUN",
+  "STALE_SESSION_CLEANUP_CRON",
+] as const;
+
+async function loadExitControlEnv(overrides: Partial<Record<(typeof exitControlEnvNames)[number], string>>) {
+  for (const name of exitControlEnvNames) {
+    vi.stubEnv(name, overrides[name] ?? "");
+  }
+  vi.resetModules();
+  return (await import("@/config/env")).env;
+}
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.resetModules();
+});
 
 const validConfig = {
   jwtSecret: "a".repeat(40),
@@ -49,5 +71,52 @@ describe("collectProductionSafetyErrors — PUBLIC_BASE_URL", () => {
       encryptionKey: "",
     });
     expect(errors).toHaveLength(5);
+  });
+});
+
+describe("exit control env", () => {
+  it("qiymatlar berilmaganda xavfsiz defaultlarni ishlatadi", async () => {
+    const configuredEnv = await loadExitControlEnv({});
+
+    expect(configuredEnv.exitMatchV2Enabled).toBe(false);
+    expect(configuredEnv.forcedOpenAvgLossSom).toBe(10000);
+    expect(configuredEnv.staleSessionCleanup).toEqual({
+      enabled: false,
+      keepDays: 2,
+      maxPerRun: 1000,
+      cron: "30 3 * * *",
+    });
+  });
+
+  it("literal true va musbat configured qiymatlarni qabul qiladi", async () => {
+    const configuredEnv = await loadExitControlEnv({
+      EXIT_MATCH_V2_ENABLED: "true",
+      FORCED_OPEN_AVG_LOSS_SOM: "25000",
+      STALE_SESSION_CLEANUP_ENABLED: "true",
+      STALE_SESSION_CLEANUP_KEEP_DAYS: "4",
+      STALE_SESSION_CLEANUP_MAX_PER_RUN: "300",
+      STALE_SESSION_CLEANUP_CRON: "15 2 * * *",
+    });
+
+    expect(configuredEnv.exitMatchV2Enabled).toBe(true);
+    expect(configuredEnv.forcedOpenAvgLossSom).toBe(25000);
+    expect(configuredEnv.staleSessionCleanup).toEqual({
+      enabled: true,
+      keepDays: 4,
+      maxPerRun: 300,
+      cron: "15 2 * * *",
+    });
+  });
+
+  it("noto'g'ri numeric qiymatlarni defaultga qaytaradi", async () => {
+    const configuredEnv = await loadExitControlEnv({
+      FORCED_OPEN_AVG_LOSS_SOM: "NaN",
+      STALE_SESSION_CLEANUP_KEEP_DAYS: "0",
+      STALE_SESSION_CLEANUP_MAX_PER_RUN: "-5",
+    });
+
+    expect(configuredEnv.forcedOpenAvgLossSom).toBe(10000);
+    expect(configuredEnv.staleSessionCleanup.keepDays).toBe(2);
+    expect(configuredEnv.staleSessionCleanup.maxPerRun).toBe(1000);
   });
 });

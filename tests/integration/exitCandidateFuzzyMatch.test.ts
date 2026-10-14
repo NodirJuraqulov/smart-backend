@@ -6,6 +6,7 @@ import sharp from "sharp";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { DateTime } from "luxon";
 import { db } from "@/config/db";
+import { env } from "@/config/env";
 import { errorHandler } from "@/middleware/errorHandler";
 import { AuthTokenPayload, signAccessToken } from "@/modules/auth/auth.service";
 import exitCandidatesRouter from "@/modules/exitCandidates/exitCandidates.routes";
@@ -17,6 +18,7 @@ import {
   cleanupOrganization,
   closeDb,
   createTestActiveSession,
+  createTestAwaitingPaymentSession,
   createTestOrganization,
   createTestTariff,
   createTestUser,
@@ -136,6 +138,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
+  env.exitMatchV2Enabled = false;
   orgId = await createTestOrganization({ timezone: "Asia/Tashkent" });
   webhookToken = `fuzzy-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   await testDb("tb_organizations").where({ id: orgId }).update({
@@ -153,6 +156,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  env.exitMatchV2Enabled = false;
   await clearWebhookDedupeCache(orgId);
   await fs.rm(path.join(process.cwd(), "uploads", "parking-events", String(orgId)), {
     recursive: true,
@@ -298,5 +302,70 @@ describe("exit candidate fuzzy plate matching", () => {
     expect(new Set(candidates.map((candidate) => candidate.detected_plate))).toEqual(
       new Set(["01A160XY", "01A160PQ"])
     );
+  });
+
+  it("9. V2 canonical tenglik yagona active sessiyani moslaydi", async () => {
+    env.exitMatchV2Enabled = true;
+    const sessionId = await createSession("01O123BI");
+    const response = await postExit("01012381");
+    expect(response.status).toBe(200);
+    expect(await latestCandidate()).toMatchObject({ matched_session_id: sessionId });
+  });
+
+  it("10. V2 uch belgili nomerda distance=1 yagona sessiyani moslaydi", async () => {
+    env.exitMatchV2Enabled = true;
+    const sessionId = await createSession("123");
+    const response = await postExit("124");
+    expect(response.status).toBe(200);
+    expect(await latestCandidate()).toMatchObject({ matched_session_id: sessionId });
+  });
+
+  it("11. V2 distance=1 ikkita sessiyada moslikni noaniq deb qoldiradi", async () => {
+    env.exitMatchV2Enabled = true;
+    await createSession("01A123BC");
+    await createSession("01A123BD");
+    const response = await postExit("01A123BX");
+    expect(response.status).toBe(200);
+    expect(await latestCandidate()).toMatchObject({ matched_session_id: null });
+  });
+
+  it("12. V2 distance=2 sessiyani avtomatik moslamaydi", async () => {
+    env.exitMatchV2Enabled = true;
+    await createSession("01A123BC");
+    const response = await postExit("01A123DE");
+    expect(response.status).toBe(200);
+    expect(await latestCandidate()).toMatchObject({ matched_session_id: null });
+  });
+
+  it("13. V2 uch belgidan qisqa nomerda moslash urinmaydi", async () => {
+    env.exitMatchV2Enabled = true;
+    await createSession("12");
+    const response = await postExit("13");
+    expect(response.status).toBe(200);
+    expect(await latestCandidate()).toMatchObject({ matched_session_id: null });
+  });
+
+  it("14. V2 faqat chiqish vaqtidan oldin kirgan sessiyani moslaydi", async () => {
+    env.exitMatchV2Enabled = true;
+    const sessionId = await createSession("123");
+    await testDb("tb_parking_sessions")
+      .where({ id: sessionId })
+      .update({ entered_at: new Date(Date.now() + 60_000) });
+    const response = await postExit("124");
+    expect(response.status).toBe(200);
+    expect(await latestCandidate()).toMatchObject({ matched_session_id: null });
+  });
+
+  it("15. V2 exact awaiting_payment sessiyani legacy kabi skip qiladi", async () => {
+    env.exitMatchV2Enabled = true;
+    const sessionId = await createTestAwaitingPaymentSession(orgId, "01WAIT01");
+    const response = await postExit("01WAIT01");
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      ignored: true,
+      reason: "already_awaiting_payment",
+      session_id: sessionId,
+    });
+    expect(await listCandidates()).toHaveLength(0);
   });
 });

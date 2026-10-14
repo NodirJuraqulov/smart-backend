@@ -11,6 +11,7 @@ import { scheduleEntryCandidatesExpiryJob } from "./jobs/entryCandidatesExpiryJo
 import { scheduleExitCandidatesExpiryJob } from "./jobs/exitCandidatesExpiryJob";
 import { scheduleClinicDiscountsExpiryJob } from "./jobs/clinicDiscountsExpiryJob";
 import { scheduleInpatientVehiclesExpiryJob } from "./jobs/inpatientVehiclesExpiryJob";
+import { scheduleStaleSessionsCleanupJob } from "./jobs/staleSessionsCleanupJob";
 import { initSocketServer } from "./websocket/socketServer";
 import { resumePlateFormatChecks } from "./modules/plateFormats/plateFormatCheck.service";
 import { ledService } from "./modules/led/led.service";
@@ -37,6 +38,7 @@ scheduleEntryCandidatesExpiryJob();
 scheduleExitCandidatesExpiryJob();
 scheduleClinicDiscountsExpiryJob();
 scheduleInpatientVehiclesExpiryJob();
+scheduleStaleSessionsCleanupJob();
 
 httpServer.listen(env.port, () => {
   console.log(`Server running on port ${env.port} [${env.nodeEnv}]`);
