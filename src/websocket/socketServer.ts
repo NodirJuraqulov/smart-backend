@@ -44,6 +44,7 @@ export interface ExitCandidateResolvedPayload {
     | "emergency_forced_open"
     | "emergency_confirmed"
     | "card_payment_initiated"
+    | "exit_cancelled"
     | null;
   sessionId: number | null;
   barrierStatus: ExitBarrierStatus | null;

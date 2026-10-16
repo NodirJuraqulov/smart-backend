@@ -6,6 +6,7 @@ import sharp from "sharp";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { DateTime } from "luxon";
 import { db } from "@/config/db";
+import { env } from "@/config/env";
 import { errorHandler } from "@/middleware/errorHandler";
 import { AuthTokenPayload } from "@/modules/auth/auth.service";
 import { confirmExitCandidate } from "@/modules/exitCandidates/exitCandidates.service";
@@ -13,6 +14,7 @@ import webhookRouter from "@/modules/webhook/webhook.routes";
 import { clearWebhookDedupeCache } from "@/modules/webhook/webhookIdempotency";
 import { openBarrier } from "@/modules/relay/relay.service";
 import { ledService } from "@/modules/led/led.service";
+import { telegramService } from "@/modules/telegram/telegram.service";
 import { emitExitCompleted, emitRelayFailed } from "@/websocket/socketServer";
 import {
   assertTestDatabase,
@@ -107,12 +109,24 @@ async function postExit(plate: string) {
     .send(dahuaExitBody(plate));
 }
 
-async function createSession(plate: string, source: "regular" | "vip" = "regular"): Promise<number> {
-  const id = await createTestActiveSession(orgId, plate, new Date(Date.now() - 90 * 60_000));
+async function createSession(
+  plate: string,
+  source: "regular" | "vip" | "subscription" = "regular",
+  options: { enteredMinutesAgo?: number; gracePeriodMinutes?: number; includeSnapshot?: boolean } = {}
+): Promise<number> {
+  const id = await createTestActiveSession(
+    orgId,
+    plate,
+    new Date(Date.now() - (options.enteredMinutesAgo ?? 90) * 60_000)
+  );
   await testDb("tb_parking_sessions").where({ id }).update({
     session_source: source,
-    tariff_price_per_hour: source === "regular" ? 5000 : null,
-    tariff_grace_period_minutes: source === "regular" ? 0 : null,
+    tariff_price_per_hour:
+      source === "regular" && options.includeSnapshot !== false ? 5000 : null,
+    tariff_grace_period_minutes:
+      source === "regular" && options.includeSnapshot !== false
+        ? options.gracePeriodMinutes ?? 0
+        : null,
   });
   return id;
 }
@@ -177,6 +191,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
+  env.exitMatchV2Enabled = false;
   orgId = await createTestOrganization({ timezone: "Asia/Tashkent" });
   webhookToken = `autoexit-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   await testDb("tb_organizations").where({ id: orgId }).update({
@@ -234,6 +249,7 @@ describe("operatorsiz avtomatik chiqish", () => {
     expect(vi.mocked(ledService.showPlateOnly).mock.invocationCallOrder[0]).toBeLessThan(
       vi.mocked(ledService.scheduleReturnToClock).mock.invocationCallOrder[0]
     );
+    expect(telegramService.sendExitNotification).not.toHaveBeenCalled();
   });
 
   it("auto-exit LED xatosi asosiy oqimni to'xtatmaydi", async () => {
@@ -267,6 +283,7 @@ describe("operatorsiz avtomatik chiqish", () => {
     expect(Number(session.amount)).toBe(0);
     expect(await candidates()).toHaveLength(0);
     expect(await testDb("tb_payments").where({ session_id: sessionId })).toHaveLength(0);
+    expect(telegramService.sendExitNotification).not.toHaveBeenCalled();
   });
 
   it("3. 100% klinika chegirmasi avtomatik chiqadi va chegirma used bo'ladi", async () => {
@@ -283,6 +300,19 @@ describe("operatorsiz avtomatik chiqish", () => {
     const discount = await testDb("tb_clinic_discounts").where({ id: discountId }).first();
     expect(discount).toMatchObject({ status: "used", used_session_id: sessionId });
     expect(discount.used_at).not.toBeNull();
+    expect(telegramService.sendExitNotification).not.toHaveBeenCalled();
+  });
+
+  it("subscription sessiya mavjud oqimdagidek operator candidate'iga qoladi", async () => {
+    const sessionId = await createSession("01SUB500", "subscription");
+
+    const response = await postExit("01SUB500");
+
+    expect(response.body.auto_exit).toBeUndefined();
+    expect(response.body.candidate_created).toBe(true);
+    expect((await sessionById(sessionId)).status).toBe("active");
+    expect(openBarrier).not.toHaveBeenCalled();
+    expect(telegramService.sendExitNotification).not.toHaveBeenCalled();
   });
 
   it("4. 50% klinika chegirmasi avtomatik ISHLAMAYDI, operator tasdig'i kerak", async () => {
@@ -503,5 +533,146 @@ describe("operatorsiz avtomatik chiqish", () => {
     expect(ledService.showPlateOnly).not.toHaveBeenCalled();
     expect(ledService.showPayment).not.toHaveBeenCalled();
     expect(ledService.scheduleReturnToClock).not.toHaveBeenCalled();
+  });
+
+  it("14. aniq regular sessiya bepul muddatda operatorsiz avtomatik chiqadi", async () => {
+    const sessionId = await createSession("01F100AA", "regular", {
+      enteredMinutesAgo: 1,
+      gracePeriodMinutes: 10,
+    });
+
+    const response = await postExit("01F100AA");
+
+    expect(response.body).toMatchObject({
+      auto_exit: true,
+      reason: "tariff_free",
+      session_id: sessionId,
+      barrier_status: "opened",
+    });
+    expect(await sessionById(sessionId)).toMatchObject({
+      status: "completed",
+      exit_method: "auto",
+      active_plate_key: null,
+    });
+    expect(await candidates()).toHaveLength(0);
+    expect(await testDb("tb_payments").where({ session_id: sessionId })).toHaveLength(0);
+    expect(openBarrier).toHaveBeenCalledTimes(1);
+    expect(emitExitCompleted).toHaveBeenCalledWith(
+      orgId,
+      expect.objectContaining({ sessionId, amount: 0, sessionSource: "regular" })
+    );
+    await vi.waitFor(() => {
+      expect(telegramService.sendExitNotification).toHaveBeenCalledTimes(1);
+    });
+    expect(telegramService.sendExitNotification).toHaveBeenCalledWith(
+      orgId,
+      expect.objectContaining({
+        plateNumber: "01F100AA",
+        amount: 0,
+        paymentMethod: "cash",
+        confirmedByName: "Noma'lum",
+      })
+    );
+  });
+
+  it("15. fuzzy topilgan bepul sessiya avtomatik chiqmaydi", async () => {
+    const sessionId = await createSession("01F200AA", "regular", {
+      enteredMinutesAgo: 1,
+      gracePeriodMinutes: 10,
+    });
+
+    const response = await postExit("01F200AB");
+
+    expect(response.body.auto_exit).toBeUndefined();
+    expect(response.body.candidate_created).toBe(true);
+    expect(await sessionById(sessionId)).toMatchObject({ status: "active", exited_at: null });
+    expect(await candidates()).toHaveLength(1);
+    expect(openBarrier).not.toHaveBeenCalled();
+    expect(telegramService.sendExitNotification).not.toHaveBeenCalled();
+  });
+
+  it("16. V2 canonical teng bepul sessiya avtomatik chiqmaydi", async () => {
+    env.exitMatchV2Enabled = true;
+    const sessionId = await createSession("01O300AA", "regular", {
+      enteredMinutesAgo: 1,
+      gracePeriodMinutes: 10,
+    });
+
+    const response = await postExit("010300AA");
+
+    expect(response.body.auto_exit).toBeUndefined();
+    expect(response.body.candidate_created).toBe(true);
+    expect(await sessionById(sessionId)).toMatchObject({ status: "active", exited_at: null });
+    expect(openBarrier).not.toHaveBeenCalled();
+  });
+
+  it("17. bepul sessiyada tarif snapshoti bo'lmasa avtomatik chiqmaydi", async () => {
+    const sessionId = await createSession("01F400AA", "regular", {
+      enteredMinutesAgo: 1,
+      gracePeriodMinutes: 10,
+      includeSnapshot: false,
+    });
+
+    const response = await postExit("01F400AA");
+
+    expect(response.body.auto_exit).toBeUndefined();
+    expect(response.body.candidate_created).toBe(true);
+    expect(await sessionById(sessionId)).toMatchObject({ status: "active", exited_at: null });
+    expect(openBarrier).not.toHaveBeenCalled();
+  });
+
+  it("18. bepul auto-exit takroriy signalda sessiya va shlagbaumni bir marta yopadi", async () => {
+    const sessionId = await createSession("01F500AA", "regular", {
+      enteredMinutesAgo: 1,
+      gracePeriodMinutes: 10,
+    });
+
+    expect((await postExit("01F500AA")).body.auto_exit).toBe(true);
+    await expireDedupeWindow();
+    const second = await postExit("01F500AA");
+
+    expect(second.body).toMatchObject({ ignored: true, reason: "duplicate_after_auto_exit" });
+    expect((await sessionById(sessionId)).status).toBe("completed");
+    expect(openBarrier).toHaveBeenCalledTimes(1);
+    expect(await autoExitLogs(sessionId)).toHaveLength(1);
+  });
+
+  it("19. Telegram xatosi bepul sessiya yopilishini to'xtatmaydi", async () => {
+    const sessionId = await createSession("01F600AA", "regular", {
+      enteredMinutesAgo: 1,
+      gracePeriodMinutes: 10,
+    });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.mocked(telegramService.sendExitNotification).mockRejectedValueOnce(new Error("Telegram offline"));
+
+    const response = await postExit("01F600AA");
+
+    expect(response.body.auto_exit).toBe(true);
+    expect((await sessionById(sessionId)).status).toBe("completed");
+    expect(openBarrier).toHaveBeenCalledTimes(1);
+    expect(emitExitCompleted).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => {
+      expect(consoleError).toHaveBeenCalledWith("TELEGRAM_NOTIFICATION_FAILED");
+    });
+  });
+
+  it("20. bir xil aniq nomerli ikkita active sessiya bo'lsa bepul auto-exit qilmaydi", async () => {
+    const firstId = await createSession("01F700AA", "regular", {
+      enteredMinutesAgo: 2,
+      gracePeriodMinutes: 10,
+    });
+    await testDb("tb_parking_sessions").where({ id: firstId }).update({ active_plate_key: null });
+    const secondId = await createSession("01F700AA", "regular", {
+      enteredMinutesAgo: 1,
+      gracePeriodMinutes: 10,
+    });
+
+    const response = await postExit("01F700AA");
+
+    expect(response.body.auto_exit).toBeUndefined();
+    expect(response.body.candidate_created).toBe(true);
+    expect((await sessionById(firstId)).status).toBe("active");
+    expect((await sessionById(secondId)).status).toBe("active");
+    expect(openBarrier).not.toHaveBeenCalled();
   });
 });

@@ -62,6 +62,11 @@ export const env = {
   publicBaseUrl: resolvePublicBaseUrl(),
 
   exitMatchV2Enabled: process.env.EXIT_MATCH_V2_ENABLED === "true",
+  freeExitRecovery: {
+    enabled: process.env.FREE_EXIT_RECOVERY_ENABLED === "true",
+    hours: positiveInteger(process.env.FREE_EXIT_RECOVERY_HOURS, 6),
+  },
+  cancelledExitCooldownSeconds: positiveInteger(process.env.CANCELLED_EXIT_COOLDOWN_SECONDS, 60),
   forcedOpenAvgLossSom: positiveInteger(process.env.FORCED_OPEN_AVG_LOSS_SOM, 10000),
 
   staleSessionCleanup: {

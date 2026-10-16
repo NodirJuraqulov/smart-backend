@@ -113,6 +113,38 @@ async function createSession(plate: string): Promise<number> {
   return id;
 }
 
+async function createRecoverableSession(plate: string, exitedHoursAgo = 1): Promise<number> {
+  const enteredAt = new Date(Date.now() - (exitedHoursAgo + 1) * 60 * 60_000);
+  const exitedAt = new Date(Date.now() - exitedHoursAgo * 60 * 60_000);
+  const id = await createTestActiveSession(orgId, plate, enteredAt);
+  await testDb("tb_parking_sessions").where({ id }).update({
+    status: "completed",
+    session_source: "regular",
+    exited_at: exitedAt,
+    duration_minutes: 60,
+    amount: 0,
+    exit_method: "auto",
+    operator_id: null,
+    active_plate_key: null,
+    image_exit: "legacy-exit.jpg",
+    exit_overview_image_path: "overview.jpg",
+    exit_vehicle_image_path: "vehicle.jpg",
+    exit_plate_image_path: "plate.jpg",
+    tariff_price_per_hour: 5000,
+    tariff_grace_period_minutes: 0,
+    tariff_intervals_snapshot: null,
+  });
+  await testDb("tb_activity_logs").insert({
+    actor_id: null,
+    action: "auto_exit_no_operator",
+    target_type: "session",
+    target_id: id,
+    details: JSON.stringify({ orgId, sessionId: id, plateNumber: plate, reason: "tariff_free" }),
+    created_at: exitedAt,
+  });
+  return id;
+}
+
 async function listCandidates(): Promise<CandidateRecord[]> {
   return testDb<CandidateRecord>("tb_exit_candidates").where({ org_id: orgId }).orderBy("id", "asc");
 }
@@ -139,6 +171,8 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   env.exitMatchV2Enabled = false;
+  env.freeExitRecovery.enabled = false;
+  env.freeExitRecovery.hours = 6;
   orgId = await createTestOrganization({ timezone: "Asia/Tashkent" });
   webhookToken = `fuzzy-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   await testDb("tb_organizations").where({ id: orgId }).update({
@@ -157,6 +191,8 @@ beforeEach(async () => {
 
 afterEach(async () => {
   env.exitMatchV2Enabled = false;
+  env.freeExitRecovery.enabled = false;
+  env.freeExitRecovery.hours = 6;
   await clearWebhookDedupeCache(orgId);
   await fs.rm(path.join(process.cwd(), "uploads", "parking-events", String(orgId)), {
     recursive: true,
@@ -367,5 +403,145 @@ describe("exit candidate fuzzy plate matching", () => {
       session_id: sessionId,
     });
     expect(await listCandidates()).toHaveLength(0);
+  });
+
+  it("16. recovery flag false bo'lsa bepul yopilgan sessiya qayta ochilmaydi", async () => {
+    const sessionId = await createRecoverableSession("01R100AA");
+
+    const response = await postExit("01R100AA");
+
+    expect(response.body.candidate_created).toBe(true);
+    expect(await latestCandidate()).toMatchObject({ matched_session_id: null });
+    expect(await testDb("tb_parking_sessions").where({ id: sessionId }).first()).toMatchObject({
+      status: "completed",
+      active_plate_key: null,
+    });
+  });
+
+  it("17. recovery flag true bo'lsa exact bepul sessiya ochilib candidate'ga bog'lanadi", async () => {
+    env.freeExitRecovery.enabled = true;
+    const sessionId = await createRecoverableSession("01R200AA");
+    const before = await testDb("tb_parking_sessions").where({ id: sessionId }).first();
+
+    const response = await postExit("01R200AA");
+
+    expect(response.body.candidate_created).toBe(true);
+    expect(await latestCandidate()).toMatchObject({ matched_session_id: sessionId });
+    expect(await testDb("tb_parking_sessions").where({ id: sessionId }).first()).toMatchObject({
+      status: "active",
+      exited_at: null,
+      duration_minutes: null,
+      amount: null,
+      exit_method: null,
+      active_plate_key: `${orgId}:01R200AA`,
+      image_exit: null,
+      exit_overview_image_path: null,
+      exit_vehicle_image_path: null,
+      exit_plate_image_path: null,
+    });
+    const activity = await testDb("tb_activity_logs")
+      .where({ action: "session.reopened_for_exit", target_type: "session", target_id: sessionId })
+      .first();
+    expect(activity.details).toMatchObject({
+      orgId,
+      sessionId,
+      oldExitedAt: new Date(before.exited_at).toISOString(),
+    });
+    expect(openBarrier).not.toHaveBeenCalled();
+  });
+
+  it("18. keyinroq shu nomer bilan yangi sessiya bo'lsa eski bepul sessiya ochilmaydi", async () => {
+    env.freeExitRecovery.enabled = true;
+    const oldSessionId = await createRecoverableSession("01R300AA", 2);
+    const newerSessionId = await createRecoverableSession("01R300AA", 1);
+    await testDb("tb_parking_sessions").where({ id: newerSessionId }).update({
+      amount: 5000,
+      exit_method: "manual",
+    });
+
+    await postExit("01R300AA");
+
+    expect(await latestCandidate()).toMatchObject({ matched_session_id: null });
+    expect((await testDb("tb_parking_sessions").where({ id: oldSessionId }).first()).status).toBe("completed");
+  });
+
+  it("19. payment yoki APPROVED terminal operatsiyasi bor bepul sessiya ochilmaydi", async () => {
+    env.freeExitRecovery.enabled = true;
+    const paidSessionId = await createRecoverableSession("01PAY000");
+    await testDb("tb_payments").insert({
+      org_id: orgId,
+      session_id: paidSessionId,
+      amount: 0,
+      payment_method: "cash",
+      paid_at: new Date(),
+      operator_id: actor.id,
+    });
+    const approvedSessionId = await createRecoverableSession("01APV999");
+    await testDb("payment_terminal_operations").insert({
+      org_id: orgId,
+      session_id: approvedSessionId,
+      candidate_id: null,
+      operator_id: actor.id,
+      operation_number: "R4010001",
+      requested_amount_som: 0,
+      sent_amount_minor: 0,
+      approved_amount_som: 0,
+      status: "APPROVED",
+    });
+
+    await postExit("01PAY000");
+    await testDb("tb_webhook_events").where({ org_id: orgId }).update({
+      created_at: testDb.raw("DATE_SUB(NOW(), INTERVAL 20 SECOND)"),
+    });
+    await postExit("01APV999");
+
+    const candidates = await listCandidates();
+    expect(candidates.map((candidate) => candidate.matched_session_id)).toEqual([null, null]);
+    expect((await testDb("tb_parking_sessions").where({ id: paidSessionId }).first()).status).toBe("completed");
+    expect((await testDb("tb_parking_sessions").where({ id: approvedSessionId }).first()).status).toBe(
+      "completed"
+    );
+  });
+
+  it("20. recovery oynasidan tashqaridagi bepul sessiya ochilmaydi", async () => {
+    env.freeExitRecovery.enabled = true;
+    env.freeExitRecovery.hours = 6;
+    const sessionId = await createRecoverableSession("01R500AA", 7);
+
+    await postExit("01R500AA");
+
+    expect(await latestCandidate()).toMatchObject({ matched_session_id: null });
+    expect((await testDb("tb_parking_sessions").where({ id: sessionId }).first()).status).toBe("completed");
+  });
+
+  it("21. aynan teng bo'lmagan nomer bepul sessiyani qayta ochmaydi", async () => {
+    env.freeExitRecovery.enabled = true;
+    const sessionId = await createRecoverableSession("01R600AA");
+
+    await postExit("01R600AB");
+
+    expect(await latestCandidate()).toMatchObject({ matched_session_id: null });
+    expect((await testDb("tb_parking_sessions").where({ id: sessionId }).first()).status).toBe("completed");
+  });
+
+  it("22. recovery update xatosi savepointni rollback qilib oddiy unmatched candidate yaratadi", async () => {
+    env.freeExitRecovery.enabled = true;
+    const sessionId = await createRecoverableSession("01R700AA");
+    const blockerId = await createSession("01BLOCK1");
+    await testDb("tb_parking_sessions").where({ id: blockerId }).update({
+      active_plate_key: `${orgId}:01R700AA`,
+    });
+
+    const response = await postExit("01R700AA");
+
+    expect(response.body.candidate_created).toBe(true);
+    expect(await latestCandidate()).toMatchObject({ matched_session_id: null });
+    expect(await testDb("tb_parking_sessions").where({ id: sessionId }).first()).toMatchObject({
+      status: "completed",
+      active_plate_key: null,
+    });
+    expect(
+      await testDb("tb_activity_logs").where({ action: "session.reopened_for_exit", target_id: sessionId })
+    ).toHaveLength(0);
   });
 });

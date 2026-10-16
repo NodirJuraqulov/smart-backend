@@ -3,6 +3,7 @@ import { isAuth, checkPermission } from "@/middleware/auth.middleware";
 import { asyncHandler } from "@/middleware/asyncHandler";
 import {
   acceptHandler,
+  cancelExitHandler,
   confirmHandler,
   detailHandler,
   dismissHandler,
@@ -25,6 +26,7 @@ router.post("/:id/search", asyncHandler(searchHandler));
 router.post("/:id/preview-session", asyncHandler(previewSessionHandler));
 router.post("/:id/confirm", asyncHandler(confirmHandler));
 router.post("/:id/force-open", asyncHandler(forceOpenHandler));
+router.post("/:id/cancel-exit", asyncHandler(cancelExitHandler));
 router.post("/:id/retry-barrier", asyncHandler(retryBarrierHandler));
 router.post("/:id/accept", asyncHandler(acceptHandler));
 router.post("/:id/reassign", asyncHandler(reassignHandler));

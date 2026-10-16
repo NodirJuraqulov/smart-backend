@@ -247,6 +247,9 @@ describe("Entry/exit biznes logikasi — normalized event orqali ishlaydi", () =
     await db("tb_organizations").where({ id: orgId }).update({ camera_brand: "dahua" });
 
     await postDahua("entry", dahuaVehiclePayload("01C888AA"));
+    await db("tb_parking_sessions")
+      .where({ org_id: orgId, plate_number: "01C888AA" })
+      .update({ entered_at: new Date(Date.now() - 61 * 60 * 1000) });
     await clearWebhookDedupeCache(orgId);
 
     const res = await postDahua("exit", dahuaVehiclePayload("01C888AA"));

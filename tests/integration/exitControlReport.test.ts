@@ -161,6 +161,39 @@ describe("GET /api/reports/exit-control", () => {
     });
   });
 
+  it("exit_cancelled nomzodni not_found va forced_open sonlariga qo'shmaydi", async () => {
+    const cameraEventAt = "2026-10-13T06:00:00Z";
+    const [webhookEventId] = await db("tb_webhook_events").insert({
+      org_id: orgId,
+      direction: "exit",
+      camera_event_at: new Date(cameraEventAt),
+    });
+    await db("tb_exit_candidates").insert({
+      org_id: orgId,
+      webhook_event_id: webhookEventId,
+      detected_plate: "UNKNOWN",
+      matched_session_id: null,
+      resolved_session_id: null,
+      camera_event_at: new Date(cameraEventAt),
+      status: "dismissed",
+      resolution_type: "exit_cancelled",
+      resolved_at: new Date(cameraEventAt),
+    });
+
+    const response = await request(app())
+      .get("/api/reports/exit-control?from=2026-10-13&to=2026-10-13")
+      .set("Authorization", authorization(owner));
+
+    expect(response.status).toBe(200);
+    expect(response.body.days[0]).toMatchObject({
+      not_found_count: 0,
+      forced_open_count: 0,
+      forced_open_unknown_or_regular: 0,
+      forced_open_vip_or_subscription: 0,
+      estimated_loss_som: 0,
+    });
+  });
+
   it("camera_event_at ni organization vaqt zonasidagi kunga ajratadi", async () => {
     await createCandidate({
       cameraEventAt: "2026-10-13T19:30:00Z",

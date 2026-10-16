@@ -6,15 +6,20 @@ import {
   markClinicDiscountUsed,
   normalizePlate,
 } from "@/modules/medplus/medplus.service";
-import { calculateDurationMinutes, displayPlateNumber } from "@/modules/parking/parking.service";
+import {
+  calculateDurationMinutes,
+  calculateTariffSnapshotAmount,
+  displayPlateNumber,
+  TariffIntervalSnapshot,
+} from "@/modules/parking/parking.service";
 import { INSIDE_SESSION_STATUSES } from "@/modules/parking/sessionStatus";
 import { BarrierStatus } from "@/modules/relay/relay.service";
 import { ledService } from "@/modules/led/led.service";
 import { RESOLVED_EXIT_CANDIDATE_COOLDOWN_MS } from "@/modules/webhook/webhookRules";
 import { emitExitCompleted, emitRelayFailed } from "@/websocket/socketServer";
-import { recordBarrierAttempt } from "./exitCandidates.service";
+import { recordBarrierAttempt, sendTelegramExitNotification } from "./exitCandidates.service";
 
-export type AutoExitReason = "inpatient" | "vip" | "clinic_discount_100";
+export type AutoExitReason = "inpatient" | "vip" | "clinic_discount_100" | "tariff_free";
 
 const FULL_DISCOUNT_PERCENT = 100;
 
@@ -46,6 +51,10 @@ interface AutoExitSession {
   entered_at: Date;
   status: "active" | "awaiting_payment" | "completed";
   session_source: "regular" | "subscription" | "vip";
+  payment_method: "cash" | "online" | "card";
+  tariff_price_per_hour: string | null;
+  tariff_grace_period_minutes: number | null;
+  tariff_intervals_snapshot: TariffIntervalSnapshot[] | string | null;
 }
 
 export interface AutoExitResult {
@@ -128,13 +137,51 @@ async function findAutoExitSession(
   executor: Knex
 ): Promise<AutoExitSession | undefined> {
   return executor<AutoExitSession>("tb_parking_sessions")
-    .select("id", "org_id", "plate_number", "entered_at", "status", "session_source")
+    .select(
+      "id",
+      "org_id",
+      "plate_number",
+      "entered_at",
+      "status",
+      "session_source",
+      "payment_method",
+      "tariff_price_per_hour",
+      "tariff_grace_period_minutes",
+      "tariff_intervals_snapshot"
+    )
     .where({ org_id: orgId, plate_number: plateNumber })
     .whereIn("status", [...INSIDE_SESSION_STATUSES])
     .orderByRaw("CASE WHEN status = 'active' THEN 0 ELSE 1 END")
     .orderBy("entered_at", "desc")
     .orderBy("id", "desc")
     .first();
+}
+
+async function findTariffFreeAutoExitSession(
+  orgId: number,
+  plateNumber: string,
+  executor: Knex
+): Promise<AutoExitSession | undefined> {
+  const sessions = await executor<AutoExitSession>("tb_parking_sessions")
+    .select(
+      "id",
+      "org_id",
+      "plate_number",
+      "entered_at",
+      "status",
+      "session_source",
+      "payment_method",
+      "tariff_price_per_hour",
+      "tariff_grace_period_minutes",
+      "tariff_intervals_snapshot"
+    )
+    .where({ org_id: orgId, plate_number: plateNumber, status: "active" })
+    .orderBy("entered_at", "desc")
+    .orderBy("id", "desc")
+    .limit(2);
+  if (sessions.length !== 1 || sessions[0].session_source !== "regular") return undefined;
+  const durationMinutes = calculateDurationMinutes(new Date(sessions[0].entered_at), new Date());
+  return calculateTariffSnapshotAmount(sessions[0], durationMinutes) === 0 ? sessions[0] : undefined;
 }
 
 export async function performAutoExit(input: {
@@ -148,16 +195,34 @@ export async function performAutoExit(input: {
     await trx("tb_organizations").where({ id: input.orgId }).forUpdate().first();
 
     const session = await trx<AutoExitSession>("tb_parking_sessions")
-      .select("id", "org_id", "plate_number", "entered_at", "status", "session_source")
+      .select(
+        "id",
+        "org_id",
+        "plate_number",
+        "entered_at",
+        "status",
+        "session_source",
+        "payment_method",
+        "tariff_price_per_hour",
+        "tariff_grace_period_minutes",
+        "tariff_intervals_snapshot"
+      )
       .where({ id: input.sessionId, org_id: input.orgId })
       .forUpdate()
       .first();
-    if (!session || !INSIDE_SESSION_STATUSES.includes(session.status as "active" | "awaiting_payment")) {
+    const tariffFree = input.reason === "tariff_free";
+    if (
+      !session ||
+      (tariffFree
+        ? session.status !== "active" || session.session_source !== "regular"
+        : !INSIDE_SESSION_STATUSES.includes(session.status as "active" | "awaiting_payment"))
+    ) {
       return null;
     }
 
     const exitedAt = new Date();
     const durationMinutes = calculateDurationMinutes(new Date(session.entered_at), exitedAt);
+    if (tariffFree && calculateTariffSnapshotAmount(session, durationMinutes) !== 0) return null;
 
     await trx("tb_parking_sessions").where({ id: session.id, org_id: input.orgId }).update({
       status: "completed",
@@ -231,6 +296,16 @@ export async function performAutoExit(input: {
 
   completeAutoExitLed(input.orgId, plateNumber);
 
+  if (input.reason === "tariff_free") {
+    sendTelegramExitNotification(input.orgId, null, {
+      plateNumber,
+      amount: 0,
+      paymentMethod: session.payment_method,
+      imageUrl: `/api/webhook-events/${input.webhookEventId}/images/overview`,
+      durationMinutes,
+    });
+  }
+
   return { sessionId: session.id, plateNumber, reason: input.reason, barrierStatus };
 }
 
@@ -242,16 +317,25 @@ export async function tryAutoExit(input: {
   if (!input.plateNumber) return null;
 
   const eligibility = await resolveAutoExitEligibility(input.orgId, input.plateNumber);
-  if (!eligibility.eligible || !eligibility.reason) return null;
+  if (eligibility.eligible && eligibility.reason) {
+    const session = await findAutoExitSession(input.orgId, input.plateNumber, db);
+    if (session) {
+      return performAutoExit({
+        orgId: input.orgId,
+        sessionId: session.id,
+        webhookEventId: input.webhookEventId,
+        reason: eligibility.reason,
+        clinicDiscountId: eligibility.clinicDiscountId,
+      });
+    }
+  }
 
-  const session = await findAutoExitSession(input.orgId, input.plateNumber, db);
-  if (!session) return null;
-
+  const tariffFreeSession = await findTariffFreeAutoExitSession(input.orgId, input.plateNumber, db);
+  if (!tariffFreeSession) return null;
   return performAutoExit({
     orgId: input.orgId,
-    sessionId: session.id,
+    sessionId: tariffFreeSession.id,
     webhookEventId: input.webhookEventId,
-    reason: eligibility.reason,
-    clinicDiscountId: eligibility.clinicDiscountId,
+    reason: "tariff_free",
   });
 }

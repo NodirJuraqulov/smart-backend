@@ -15,6 +15,8 @@ import webhookRouter from "@/modules/webhook/webhook.routes";
 import { clearWebhookDedupeCache } from "@/modules/webhook/webhookIdempotency";
 import { openBarrier } from "@/modules/relay/relay.service";
 import { getSessionById } from "@/modules/parking/parking.service";
+import { paymentTerminalManager } from "@/modules/paymentTerminal/PaymentTerminalManager";
+import { createExitCandidate } from "@/modules/exitCandidates/exitCandidates.service";
 import {
   emitExitCandidateCreated,
   emitExitCandidateResolved,
@@ -191,6 +193,52 @@ async function candidateForPlate(plate: string): Promise<TestCandidateRow> {
   return candidate;
 }
 
+async function createResolvedCandidate(input: {
+  plate: string;
+  status: "accepted" | "dismissed";
+  resolutionType: "exact" | "forced_open" | "exit_cancelled";
+  resolvedSecondsAgo: number;
+  sessionId?: number | null;
+}): Promise<number> {
+  const resolvedAt = new Date(Date.now() - input.resolvedSecondsAgo * 1000);
+  const [webhookEventId] = await db("tb_webhook_events").insert({
+    org_id: orgId,
+    plate_number: input.plate,
+    direction: "exit",
+    camera_event_at: resolvedAt,
+    created_at: resolvedAt,
+  });
+  const [candidateId] = await db("tb_exit_candidates").insert({
+    org_id: orgId,
+    webhook_event_id: webhookEventId,
+    detected_plate: input.plate,
+    matched_session_id: input.sessionId ?? null,
+    resolved_session_id: input.sessionId ?? null,
+    confidence: 90,
+    camera_event_at: resolvedAt,
+    status: input.status,
+    resolution_type: input.resolutionType,
+    resolved_by: actor.id,
+    resolved_at: resolvedAt,
+  });
+  return candidateId;
+}
+
+async function createCandidateFromSignal(plate: string) {
+  const [webhookEventId] = await db("tb_webhook_events").insert({
+    org_id: orgId,
+    plate_number: plate,
+    direction: "exit",
+    camera_event_at: new Date(),
+  });
+  return createExitCandidate({
+    orgId,
+    webhookEventId,
+    detectedPlate: plate,
+    confidence: 91,
+  });
+}
+
 async function confirm(
   candidateId: number,
   body: Record<string, unknown>,
@@ -200,6 +248,16 @@ async function confirm(
     .post(`/api/exit-candidates/${candidateId}/confirm`)
     .set("Authorization", authorization)
     .send(body);
+}
+
+async function cancelExit(
+  candidateId: number,
+  authorization = authorizationHeader
+): Promise<request.Response> {
+  return request(app)
+    .post(`/api/exit-candidates/${candidateId}/cancel-exit`)
+    .set("Authorization", authorization)
+    .send({});
 }
 
 async function createOwnerActor(ownerOrgId: number): Promise<AuthTokenPayload> {
@@ -222,6 +280,10 @@ const testRequest: typeof request = request;
 const openBarrierMock = openBarrier as unknown as ReturnType<typeof vi.fn>;
 const exitCandidateCreatedMock = emitExitCandidateCreated as unknown as ReturnType<typeof vi.fn>;
 
+function setCancelledExitCooldownSeconds(seconds: number): void {
+  env.cancelledExitCooldownSeconds = seconds;
+}
+
 beforeAll(async () => {
   await assertTestDatabase();
   jpegBase64 = await createJpegBase64();
@@ -229,6 +291,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   env.exitMatchV2Enabled = false;
+  setCancelledExitCooldownSeconds(60);
   orgId = await createTestOrganization({ timezone: "Asia/Tashkent" });
   otherOrgId = await createTestOrganization({ timezone: "Asia/Tashkent" });
   webhookToken = `candidate-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -254,6 +317,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   env.exitMatchV2Enabled = false;
+  setCancelledExitCooldownSeconds(60);
   vi.restoreAllMocks();
   await clearWebhookDedupeCache(orgId);
   await fs.rm(path.join(process.cwd(), "uploads", "parking-events", String(orgId)), {
@@ -1343,5 +1407,233 @@ describe("exit candidate completion workflow", () => {
     expect(new Set(candidates.map((candidate) => candidate.detected_plate))).toEqual(
       new Set(["01D201AA", "01D299BB"])
     );
+  });
+
+  it("22. chiqish bo'lmaganda unmatched candidate bekor qilinadi va tashqi oqimlar ishlamaydi", async () => {
+    const unrelatedSessionId = await createSession("01CANCEL0");
+    const sessionBefore = await queryTable("tb_parking_sessions").where({ id: unrelatedSessionId }).first();
+    await postExit("UNKNOWNC1");
+    const candidate = await candidateForPlate("UNKNOWNC1");
+    openBarrierMock.mockClear();
+    ledMocks.scheduleReturnToClock.mockClear();
+
+    const response = await cancelExit(candidate.id);
+
+    expect(response.status).toBe(200);
+    expect(response.body.candidate).toMatchObject({
+      id: candidate.id,
+      status: "dismissed",
+      resolution_type: "exit_cancelled",
+      resolved_by: actor.id,
+    });
+    expect(response.body.candidate.resolved_at).toBeTruthy();
+    const sessionAfter = await queryTable("tb_parking_sessions").where({ id: unrelatedSessionId }).first();
+    expect(sessionAfter).toEqual(sessionBefore);
+    expect(openBarrier).not.toHaveBeenCalled();
+    expect(await queryTable("tb_payments").where({ session_id: unrelatedSessionId })).toHaveLength(0);
+    expect(
+      await queryTable("tb_activity_logs").where({
+        action: "exit_candidate.forced_open",
+        target_id: candidate.id,
+      })
+    ).toHaveLength(0);
+    expect(
+      await queryTable("tb_activity_logs").where({
+        action: "exit_candidate.cancelled",
+        target_type: "exit_candidate",
+        target_id: candidate.id,
+      })
+    ).toHaveLength(1);
+    expect(await queryTable("tb_webhook_events").where({ id: candidate.webhook_event_id }).first()).toMatchObject({
+      processing_result: "exit_candidate_cancelled",
+      processing_reason: "operator_cancelled_exit",
+      session_id: null,
+    });
+    expect(ledMocks.scheduleReturnToClock).toHaveBeenCalledWith(orgId);
+    expect(emitExitCandidateResolved).toHaveBeenCalledWith(orgId, {
+      candidateId: candidate.id,
+      orgId,
+      status: "dismissed",
+      resolutionType: "exit_cancelled",
+      sessionId: null,
+      barrierStatus: null,
+      plateNumber: "UNKNOWNC1",
+    });
+  });
+
+  it("23. matched sessiyali candidate bekor qilinmaydi", async () => {
+    const sessionId = await createSession("01CANCEL2");
+    await postExit("01CANCEL2");
+    const candidate = await candidateForPlate("01CANCEL2");
+
+    const response = await cancelExit(candidate.id);
+
+    expect(response.status).toBe(409);
+    expect(await queryTable("tb_exit_candidates").where({ id: candidate.id }).first()).toMatchObject({
+      status: "pending",
+      matched_session_id: sessionId,
+    });
+    expect((await queryTable("tb_parking_sessions").where({ id: sessionId }).first())?.status).toBe("active");
+  });
+
+  it("24. bekor qilingan candidate ikkinchi marta 409 qaytaradi", async () => {
+    await postExit("UNKNOWNC3");
+    const candidate = await candidateForPlate("UNKNOWNC3");
+
+    expect((await cancelExit(candidate.id)).status).toBe(200);
+    expect((await cancelExit(candidate.id)).status).toBe(409);
+  });
+
+  it.each(["PENDING", "APPROVED"])(
+    "25. unmatched candidate bekor qilinganda %s karta operatsiyasi backgroundda ABORTED bo'ladi",
+    async (operationStatus) => {
+    const sessionId = await createSession("01CANCEL4");
+    await postExit("UNKNOWNC4");
+    const candidate = await candidateForPlate("UNKNOWNC4");
+    const abort = vi.spyOn(paymentTerminalManager, "abortPendingPayment").mockResolvedValue(undefined);
+    const operationNumber = String(candidate.id).slice(-8).padStart(8, "0");
+    const [operationId] = await db("payment_terminal_operations").insert({
+      org_id: orgId,
+      session_id: sessionId,
+      candidate_id: candidate.id,
+      operator_id: actor.id,
+      operation_number: operationNumber,
+      requested_amount_som: 5000,
+      sent_amount_minor: 500000,
+      approved_amount_som: operationStatus === "APPROVED" ? 5000 : null,
+      status: operationStatus,
+    });
+
+    const response = await cancelExit(candidate.id);
+
+    expect(response.status).toBe(200);
+    await vi.waitFor(async () => {
+      expect((await db("payment_terminal_operations").where({ id: operationId }).first()).status).toBe(
+        "ABORTED"
+      );
+    });
+    expect(abort).toHaveBeenCalledWith(orgId, operationNumber);
+    expect((await queryTable("tb_parking_sessions").where({ id: sessionId }).first())?.status).toBe("active");
+    expect(openBarrier).not.toHaveBeenCalled();
+    }
+  );
+
+  it("26. boshqa organization candidate'ini bekor qilishga ruxsat bermaydi", async () => {
+    await postExit("UNKNOWNC5");
+    const candidate = await candidateForPlate("UNKNOWNC5");
+
+    const response = await cancelExit(candidate.id, otherAuthorizationHeader);
+
+    expect(response.status).toBe(404);
+    expect((await queryTable("tb_exit_candidates").where({ id: candidate.id }).first())?.status).toBe("pending");
+  });
+
+  it("27. exit_cancelled candidate 30 soniyada cooldown ichida qoladi", async () => {
+    await createCandidateFromSignal("UNKNOWNC6");
+    const candidate = await candidateForPlate("UNKNOWNC6");
+    expect((await cancelExit(candidate.id)).status).toBe(200);
+    await queryTable("tb_exit_candidates").where({ id: candidate.id }).update({
+      resolved_at: new Date(Date.now() - 30_000),
+    });
+
+    const repeated = await createCandidateFromSignal("UNKNOWNC6");
+
+    expect(repeated).toMatchObject({ skipped: true, reason: "resolved_recently_ignored" });
+    expect(await queryTable("tb_exit_candidates").where({ org_id: orgId })).toHaveLength(1);
+  });
+
+  it("28. exit_cancelled candidate 61 soniyadan keyin yangi candidate yaratishga to'sqinlik qilmaydi", async () => {
+    await createCandidateFromSignal("UNKNOWNC7");
+    const candidate = await candidateForPlate("UNKNOWNC7");
+    expect((await cancelExit(candidate.id)).status).toBe(200);
+    await queryTable("tb_exit_candidates").where({ id: candidate.id }).update({
+      resolved_at: new Date(Date.now() - 61_000),
+    });
+
+    const repeated = await createCandidateFromSignal("UNKNOWNC7");
+
+    expect(repeated).toMatchObject({ created: true, skipped: false });
+    expect(await queryTable("tb_exit_candidates").where({ org_id: orgId })).toHaveLength(2);
+  });
+
+  it("29. exit_cancelled cooldown env qiymatiga mos o'zgaradi", async () => {
+    setCancelledExitCooldownSeconds(15);
+    await createCandidateFromSignal("UNKNOWNC8");
+    const candidate = await candidateForPlate("UNKNOWNC8");
+    expect((await cancelExit(candidate.id)).status).toBe(200);
+    await queryTable("tb_exit_candidates").where({ id: candidate.id }).update({
+      resolved_at: new Date(Date.now() - 30_000),
+    });
+
+    const repeated = await createCandidateFromSignal("UNKNOWNC8");
+
+    expect(repeated).toMatchObject({ created: true, skipped: false });
+    expect(await queryTable("tb_exit_candidates").where({ org_id: orgId })).toHaveLength(2);
+  });
+
+  it("30. resolved cooldown exact candidate'ni fuzzy candidate'dan ustun qo'yadi", async () => {
+    const exactSessionId = await createSession("01COOL10");
+    const fuzzySessionId = await createSession("01COOL11");
+    await queryTable("tb_parking_sessions")
+      .whereIn("id", [exactSessionId, fuzzySessionId])
+      .update({ status: "completed", active_plate_key: null });
+    await createResolvedCandidate({
+      plate: "01COOL10",
+      status: "accepted",
+      resolutionType: "exact",
+      resolvedSecondsAgo: 300,
+      sessionId: exactSessionId,
+    });
+    await createResolvedCandidate({
+      plate: "01COOL11",
+      status: "dismissed",
+      resolutionType: "forced_open",
+      resolvedSecondsAgo: 30,
+      sessionId: fuzzySessionId,
+    });
+
+    const response = await createCandidateFromSignal("01COOL10");
+
+    expect(response).toMatchObject({
+      skipped: true,
+      reason: "resolved_recently_ignored",
+      sessionId: exactSessionId,
+    });
+  });
+
+  it("31. resolved cooldown yagona fuzzy candidate'ni topadi", async () => {
+    const sessionId = await createSession("01COOL20");
+    await queryTable("tb_parking_sessions")
+      .where({ id: sessionId })
+      .update({ status: "completed", active_plate_key: null });
+    await createResolvedCandidate({
+      plate: "01COOL20",
+      status: "accepted",
+      resolutionType: "exact",
+      resolvedSecondsAgo: 300,
+      sessionId,
+    });
+
+    const response = await createCandidateFromSignal("01COOL21");
+
+    expect(response).toMatchObject({
+      skipped: true,
+      reason: "resolved_recently_ignored",
+      sessionId,
+    });
+  });
+
+  it("32. forced_open dismissed candidate 5 daqiqada 10 daqiqalik cooldown ichida qoladi", async () => {
+    await createResolvedCandidate({
+      plate: "01COOL30",
+      status: "dismissed",
+      resolutionType: "forced_open",
+      resolvedSecondsAgo: 300,
+    });
+
+    const response = await createCandidateFromSignal("01COOL30");
+
+    expect(response).toMatchObject({ skipped: true, reason: "resolved_recently_ignored" });
+    expect(await queryTable("tb_exit_candidates").where({ org_id: orgId })).toHaveLength(1);
   });
 });

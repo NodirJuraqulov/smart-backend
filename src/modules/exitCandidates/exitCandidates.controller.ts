@@ -149,6 +149,14 @@ export async function forceOpenHandler(req: Request, res: Response) {
   );
 }
 
+export async function cancelExitHandler(req: Request, res: Response) {
+  const id = parseId(req, res);
+  if (id === null) return;
+  const orgId = requestScope(req, res);
+  if (orgId === null) return;
+  res.json({ candidate: await service.cancelExitCandidate(req.user!, orgId, id) });
+}
+
 export async function retryBarrierHandler(req: Request, res: Response) {
   const id = parseId(req, res);
   if (id === null) return;

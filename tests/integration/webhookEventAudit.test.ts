@@ -113,6 +113,9 @@ afterAll(async () => {
 describe("tb_webhook_events camera audit", () => {
   it("entry va exit muvaffaqiyatida confidence, metadata va session ID saqlaydi", async () => {
     expect((await postDahua("entry", "01A123BC", "4.5")).status).toBe(200);
+    await db("tb_parking_sessions")
+      .where({ org_id: orgId, plate_number: "01A123BC" })
+      .update({ entered_at: new Date(Date.now() - 61 * 60 * 1000) });
     expect((await postDahua("exit", "01A123BC", 96)).status).toBe(200);
 
     const session = await db("tb_parking_sessions")

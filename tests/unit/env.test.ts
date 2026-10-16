@@ -3,6 +3,9 @@ import { collectProductionSafetyErrors, stripTrailingSlashes } from "@/config/en
 
 const exitControlEnvNames = [
   "EXIT_MATCH_V2_ENABLED",
+  "FREE_EXIT_RECOVERY_ENABLED",
+  "FREE_EXIT_RECOVERY_HOURS",
+  "CANCELLED_EXIT_COOLDOWN_SECONDS",
   "FORCED_OPEN_AVG_LOSS_SOM",
   "STALE_SESSION_CLEANUP_ENABLED",
   "STALE_SESSION_CLEANUP_KEEP_DAYS",
@@ -79,6 +82,8 @@ describe("exit control env", () => {
     const configuredEnv = await loadExitControlEnv({});
 
     expect(configuredEnv.exitMatchV2Enabled).toBe(false);
+    expect(configuredEnv.freeExitRecovery).toEqual({ enabled: false, hours: 6 });
+    expect(configuredEnv.cancelledExitCooldownSeconds).toBe(60);
     expect(configuredEnv.forcedOpenAvgLossSom).toBe(10000);
     expect(configuredEnv.staleSessionCleanup).toEqual({
       enabled: false,
@@ -91,6 +96,9 @@ describe("exit control env", () => {
   it("literal true va musbat configured qiymatlarni qabul qiladi", async () => {
     const configuredEnv = await loadExitControlEnv({
       EXIT_MATCH_V2_ENABLED: "true",
+      FREE_EXIT_RECOVERY_ENABLED: "true",
+      FREE_EXIT_RECOVERY_HOURS: "12",
+      CANCELLED_EXIT_COOLDOWN_SECONDS: "90",
       FORCED_OPEN_AVG_LOSS_SOM: "25000",
       STALE_SESSION_CLEANUP_ENABLED: "true",
       STALE_SESSION_CLEANUP_KEEP_DAYS: "4",
@@ -99,6 +107,8 @@ describe("exit control env", () => {
     });
 
     expect(configuredEnv.exitMatchV2Enabled).toBe(true);
+    expect(configuredEnv.freeExitRecovery).toEqual({ enabled: true, hours: 12 });
+    expect(configuredEnv.cancelledExitCooldownSeconds).toBe(90);
     expect(configuredEnv.forcedOpenAvgLossSom).toBe(25000);
     expect(configuredEnv.staleSessionCleanup).toEqual({
       enabled: true,
@@ -111,11 +121,15 @@ describe("exit control env", () => {
   it("noto'g'ri numeric qiymatlarni defaultga qaytaradi", async () => {
     const configuredEnv = await loadExitControlEnv({
       FORCED_OPEN_AVG_LOSS_SOM: "NaN",
+      FREE_EXIT_RECOVERY_HOURS: "0",
+      CANCELLED_EXIT_COOLDOWN_SECONDS: "0",
       STALE_SESSION_CLEANUP_KEEP_DAYS: "0",
       STALE_SESSION_CLEANUP_MAX_PER_RUN: "-5",
     });
 
     expect(configuredEnv.forcedOpenAvgLossSom).toBe(10000);
+    expect(configuredEnv.freeExitRecovery.hours).toBe(6);
+    expect(configuredEnv.cancelledExitCooldownSeconds).toBe(60);
     expect(configuredEnv.staleSessionCleanup.keepDays).toBe(2);
     expect(configuredEnv.staleSessionCleanup.maxPerRun).toBe(1000);
   });

@@ -525,3 +525,42 @@ export function abortActiveCardPaymentInBackground(input: {
     });
   });
 }
+
+export function abortCandidateCardPaymentInBackground(input: {
+  orgId: number;
+  candidateId: number;
+}): void {
+  setImmediate(() => {
+    void (async () => {
+      const operation = await db<PaymentTerminalOperationRow>("payment_terminal_operations")
+        .where({ org_id: input.orgId, candidate_id: input.candidateId })
+        .whereIn("status", ["PENDING", "APPROVED"])
+        .orderBy("id", "desc")
+        .first();
+      if (!operation) return;
+      const updated = await db("payment_terminal_operations")
+        .where({ id: operation.id })
+        .whereIn("status", ["PENDING", "APPROVED"])
+        .update({
+          status: "ABORTED",
+          error_message: "Chiqish bo'lmagani sababli karta operatsiyasi bekor qilindi",
+          updated_at: db.fn.now(),
+        });
+      if (!updated) return;
+      await paymentTerminalManager.abortPendingPayment(input.orgId, operation.operation_number);
+      await db("tb_activity_logs").insert({
+        actor_id: operation.operator_id,
+        action: "payment_terminal.aborted",
+        target_type: operation.session_id === null ? "exit_candidate" : "session",
+        target_id: operation.session_id ?? input.candidateId,
+        details: JSON.stringify({
+          orgId: operation.org_id,
+          operationNumber: operation.operation_number,
+          candidateId: operation.candidate_id,
+        }),
+      });
+    })().catch((error) => {
+      console.error(`CARD_PAYMENT_ABORT_FAILED candidate_id=${input.candidateId}`, error);
+    });
+  });
+}

@@ -191,6 +191,9 @@ describe("Kirish webhook", () => {
 describe("Chiqish webhook", () => {
   it("faol sessiya topilsa — pending candidate yaratadi va sessiyaga tegmaydi", async () => {
     await postWebhook("entry", "01A555AA");
+    await db("tb_parking_sessions")
+      .where({ org_id: orgId, plate_number: "01A555AA" })
+      .update({ entered_at: new Date(Date.now() - 61 * 60 * 1000) });
     await clearWebhookDedupeCache(orgId);
 
     const res = await postWebhook("exit", "01A555AA");
@@ -307,6 +310,9 @@ describe("Shared gate cross-camera guard", () => {
         created_at: outsideGuardAt,
         processed_at: outsideGuardAt,
       });
+    await db("tb_parking_sessions")
+      .where({ org_id: orgId, plate_number: "01A124BC" })
+      .update({ entered_at: new Date(Date.now() - 61 * 60 * 1000) });
 
     const exit = await postWebhook("exit", "01A124BC");
     expect(exit.body.ignored).toBeUndefined();
@@ -340,6 +346,9 @@ describe("Shared gate cross-camera guard", () => {
   it("separate layout qarama-qarshi yo'nalishni to'xtatmaydi", async () => {
     await db("tb_organizations").where({ id: orgId }).update({ gate_layout: "separate" });
     await postWebhook("entry", "01A126BC");
+    await db("tb_parking_sessions")
+      .where({ org_id: orgId, plate_number: "01A126BC" })
+      .update({ entered_at: new Date(Date.now() - 61 * 60 * 1000) });
     const exit = await postWebhook("exit", "01A126BC");
     expect(exit.body.ignored).toBeUndefined();
     const session = await db("tb_parking_sessions")

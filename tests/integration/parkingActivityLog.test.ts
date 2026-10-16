@@ -138,6 +138,9 @@ describe("Activity log — parking.exit_candidate_created", () => {
     const before = await db("tb_parking_sessions")
       .where({ org_id: orgId, plate_number: "01K222AA" })
       .first();
+    await db("tb_parking_sessions")
+      .where({ id: before.id })
+      .update({ entered_at: new Date(Date.now() - 61 * 60 * 1000) });
     vi.clearAllMocks();
 
     const res = await postWebhook("exit", "01K222AA");

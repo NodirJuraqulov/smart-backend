@@ -148,7 +148,7 @@ export async function getExitControlReport(
     const day = daysByDate.get(date);
     if (!day) continue;
     const sessionId = row.resolved_session_id ?? row.matched_session_id;
-    if (sessionId === null) day.not_found_count += 1;
+    if (sessionId === null && row.resolution_type !== "exit_cancelled") day.not_found_count += 1;
     if (row.resolution_type !== "emergency_forced_open") continue;
     day.forced_open_count += 1;
     if (row.session_source === "vip" || row.session_source === "subscription") {

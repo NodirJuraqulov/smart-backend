@@ -37,6 +37,7 @@ import { paymentTerminalManager } from "@/modules/paymentTerminal/PaymentTermina
 import type { PaymentMethod } from "@/modules/payment/paymentMethod";
 import {
   abortActiveCardPaymentInBackground,
+  abortCandidateCardPaymentInBackground,
   createPaymentTerminalOperation,
   runCardPaymentInBackground,
 } from "@/modules/paymentTerminal/paymentTerminalOperations.service";
@@ -58,7 +59,8 @@ type ResolutionType =
   | "forced_open"
   | "emergency_forced_open"
   | "emergency_confirmed"
-  | "card_payment_initiated";
+  | "card_payment_initiated"
+  | "exit_cancelled";
 type ExitPaymentMethod = Exclude<PaymentMethod, "card"> | "emergency";
 type ExitMethod = "auto" | "manual" | "forced" | "auto_closed_on_reentry" | "emergency";
 export type ForceOpenReason =
@@ -176,23 +178,28 @@ function scheduleLedReturnToClock(orgId: number): void {
   }
 }
 
-function sendTelegramExitNotification(
+export function sendTelegramExitNotification(
   orgId: number,
-  confirmedByUserId: number,
+  confirmedByUserId: number | null,
   params: {
     plateNumber: string;
     amount: number | null;
     paymentMethod: PaymentMethod | null;
     imageUrl: string | null;
     durationText?: string;
+    durationMinutes?: number;
     exitMethod?: "emergency";
   }
 ): void {
   try {
     void (async () => {
-      const user = await getUserById(confirmedByUserId);
+      const user = confirmedByUserId === null ? null : await getUserById(confirmedByUserId);
+      const { durationMinutes, ...notification } = params;
       await telegramService.sendExitNotification(orgId, {
-        ...params,
+        ...notification,
+        ...(notification.durationText === undefined && durationMinutes !== undefined
+          ? { durationText: formatDuration(durationMinutes) }
+          : {}),
         confirmedByName: user?.name.trim() || "Noma'lum",
       });
     })().catch(() => {
@@ -596,23 +603,35 @@ async function findV2ActiveSession(
   return distanceOneMatches.length === 1 ? distanceOneMatches[0] : undefined;
 }
 
-async function findFuzzyResolvedCandidate(
+async function findRecentlyResolvedCandidate(
   trx: Knex.Transaction,
   orgId: number,
-  detectedPlate: string,
-  cooldownStart: Date
+  detectedPlate: string
 ) {
+  const now = Date.now();
+  const cancelledCooldownMs = env.cancelledExitCooldownSeconds * 1000;
+  const queryCooldownMs = Math.max(RESOLVED_EXIT_CANDIDATE_COOLDOWN_MS, cancelledCooldownMs);
   const candidates = await trx<CandidateRow>("tb_exit_candidates")
-    .select("id", "detected_plate", "resolved_session_id")
+    .select("id", "detected_plate", "resolved_session_id", "resolution_type", "resolved_at")
     .where({ org_id: orgId })
     .whereIn("status", ["accepted", "dismissed"])
     .whereNotNull("resolved_at")
-    .andWhere("resolved_at", ">=", cooldownStart)
+    .andWhere("resolved_at", ">=", new Date(now - queryCooldownMs))
     .orderBy("resolved_at", "desc");
-  const matches = candidates.filter((candidate) =>
+  const recentCandidates = candidates.filter((candidate) => {
+    if (!candidate.resolved_at) return false;
+    const cooldownMs =
+      candidate.resolution_type === "exit_cancelled"
+        ? cancelledCooldownMs
+        : RESOLVED_EXIT_CANDIDATE_COOLDOWN_MS;
+    return new Date(candidate.resolved_at).getTime() >= now - cooldownMs;
+  });
+  const exact = recentCandidates.find((candidate) => candidate.detected_plate === detectedPlate);
+  if (exact) return exact;
+  const fuzzyMatches = recentCandidates.filter((candidate) =>
     isFuzzyPlateMatch(detectedPlate, candidate.detected_plate)
   );
-  return matches.length === 1 ? matches[0] : undefined;
+  return fuzzyMatches.length === 1 ? fuzzyMatches[0] : undefined;
 }
 
 async function findFuzzyPendingCandidate(
@@ -629,6 +648,98 @@ async function findFuzzyPendingCandidate(
     isFuzzyPlateMatch(detectedPlate, candidate.detected_plate)
   );
   return matches.length === 1 ? matches[0] : undefined;
+}
+
+interface RecoverableFreeExitSession {
+  id: number;
+  entered_at: Date;
+  exited_at: Date;
+}
+
+async function recoverFreeExitSession(
+  trx: Knex.Transaction,
+  orgId: number,
+  plateNumber: string
+): Promise<{ id: number; status: "active" } | undefined> {
+  if (!env.freeExitRecovery.enabled) return undefined;
+  try {
+    return await trx.transaction(async (savepoint) => {
+      const recoveryStart = new Date(Date.now() - env.freeExitRecovery.hours * 60 * 60_000);
+      const session = await savepoint<RecoverableFreeExitSession>("tb_parking_sessions as recovered")
+        .select("recovered.id", "recovered.entered_at", "recovered.exited_at")
+        .where("recovered.org_id", orgId)
+        .andWhere("recovered.plate_number", plateNumber)
+        .andWhere("recovered.status", "completed")
+        .andWhere("recovered.session_source", "regular")
+        .andWhere("recovered.exit_method", "auto")
+        .andWhere("recovered.amount", 0)
+        .andWhere("recovered.exited_at", ">=", recoveryStart)
+        .whereNotExists(
+          savepoint("tb_payments as payment")
+            .select(savepoint.raw("1"))
+            .whereRaw("payment.session_id = recovered.id")
+        )
+        .whereNotExists(
+          savepoint("payment_terminal_operations as operation")
+            .select(savepoint.raw("1"))
+            .whereRaw("operation.session_id = recovered.id")
+            .whereIn("operation.status", ["APPROVED", "FIN_FAILED", "ORPHANED"])
+        )
+        .whereNotExists(
+          savepoint("tb_parking_sessions as later")
+            .select(savepoint.raw("1"))
+            .whereRaw("later.org_id = recovered.org_id")
+            .whereRaw("later.plate_number = recovered.plate_number")
+            .whereRaw("later.entered_at > recovered.entered_at")
+        )
+        .orderBy("recovered.exited_at", "desc")
+        .orderBy("recovered.id", "desc")
+        .forUpdate()
+        .first();
+      if (!session) return undefined;
+      const updated = await savepoint("tb_parking_sessions")
+        .where({
+          id: session.id,
+          org_id: orgId,
+          plate_number: plateNumber,
+          status: "completed",
+          session_source: "regular",
+          exit_method: "auto",
+          amount: 0,
+        })
+        .update({
+          status: "active",
+          exited_at: null,
+          duration_minutes: null,
+          amount: null,
+          exit_method: null,
+          image_exit: null,
+          exit_overview_image_path: null,
+          exit_vehicle_image_path: null,
+          exit_plate_image_path: null,
+          active_plate_key: `${orgId}:${plateNumber}`,
+        });
+      if (!updated) return undefined;
+      await savepoint("tb_activity_logs").insert({
+        actor_id: null,
+        action: "session.reopened_for_exit",
+        target_type: "session",
+        target_id: session.id,
+        details: JSON.stringify({
+          orgId,
+          sessionId: session.id,
+          oldExitedAt: new Date(session.exited_at).toISOString(),
+        }),
+      });
+      return { id: session.id, status: "active" as const };
+    });
+  } catch (error) {
+    console.error(
+      `FREE_EXIT_RECOVERY_FAILED org_id=${orgId} plate=${plateNumber}`,
+      error
+    );
+    return undefined;
+  }
 }
 
 function canonicalPlate(value: string): string {
@@ -803,25 +914,12 @@ export async function createExitCandidate(input: {
         sessionId: matchingSession.id,
       };
     }
+    if (detectedPlate && !matchingSession) {
+      matchingSession = await recoverFreeExitSession(trx, input.orgId, detectedPlate);
+    }
     const matchedSession = matchingSession?.status === "active" ? matchingSession : null;
     if (detectedPlate && !matchedSession) {
-      const cooldownStart = new Date(Date.now() - RESOLVED_EXIT_CANDIDATE_COOLDOWN_MS);
-      let resolvedCandidate = await trx<CandidateRow>("tb_exit_candidates")
-        .select("id", "resolved_session_id")
-        .where({ org_id: input.orgId, detected_plate: detectedPlate })
-        .whereIn("status", ["accepted", "dismissed"])
-        .whereNotNull("resolved_at")
-        .andWhere("resolved_at", ">=", cooldownStart)
-        .orderBy("resolved_at", "desc")
-        .first();
-      if (!resolvedCandidate) {
-        resolvedCandidate = await findFuzzyResolvedCandidate(
-          trx,
-          input.orgId,
-          detectedPlate,
-          cooldownStart
-        );
-      }
+      const resolvedCandidate = await findRecentlyResolvedCandidate(trx, input.orgId, detectedPlate);
       if (resolvedCandidate) {
         await trx("tb_webhook_events").where({ id: input.webhookEventId, org_id: input.orgId }).update({
           processing_result: "resolved_recently_ignored",
@@ -1883,6 +1981,66 @@ export async function forceOpenExitCandidate(
     exitMethod: transactionResult.isEmergency ? "emergency" : "forced",
   });
   return { candidate: resolvedCandidate, barrier_status: barrierStatus };
+}
+
+export async function cancelExitCandidate(
+  actor: AuthTokenPayload,
+  requestedOrgId: number | undefined,
+  candidateId: number
+) {
+  const orgId = resolveOrgIdRequired(actor, requestedOrgId);
+  const transactionResult = await db.transaction(async (trx) => {
+    const candidate = await trx<CandidateRow>("tb_exit_candidates")
+      .where({ id: candidateId, org_id: orgId })
+      .forUpdate()
+      .first();
+    if (!candidate) throw new ApiError("Chiqish nomzodi topilmadi", 404);
+    if (candidate.status !== "pending") throw new ApiError("Bu chiqish allaqachon hal qilingan", 409);
+    if (candidate.matched_session_id !== null) {
+      throw new ApiError("Sessiyaga moslangan chiqishni bekor qilib bo'lmaydi", 409);
+    }
+    const resolvedAt = new Date();
+    await trx("tb_exit_candidates").where({ id: candidateId, org_id: orgId }).update({
+      status: "dismissed",
+      resolution_type: "exit_cancelled",
+      resolved_by: actor.id,
+      resolved_at: resolvedAt,
+      updated_at: resolvedAt,
+    });
+    await trx("tb_webhook_events").where({ id: candidate.webhook_event_id, org_id: orgId }).update({
+      processing_result: "exit_candidate_cancelled",
+      processing_reason: "operator_cancelled_exit",
+      session_id: null,
+      processed_at: trx.fn.now(),
+    });
+    await trx("tb_activity_logs").insert({
+      actor_id: actor.id,
+      action: "exit_candidate.cancelled",
+      target_type: "exit_candidate",
+      target_id: candidateId,
+      details: JSON.stringify({
+        operatorId: actor.id,
+        orgId,
+        candidateId,
+        webhookEventId: candidate.webhook_event_id,
+        detectedPlate: candidate.detected_plate,
+        suggestedPlate: candidate.suggested_plate,
+      }),
+    });
+    return { plateNumber: candidate.detected_plate ?? candidate.suggested_plate };
+  });
+  abortCandidateCardPaymentInBackground({ orgId, candidateId });
+  scheduleLedReturnToClock(orgId);
+  emitExitCandidateResolved(orgId, {
+    candidateId,
+    orgId,
+    status: "dismissed",
+    resolutionType: "exit_cancelled",
+    sessionId: null,
+    barrierStatus: null,
+    plateNumber: transactionResult.plateNumber,
+  });
+  return getCandidateByInternalId(orgId, candidateId);
 }
 
 export async function retryExitCandidateBarrier(
