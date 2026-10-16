@@ -4,6 +4,7 @@ import { asyncHandler } from "@/middleware/asyncHandler";
 import {
   acceptHandler,
   cancelExitHandler,
+  cancelledHistoryHandler,
   confirmHandler,
   detailHandler,
   dismissHandler,
@@ -21,6 +22,7 @@ const router = Router();
 router.use(isAuth, checkPermission("sessions"));
 router.get("/", asyncHandler(listHandler));
 router.get("/next", asyncHandler(nextHandler));
+router.get("/cancelled", asyncHandler(cancelledHistoryHandler));
 router.get("/:id", asyncHandler(detailHandler));
 router.post("/:id/search", asyncHandler(searchHandler));
 router.post("/:id/preview-session", asyncHandler(previewSessionHandler));

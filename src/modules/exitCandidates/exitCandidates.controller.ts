@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import type { PaymentMethod } from "@/modules/payment/paymentMethod";
 import { parseId, parseOptionalOrgIdFromQuery } from "@/utils/httpParams";
+import { listCancelledExitHistory } from "./cancelledExitHistory.service";
 import * as service from "./exitCandidates.service";
 
 function pagination(req: Request, res: Response): { page: number; limit: number } | null {
@@ -23,6 +24,24 @@ export async function listHandler(req: Request, res: Response) {
   const input = pagination(req, res);
   if (!input) return;
   res.json(await service.listExitCandidates(req.user!, orgId, input));
+}
+
+export async function cancelledHistoryHandler(req: Request, res: Response) {
+  const orgId = requestScope(req, res);
+  if (orgId === null) return;
+  const input = pagination(req, res);
+  if (!input) return;
+  if (typeof req.query.from !== "string" || typeof req.query.to !== "string") {
+    res.status(400).json({ message: "from va to YYYY-MM-DD formatida bo'lishi kerak" });
+    return;
+  }
+  res.json(
+    await listCancelledExitHistory(req.user!, orgId, {
+      from: req.query.from,
+      to: req.query.to,
+      ...input,
+    })
+  );
 }
 
 export async function detailHandler(req: Request, res: Response) {

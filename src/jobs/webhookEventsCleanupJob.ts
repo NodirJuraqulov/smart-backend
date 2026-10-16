@@ -1,11 +1,23 @@
 import cron from "node-cron";
 import { db } from "@/config/db";
+import { env } from "@/config/env";
 
 const RETENTION_HOURS = 24;
 
 export async function runWebhookEventsCleanup(): Promise<void> {
   const deletedCount = await db("tb_webhook_events")
     .where("created_at", "<", db.raw(`NOW() - INTERVAL ${RETENTION_HOURS} HOUR`))
+    .whereNotExists(
+      db("tb_exit_candidates as candidate")
+        .select(db.raw("1"))
+        .whereRaw("candidate.webhook_event_id = tb_webhook_events.id")
+        .where({ "candidate.resolution_type": "exit_cancelled" })
+        .where(
+          "candidate.resolved_at",
+          ">=",
+          db.raw("DATE_SUB(NOW(), INTERVAL ? DAY)", [env.cancelledExitRetentionDays])
+        )
+    )
     .del();
 
   console.log(`Webhook hodisalari tozalandi: ${deletedCount} ta eski yozuv o'chirildi`);

@@ -67,6 +67,7 @@ export const env = {
     hours: positiveInteger(process.env.FREE_EXIT_RECOVERY_HOURS, 6),
   },
   cancelledExitCooldownSeconds: positiveInteger(process.env.CANCELLED_EXIT_COOLDOWN_SECONDS, 60),
+  cancelledExitRetentionDays: positiveInteger(process.env.CANCELLED_EXIT_RETENTION_DAYS, 30),
   forcedOpenAvgLossSom: positiveInteger(process.env.FORCED_OPEN_AVG_LOSS_SOM, 10000),
 
   staleSessionCleanup: {

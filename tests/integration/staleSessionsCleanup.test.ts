@@ -105,6 +105,34 @@ describe("stale session cleanup", () => {
     expect(summary.deleted_sessions).toBe(1);
   });
 
+  it("exit_cancelled nomzod va uning webhook yozuviga tegmaydi", async () => {
+    const sessionId = await oldSession("01OLD002");
+    const resolvedAt = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+    const [eventId] = await db("tb_webhook_events").insert({
+      org_id: orgId,
+      plate_number: null,
+      direction: "exit",
+      camera_event_at: resolvedAt,
+      created_at: resolvedAt,
+    });
+    const [candidateId] = await db("tb_exit_candidates").insert({
+      org_id: orgId,
+      webhook_event_id: eventId,
+      detected_plate: null,
+      camera_event_at: resolvedAt,
+      status: "dismissed",
+      resolution_type: "exit_cancelled",
+      resolved_by: actorId,
+      resolved_at: resolvedAt,
+    });
+
+    await runStaleSessionsCleanup();
+
+    expect(await db("tb_parking_sessions").where({ id: sessionId }).first()).toBeUndefined();
+    expect(await db("tb_exit_candidates").where({ id: candidateId }).first()).toBeDefined();
+    expect(await db("tb_webhook_events").where({ id: eventId }).first()).toBeDefined();
+  });
+
   it("kecha va bugungi active regular sessiyalarni saqlaydi", async () => {
     const cutoff = cutoffFor("Asia/Tashkent");
     const yesterday = await createSession({ plate: "01KEEP01", enteredAt: cutoff.plus({ hours: 1 }).toJSDate() });
