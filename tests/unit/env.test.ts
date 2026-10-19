@@ -11,6 +11,10 @@ const exitControlEnvNames = [
   "STALE_SESSION_CLEANUP_KEEP_DAYS",
   "STALE_SESSION_CLEANUP_MAX_PER_RUN",
   "STALE_SESSION_CLEANUP_CRON",
+  "WEBHOOK_IMAGES_CLEANUP_ENABLED",
+  "WEBHOOK_IMAGES_RETENTION_DAYS",
+  "WEBHOOK_IMAGES_CLEANUP_MAX_PER_RUN",
+  "WEBHOOK_IMAGES_CLEANUP_CRON",
 ] as const;
 
 async function loadExitControlEnv(overrides: Partial<Record<(typeof exitControlEnvNames)[number], string>>) {
@@ -91,6 +95,12 @@ describe("exit control env", () => {
       maxPerRun: 1000,
       cron: "30 3 * * *",
     });
+    expect(configuredEnv.webhookImagesCleanup).toEqual({
+      enabled: false,
+      retentionDays: 30,
+      maxPerRun: 20000,
+      cron: "30 4 * * *",
+    });
   });
 
   it("literal true va musbat configured qiymatlarni qabul qiladi", async () => {
@@ -104,6 +114,10 @@ describe("exit control env", () => {
       STALE_SESSION_CLEANUP_KEEP_DAYS: "4",
       STALE_SESSION_CLEANUP_MAX_PER_RUN: "300",
       STALE_SESSION_CLEANUP_CRON: "15 2 * * *",
+      WEBHOOK_IMAGES_CLEANUP_ENABLED: "true",
+      WEBHOOK_IMAGES_RETENTION_DAYS: "45",
+      WEBHOOK_IMAGES_CLEANUP_MAX_PER_RUN: "500",
+      WEBHOOK_IMAGES_CLEANUP_CRON: "20 4 * * *",
     });
 
     expect(configuredEnv.exitMatchV2Enabled).toBe(true);
@@ -116,6 +130,12 @@ describe("exit control env", () => {
       maxPerRun: 300,
       cron: "15 2 * * *",
     });
+    expect(configuredEnv.webhookImagesCleanup).toEqual({
+      enabled: true,
+      retentionDays: 45,
+      maxPerRun: 500,
+      cron: "20 4 * * *",
+    });
   });
 
   it("noto'g'ri numeric qiymatlarni defaultga qaytaradi", async () => {
@@ -125,6 +145,8 @@ describe("exit control env", () => {
       CANCELLED_EXIT_COOLDOWN_SECONDS: "0",
       STALE_SESSION_CLEANUP_KEEP_DAYS: "0",
       STALE_SESSION_CLEANUP_MAX_PER_RUN: "-5",
+      WEBHOOK_IMAGES_RETENTION_DAYS: "0",
+      WEBHOOK_IMAGES_CLEANUP_MAX_PER_RUN: "-5",
     });
 
     expect(configuredEnv.forcedOpenAvgLossSom).toBe(10000);
@@ -132,5 +154,7 @@ describe("exit control env", () => {
     expect(configuredEnv.cancelledExitCooldownSeconds).toBe(60);
     expect(configuredEnv.staleSessionCleanup.keepDays).toBe(2);
     expect(configuredEnv.staleSessionCleanup.maxPerRun).toBe(1000);
+    expect(configuredEnv.webhookImagesCleanup.retentionDays).toBe(30);
+    expect(configuredEnv.webhookImagesCleanup.maxPerRun).toBe(20000);
   });
 });

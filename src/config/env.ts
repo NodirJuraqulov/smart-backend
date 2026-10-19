@@ -77,6 +77,13 @@ export const env = {
     cron: process.env.STALE_SESSION_CLEANUP_CRON || "30 3 * * *",
   },
 
+  webhookImagesCleanup: {
+    enabled: process.env.WEBHOOK_IMAGES_CLEANUP_ENABLED === "true",
+    retentionDays: positiveInteger(process.env.WEBHOOK_IMAGES_RETENTION_DAYS, 30),
+    maxPerRun: positiveInteger(process.env.WEBHOOK_IMAGES_CLEANUP_MAX_PER_RUN, 20000),
+    cron: process.env.WEBHOOK_IMAGES_CLEANUP_CRON || "30 4 * * *",
+  },
+
   payments: {
     paymeEnabled: process.env.PAYME_ENABLED === "true",
     clickEnabled: process.env.CLICK_ENABLED === "true",
