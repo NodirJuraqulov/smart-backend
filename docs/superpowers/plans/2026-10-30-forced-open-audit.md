@@ -131,3 +131,20 @@
 - [ ] Update the candidate session selection and organization-scoped join with resolved-session precedence.
 - [ ] Run the focused test and confirm all amendment and existing audit cases pass.
 - [ ] Run the full regression suite, TypeScript checks, build, lint, and final diff inspection.
+
+### Task 7: One Review per Session Amendment
+
+**Files:**
+- Modify: `src/modules/forcedOpenAudit/forcedOpenAudit.service.ts`
+- Modify: `tests/integration/forcedOpenAudit.test.ts`
+
+**Interfaces:**
+- Preserves: GET `/api/forced-open-audit` response shape and global `forced_at` ascending order
+- Preserves: POST `/api/forced-open-audit/reviews` response shape and candidate-level UNIQUE behavior
+- Produces: one visible `session_found` candidate per session and one saved review per org/session under concurrent writes
+
+- [ ] Add failing integration tests for two/three candidates per session, saved/confidence/time priority, hidden externally reviewed sessions, unchanged distinct/not-found rows, sequential and parallel duplicate saves, and org isolation.
+- [ ] Run `npm test -- tests/integration/forcedOpenAudit.test.ts` and confirm failures are caused by missing session deduplication and session-level save protection.
+- [ ] Deduplicate session-found rows after org-scoped review lookup while preserving the original forced-at order.
+- [ ] Lock the selected session row with `FOR UPDATE`, then check for an existing org/session review in the same `READ COMMITTED` transaction and return 409 when found.
+- [ ] Run focused tests, the full regression suite, TypeScript checks, build, lint, and final diff inspection.

@@ -95,6 +95,26 @@ async function createCandidate(input: {
   return { candidateId, eventId };
 }
 
+async function createStoredReview(input: {
+  orgId?: number;
+  candidateId: number;
+  sessionId: number;
+  forcedAt: Date;
+}): Promise<number> {
+  const [id] = await db("forced_open_reviews").insert({
+    org_id: input.orgId ?? orgId,
+    candidate_id: input.candidateId,
+    operator_id: operator.id,
+    operator_name: "Smena Operatori",
+    forced_at: input.forcedAt,
+    session_id: input.sessionId,
+    amount_som: 6000,
+    kind: "session_found",
+    saved_by: owner.id,
+  });
+  return id;
+}
+
 beforeAll(async () => {
   await assertTestDatabase();
 });
@@ -483,6 +503,289 @@ describe("forced-open audit owner API", () => {
       kind: "session_found",
     }));
     expect(duplicate.status).toBe(409);
+  });
+
+  it("bir sessiyaga bog'langan uchta nomzoddan eng yuqori confidence qatorini qoldiradi", async () => {
+    const sessionId = await createSession({
+      plate: "01DEDUP1",
+      enteredAt: new Date("2026-10-30T01:00:00.000Z"),
+    });
+    await createCandidate({
+      forcedAt: new Date("2026-10-30T04:00:00.000Z"),
+      plate: "01DEDUPA",
+      confidence: null,
+      matchedSessionId: sessionId,
+    });
+    const winner = await createCandidate({
+      forcedAt: new Date("2026-10-30T04:10:00.000Z"),
+      plate: "01DEDUPB",
+      confidence: 92,
+      matchedSessionId: sessionId,
+    });
+    await createCandidate({
+      forcedAt: new Date("2026-10-30T04:20:00.000Z"),
+      plate: "01DEDUPC",
+      confidence: 80,
+      matchedSessionId: sessionId,
+    });
+
+    const response = await request(app)
+      .get(`/api/forced-open-audit?operator_id=${operator.id}&date=2026-10-30`)
+      .set("Authorization", authorization(owner));
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual([
+      expect.objectContaining({ candidate_id: winner.candidateId, confidence: 92 }),
+    ]);
+  });
+
+  it("saqlangan nomzodni confidence va forced_at dan ustun qo'yadi", async () => {
+    const sessionId = await createSession({
+      plate: "01SAVED1",
+      enteredAt: new Date("2026-10-30T01:00:00.000Z"),
+    });
+    const savedCandidate = await createCandidate({
+      forcedAt: new Date("2026-10-30T04:20:00.000Z"),
+      plate: "01SAVEDA",
+      confidence: 10,
+      matchedSessionId: sessionId,
+    });
+    await createCandidate({
+      forcedAt: new Date("2026-10-30T04:00:00.000Z"),
+      plate: "01SAVEDB",
+      confidence: 99,
+      matchedSessionId: sessionId,
+    });
+    const reviewId = await createStoredReview({
+      candidateId: savedCandidate.candidateId,
+      sessionId,
+      forcedAt: new Date("2026-10-30T04:20:00.000Z"),
+    });
+
+    const response = await request(app)
+      .get(`/api/forced-open-audit?operator_id=${operator.id}&date=2026-10-30`)
+      .set("Authorization", authorization(owner));
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual([
+      expect.objectContaining({ candidate_id: savedCandidate.candidateId, review_id: reviewId }),
+    ]);
+  });
+
+  it("bir sessiyada bir nechta saqlangan nomzod bo'lsa eng erta forced_at ni qoldiradi", async () => {
+    const sessionId = await createSession({
+      plate: "01HIST01",
+      enteredAt: new Date("2026-10-30T01:00:00.000Z"),
+    });
+    const early = await createCandidate({
+      forcedAt: new Date("2026-10-30T04:00:00.000Z"),
+      plate: "01HIST0A",
+      confidence: 10,
+      matchedSessionId: sessionId,
+    });
+    const late = await createCandidate({
+      forcedAt: new Date("2026-10-30T04:10:00.000Z"),
+      plate: "01HIST0B",
+      confidence: 99,
+      matchedSessionId: sessionId,
+    });
+    const earlyReviewId = await createStoredReview({
+      candidateId: early.candidateId,
+      sessionId,
+      forcedAt: new Date("2026-10-30T04:00:00.000Z"),
+    });
+    await createStoredReview({
+      candidateId: late.candidateId,
+      sessionId,
+      forcedAt: new Date("2026-10-30T04:10:00.000Z"),
+    });
+
+    const response = await request(app)
+      .get(`/api/forced-open-audit?operator_id=${operator.id}&date=2026-10-30`)
+      .set("Authorization", authorization(owner));
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual([
+      expect.objectContaining({ candidate_id: early.candidateId, review_id: earlyReviewId }),
+    ]);
+  });
+
+  it("teng confidence da erta forced_at ni qoldiradi va umumiy tartibni saqlaydi", async () => {
+    const sharedSessionId = await createSession({
+      plate: "01EARLY1",
+      enteredAt: new Date("2026-10-30T01:00:00.000Z"),
+    });
+    const distinctSessionId = await createSession({
+      plate: "01DIST01",
+      enteredAt: new Date("2026-10-30T01:00:00.000Z"),
+    });
+    const notFound = await createCandidate({
+      forcedAt: new Date("2026-10-30T03:30:00.000Z"),
+      plate: "01NONE02",
+    });
+    const early = await createCandidate({
+      forcedAt: new Date("2026-10-30T04:00:00.000Z"),
+      plate: "01EARLYA",
+      confidence: 85,
+      matchedSessionId: sharedSessionId,
+    });
+    await createCandidate({
+      forcedAt: new Date("2026-10-30T04:10:00.000Z"),
+      plate: "01EARLYB",
+      confidence: 85,
+      matchedSessionId: sharedSessionId,
+    });
+    const distinct = await createCandidate({
+      forcedAt: new Date("2026-10-30T04:20:00.000Z"),
+      plate: "01DIST01",
+      confidence: 70,
+      matchedSessionId: distinctSessionId,
+    });
+
+    const response = await request(app)
+      .get(`/api/forced-open-audit?operator_id=${operator.id}&date=2026-10-30`)
+      .set("Authorization", authorization(owner));
+
+    expect(response.status).toBe(200);
+    expect(response.body.map((item: { candidate_id: number }) => item.candidate_id)).toEqual([
+      notFound.candidateId,
+      early.candidateId,
+      distinct.candidateId,
+    ]);
+    expect(response.body[0]).toEqual(expect.objectContaining({ kind: "not_found", session: null }));
+  });
+
+  it("shu sessiya boshqa nomzod bilan saqlangan bo'lsa saqlanmagan qatorni yashiradi", async () => {
+    const sessionId = await createSession({
+      plate: "01HIDE01",
+      enteredAt: new Date("2026-10-30T01:00:00.000Z"),
+    });
+    await createCandidate({
+      forcedAt: new Date("2026-10-30T04:00:00.000Z"),
+      plate: "01HIDE01",
+      matchedSessionId: sessionId,
+    });
+    const savedElsewhere = await createCandidate({
+      operatorId: otherOperator.id,
+      forcedAt: new Date("2026-10-30T04:05:00.000Z"),
+      plate: "01HIDE02",
+      matchedSessionId: sessionId,
+    });
+    await createStoredReview({
+      candidateId: savedElsewhere.candidateId,
+      sessionId,
+      forcedAt: new Date("2026-10-30T04:05:00.000Z"),
+    });
+
+    const response = await request(app)
+      .get(`/api/forced-open-audit?operator_id=${operator.id}&date=2026-10-30`)
+      .set("Authorization", authorization(owner));
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual([]);
+  });
+
+  it("bir sessiyani ikki nomzod bilan ketma-ket saqlashda ikkinchisini 409 qiladi", async () => {
+    const sessionId = await createSession({
+      plate: "01ONCE01",
+      enteredAt: new Date("2026-10-30T01:00:00.000Z"),
+    });
+    const firstCandidate = await createCandidate({
+      forcedAt: new Date("2026-10-30T04:00:00.000Z"),
+      plate: "01ONCEA",
+      matchedSessionId: sessionId,
+    });
+    const secondCandidate = await createCandidate({
+      forcedAt: new Date("2026-10-30T04:05:00.000Z"),
+      plate: "01ONCEB",
+      matchedSessionId: sessionId,
+    });
+
+    const first = await request(app)
+      .post("/api/forced-open-audit/reviews")
+      .set("Authorization", authorization(owner))
+      .send({ candidate_id: firstCandidate.candidateId });
+    const second = await request(app)
+      .post("/api/forced-open-audit/reviews")
+      .set("Authorization", authorization(owner))
+      .send({ candidate_id: secondCandidate.candidateId });
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(409);
+    expect(second.body).toEqual({ message: "shu sessiya allaqachon saqlangan" });
+  });
+
+  it("bir sessiyani ikki nomzod bilan parallel saqlashda bitta review yaratadi", async () => {
+    const sessionId = await createSession({
+      plate: "01RACE01",
+      enteredAt: new Date("2026-10-30T01:00:00.000Z"),
+    });
+    const firstCandidate = await createCandidate({
+      forcedAt: new Date("2026-10-30T04:00:00.000Z"),
+      plate: "01RACE0A",
+      matchedSessionId: sessionId,
+    });
+    const secondCandidate = await createCandidate({
+      forcedAt: new Date("2026-10-30T04:05:00.000Z"),
+      plate: "01RACE0B",
+      matchedSessionId: sessionId,
+    });
+
+    const responses = await Promise.all([
+      request(app)
+        .post("/api/forced-open-audit/reviews")
+        .set("Authorization", authorization(owner))
+        .send({ candidate_id: firstCandidate.candidateId }),
+      request(app)
+        .post("/api/forced-open-audit/reviews")
+        .set("Authorization", authorization(owner))
+        .send({ candidate_id: secondCandidate.candidateId }),
+    ]);
+    const reviews = await db("forced_open_reviews").where({ org_id: orgId, session_id: sessionId });
+
+    expect(responses.map((response) => response.status).sort()).toEqual([201, 409]);
+    expect(responses.find((response) => response.status === 409)?.body).toEqual({
+      message: "shu sessiya allaqachon saqlangan",
+    });
+    expect(reviews).toHaveLength(1);
+  });
+
+  it("boshqa tashkilotdagi shu session_id reviewi guruhlash va saqlashga aralashmaydi", async () => {
+    const sessionId = await createSession({
+      plate: "01ORG001",
+      enteredAt: new Date("2026-10-30T01:00:00.000Z"),
+    });
+    const candidate = await createCandidate({
+      forcedAt: new Date("2026-10-30T04:00:00.000Z"),
+      plate: "01ORG001",
+      matchedSessionId: sessionId,
+    });
+    const foreignCandidate = await createCandidate({
+      orgId: otherOrgId,
+      operatorId: (await createTestUser(otherOrgId, { role: "operator" })).id,
+      forcedAt: new Date("2026-10-30T04:00:00.000Z"),
+      plate: "01ORG002",
+    });
+    await createStoredReview({
+      orgId: otherOrgId,
+      candidateId: foreignCandidate.candidateId,
+      sessionId,
+      forcedAt: new Date("2026-10-30T04:00:00.000Z"),
+    });
+
+    const listed = await request(app)
+      .get(`/api/forced-open-audit?operator_id=${operator.id}&date=2026-10-30`)
+      .set("Authorization", authorization(owner));
+    const saved = await request(app)
+      .post("/api/forced-open-audit/reviews")
+      .set("Authorization", authorization(owner))
+      .send({ candidate_id: candidate.candidateId });
+
+    expect(listed.status).toBe(200);
+    expect(listed.body).toEqual([
+      expect.objectContaining({ candidate_id: candidate.candidateId }),
+    ]);
+    expect(saved.status).toBe(201);
   });
 
   it("review summasini serverda hisoblaydi, ikkinchi va parallel saqlashni 409 qiladi", async () => {

@@ -82,6 +82,44 @@ function candidateKind(candidate: Pick<CandidateRow, "session_id">) {
   return candidateSessionId(candidate) === null ? "not_found" as const : "session_found" as const;
 }
 
+function candidatePreferred(left: CandidateRow, right: CandidateRow) {
+  const leftReviewed = left.review_id !== null;
+  const rightReviewed = right.review_id !== null;
+  if (leftReviewed !== rightReviewed) return leftReviewed;
+  if (!leftReviewed) {
+    const leftConfidence = left.confidence === null ? Number.NEGATIVE_INFINITY : Number(left.confidence);
+    const rightConfidence = right.confidence === null ? Number.NEGATIVE_INFINITY : Number(right.confidence);
+    if (leftConfidence !== rightConfidence) return leftConfidence > rightConfidence;
+  }
+  const leftForcedAt = new Date(left.resolved_at).getTime();
+  const rightForcedAt = new Date(right.resolved_at).getTime();
+  if (leftForcedAt !== rightForcedAt) return leftForcedAt < rightForcedAt;
+  return left.id < right.id;
+}
+
+function deduplicateSessionRows(
+  rows: CandidateRow[],
+  reviewsByCandidateId: Map<number, number>,
+  reviewedSessionIds: Set<number>
+) {
+  const reconciledRows = rows.map((row) => {
+    const reviewId = reviewsByCandidateId.get(row.id);
+    return row.review_id === null && reviewId !== undefined
+      ? { ...row, review_id: reviewId }
+      : row;
+  });
+  const winners = new Map<number, CandidateRow>();
+  for (const row of reconciledRows) {
+    if (row.session_id === null) continue;
+    if (row.review_id === null && reviewedSessionIds.has(row.session_id)) continue;
+    const winner = winners.get(row.session_id);
+    if (!winner || candidatePreferred(row, winner)) winners.set(row.session_id, row);
+  }
+  return reconciledRows.filter(
+    (row) => row.session_id === null || winners.get(row.session_id)?.id === row.id
+  );
+}
+
 function imageFields(eventId: number | null, overviewPath: string | null) {
   const hasImage = eventId !== null && overviewPath !== null;
   return {
@@ -188,7 +226,22 @@ export async function listForcedOpenAudit(
     .orderBy("candidate.resolved_at", "asc")
     .orderBy("candidate.id", "asc");
 
-  return rows.map((row) => {
+  const sessionIds = [...new Set(rows.flatMap((row) => row.session_id === null ? [] : [row.session_id]))];
+  const reviewedSessions = sessionIds.length === 0
+    ? []
+    : await db("forced_open_reviews")
+        .select("id", "candidate_id", "session_id")
+        .where({ org_id: orgId })
+        .whereIn("session_id", sessionIds);
+  const reviewsByCandidateId = new Map<number, number>(
+    reviewedSessions.map((review) => [Number(review.candidate_id), Number(review.id)])
+  );
+  const reviewedSessionIds = new Set<number>(
+    reviewedSessions.map((review) => Number(review.session_id))
+  );
+  const visibleRows = deduplicateSessionRows(rows, reviewsByCandidateId, reviewedSessionIds);
+
+  return visibleRows.map((row) => {
     const kind = candidateKind(row);
     const forcedAt = new Date(row.resolved_at);
     const enteredAt = row.entered_at ? new Date(row.entered_at) : null;
@@ -306,17 +359,6 @@ export async function createForcedOpenReview(
   const orgId = resolveOrgIdRequired(actor);
   try {
     return await db.transaction(async (trx) => {
-      const locked = await trx("tb_exit_candidates")
-        .select("id")
-        .where({ id: candidateId, org_id: orgId })
-        .forUpdate()
-        .first();
-      if (!locked) throw new ApiError("Majburiy ochish nomzodi topilmadi", 404);
-      const existing = await trx("forced_open_reviews")
-        .select("id")
-        .where({ org_id: orgId, candidate_id: candidateId })
-        .first();
-      if (existing) throw new ApiError("Bu majburiy ochish allaqachon saqlangan", 409);
       const candidate = await loadForcedCandidate(orgId, candidateId, trx);
       const kind = candidateKind(candidate);
       const sessionId = kind === "session_found" ? candidateSessionId(candidate) : requestedSessionId;
@@ -337,8 +379,27 @@ export async function createForcedOpenReview(
           "tariff_intervals_snapshot"
         )
         .where({ id: sessionId, org_id: orgId })
+        .forUpdate()
         .first();
       if (!session) throw new ApiError("Sessiya topilmadi", 404);
+      const locked = await trx("tb_exit_candidates")
+        .select("id")
+        .where({ id: candidateId, org_id: orgId })
+        .forUpdate()
+        .first();
+      if (!locked) throw new ApiError("Majburiy ochish nomzodi topilmadi", 404);
+      const existing = await trx("forced_open_reviews")
+        .select("id")
+        .where({ org_id: orgId, candidate_id: candidateId })
+        .first();
+      if (existing) throw new ApiError("Bu majburiy ochish allaqachon saqlangan", 409);
+      const existingSessionReview = await trx("forced_open_reviews")
+        .select("id")
+        .where({ org_id: orgId, session_id: session.id })
+        .first();
+      if (existingSessionReview) {
+        throw new ApiError("shu sessiya allaqachon saqlangan", 409);
+      }
       const forcedAt = new Date(candidate.resolved_at);
       const enteredAt = new Date(session.entered_at);
       if (enteredAt.getTime() >= forcedAt.getTime()) {
@@ -381,7 +442,7 @@ export async function createForcedOpenReview(
       const created = await trx<ReviewRow>("forced_open_reviews").where({ id }).first();
       if (!created) throw new ApiError("Tekshiruv yozuvi yaratilmadi", 500);
       return serializeReview(created);
-    });
+    }, { isolationLevel: "read committed" });
   } catch (error) {
     if (isDuplicateKeyError(error)) {
       throw new ApiError("Bu majburiy ochish allaqachon saqlangan", 409);
