@@ -33,6 +33,7 @@ import cashCollectionsRouter from "./modules/cashCollections/cashCollections.rou
 import plateFormatsRouter from "./modules/plateFormats/plateFormats.routes";
 import blacklistRouter from "./modules/blacklist/blacklist.routes";
 import forcedOpenHistoryRouter from "./modules/exitCandidates/forcedOpenHistory.routes";
+import forcedOpenAuditRouter from "./modules/forcedOpenAudit/forcedOpenAudit.routes";
 
 const app = express();
 
@@ -101,6 +102,7 @@ app.use("/api/vip-vehicles", vipVehiclesRouter);
 app.use("/api/settings", settingsRouter);
 app.use("/api/webhook-events", webhookEventsRouter);
 app.use("/api/exit-candidates", exitCandidatesRouter);
+app.use("/api/forced-open-audit", forcedOpenAuditRouter);
 app.use("/api/entry-candidates", entryCandidatesRouter);
 app.use("/api/parking-sessions", parkingSessionsEntryBarrierRouter);
 app.use("/api/medplus/webhook", medplusWebhookRouter);

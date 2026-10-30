@@ -157,12 +157,28 @@ async function cleanupOrganization(
           .whereIn("matched_session_id", activeIds())
           .orWhereIn("resolved_session_id", activeIds());
       })
+      .andWhere((query) => {
+        query
+          .whereNull("resolution_type")
+          .orWhereNotIn("resolution_type", ["forced_open", "emergency_forced_open"])
+          .orWhereNull("resolved_at")
+          .orWhere(
+            "resolved_at",
+            "<",
+            trx.raw("DATE_SUB(NOW(), INTERVAL ? DAY)", [env.forcedOpenRetentionDays])
+          );
+      })
       .del();
     summary.related.entry_candidates = await trx("tb_entry_candidates")
       .whereIn("resolved_session_id", activeIds())
       .del();
     summary.related.webhook_events = await trx("tb_webhook_events")
       .whereIn("session_id", activeIds())
+      .whereNotExists(
+        trx("forced_open_reviews as review")
+          .select(trx.raw("1"))
+          .whereRaw("review.webhook_event_id = tb_webhook_events.id")
+      )
       .del();
     summary.related.activity_logs = await trx("tb_activity_logs")
       .where({ target_type: "session" })

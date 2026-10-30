@@ -6,6 +6,7 @@ const exitControlEnvNames = [
   "FREE_EXIT_RECOVERY_ENABLED",
   "FREE_EXIT_RECOVERY_HOURS",
   "CANCELLED_EXIT_COOLDOWN_SECONDS",
+  "FORCED_OPEN_RETENTION_DAYS",
   "FORCED_OPEN_AVG_LOSS_SOM",
   "STALE_SESSION_CLEANUP_ENABLED",
   "STALE_SESSION_CLEANUP_KEEP_DAYS",
@@ -88,6 +89,7 @@ describe("exit control env", () => {
     expect(configuredEnv.exitMatchV2Enabled).toBe(false);
     expect(configuredEnv.freeExitRecovery).toEqual({ enabled: false, hours: 6 });
     expect(configuredEnv.cancelledExitCooldownSeconds).toBe(60);
+    expect(configuredEnv.forcedOpenRetentionDays).toBe(4);
     expect(configuredEnv.forcedOpenAvgLossSom).toBe(10000);
     expect(configuredEnv.staleSessionCleanup).toEqual({
       enabled: false,
@@ -109,6 +111,7 @@ describe("exit control env", () => {
       FREE_EXIT_RECOVERY_ENABLED: "true",
       FREE_EXIT_RECOVERY_HOURS: "12",
       CANCELLED_EXIT_COOLDOWN_SECONDS: "90",
+      FORCED_OPEN_RETENTION_DAYS: "8",
       FORCED_OPEN_AVG_LOSS_SOM: "25000",
       STALE_SESSION_CLEANUP_ENABLED: "true",
       STALE_SESSION_CLEANUP_KEEP_DAYS: "4",
@@ -123,6 +126,7 @@ describe("exit control env", () => {
     expect(configuredEnv.exitMatchV2Enabled).toBe(true);
     expect(configuredEnv.freeExitRecovery).toEqual({ enabled: true, hours: 12 });
     expect(configuredEnv.cancelledExitCooldownSeconds).toBe(90);
+    expect(configuredEnv.forcedOpenRetentionDays).toBe(8);
     expect(configuredEnv.forcedOpenAvgLossSom).toBe(25000);
     expect(configuredEnv.staleSessionCleanup).toEqual({
       enabled: true,
@@ -143,6 +147,7 @@ describe("exit control env", () => {
       FORCED_OPEN_AVG_LOSS_SOM: "NaN",
       FREE_EXIT_RECOVERY_HOURS: "0",
       CANCELLED_EXIT_COOLDOWN_SECONDS: "0",
+      FORCED_OPEN_RETENTION_DAYS: "0",
       STALE_SESSION_CLEANUP_KEEP_DAYS: "0",
       STALE_SESSION_CLEANUP_MAX_PER_RUN: "-5",
       WEBHOOK_IMAGES_RETENTION_DAYS: "0",
@@ -152,6 +157,7 @@ describe("exit control env", () => {
     expect(configuredEnv.forcedOpenAvgLossSom).toBe(10000);
     expect(configuredEnv.freeExitRecovery.hours).toBe(6);
     expect(configuredEnv.cancelledExitCooldownSeconds).toBe(60);
+    expect(configuredEnv.forcedOpenRetentionDays).toBe(4);
     expect(configuredEnv.staleSessionCleanup.keepDays).toBe(2);
     expect(configuredEnv.staleSessionCleanup.maxPerRun).toBe(1000);
     expect(configuredEnv.webhookImagesCleanup.retentionDays).toBe(30);

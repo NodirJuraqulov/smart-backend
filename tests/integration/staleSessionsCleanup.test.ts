@@ -4,6 +4,7 @@ import { db } from "@/config/db";
 import { env } from "@/config/env";
 import { getOrgTodayDate, getOrgTodayRange } from "@/modules/medplus/medplus.service";
 import { runStaleSessionsCleanup } from "@/modules/maintenance/staleSessionsCleanup.service";
+import { runWebhookEventsCleanup } from "@/jobs/webhookEventsCleanupJob";
 import {
   assertTestDatabase,
   cleanupOrganization,
@@ -271,6 +272,85 @@ describe("stale session cleanup", () => {
     expect((await db("tb_payment_transactions").where({ id: transactionId }).first()).session_id).toBeNull();
     expect((await db("tb_clinic_discounts").where({ id: discountId }).first()).used_session_id).toBeNull();
     expect(summary.deleted_sessions).toBe(1);
+  });
+
+  it("saqlangan review webhookini sessiya cleanupida o'chirmaydi", async () => {
+    const sessionId = await oldSession("01REVIEW1");
+    const forcedAt = cutoffFor("Asia/Tashkent").minus({ minutes: 1 }).toJSDate();
+    const [eventId] = await db("tb_webhook_events").insert({
+      org_id: orgId,
+      direction: "exit",
+      session_id: sessionId,
+      camera_event_at: forcedAt,
+    });
+    const [candidateId] = await db("tb_exit_candidates").insert({
+      org_id: orgId,
+      webhook_event_id: eventId,
+      detected_plate: "01REVIEW1",
+      resolved_session_id: sessionId,
+      camera_event_at: forcedAt,
+      status: "dismissed",
+      resolution_type: "forced_open",
+      resolved_by: actorId,
+      resolved_at: forcedAt,
+    });
+    const [reviewId] = await db("forced_open_reviews").insert({
+      org_id: orgId,
+      candidate_id: candidateId,
+      operator_id: actorId,
+      operator_name: "Test Owner",
+      forced_at: forcedAt,
+      detected_plate: "01REVIEW1",
+      webhook_event_id: eventId,
+      session_id: sessionId,
+      session_plate: "01REVIEW1",
+      entered_at: cutoffFor("Asia/Tashkent").minus({ days: 1 }).toJSDate(),
+      duration_minutes: 1440,
+      amount_som: 10000,
+      kind: "session_found",
+      saved_by: actorId,
+    });
+
+    await runStaleSessionsCleanup();
+
+    expect(await db("tb_parking_sessions").where({ id: sessionId }).first()).toBeUndefined();
+    expect(await db("tb_exit_candidates").where({ id: candidateId }).first()).toBeDefined();
+    expect(await db("tb_webhook_events").where({ id: eventId }).first()).toBeDefined();
+    expect(await db("forced_open_reviews").where({ id: reviewId }).first()).toBeDefined();
+  });
+
+  it("yaqindagi matched forced-open dalilini stale va webhook cleanuplardan saqlaydi", async () => {
+    env.forcedOpenRetentionDays = 4;
+    const sessionId = await oldSession("01RECENT1");
+    const resolvedAt = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+    const [eventId] = await db("tb_webhook_events").insert({
+      org_id: orgId,
+      direction: "exit",
+      camera_event_at: resolvedAt,
+      created_at: resolvedAt,
+      session_id: null,
+    });
+    const [candidateId] = await db("tb_exit_candidates").insert({
+      org_id: orgId,
+      webhook_event_id: eventId,
+      detected_plate: "01RECENT1",
+      matched_session_id: sessionId,
+      resolved_session_id: null,
+      camera_event_at: resolvedAt,
+      status: "dismissed",
+      resolution_type: "forced_open",
+      resolved_by: actorId,
+      resolved_at: resolvedAt,
+    });
+
+    await runStaleSessionsCleanup();
+    await runWebhookEventsCleanup();
+
+    expect(await db("tb_parking_sessions").where({ id: sessionId }).first()).toBeUndefined();
+    expect(await db("tb_exit_candidates").where({ id: candidateId }).first()).toEqual(
+      expect.objectContaining({ matched_session_id: null })
+    );
+    expect(await db("tb_webhook_events").where({ id: eventId }).first()).toBeDefined();
   });
 
   it("deletable son maxdan oshsa organization uchun hech narsa o'chirmaydi", async () => {

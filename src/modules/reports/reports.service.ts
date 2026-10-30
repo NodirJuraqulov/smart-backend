@@ -12,6 +12,8 @@ import {
   getOperatorUncollectedRevenueByMethod,
   getOrgUncollectedRevenueByMethod,
 } from "@/modules/cashCollections/cashCollections.service";
+import { getForcedOpenReviewSummary } from "@/modules/forcedOpenAudit/forcedOpenAudit.service";
+import { getOrganizationShiftWindow } from "@/utils/shiftWindow";
 
 function pad(n: number): string {
   return String(n).padStart(2, "0");
@@ -20,6 +22,17 @@ function pad(n: number): string {
 async function getOrgTimezone(orgId: number): Promise<string> {
   const organization = await db("tb_organizations").select("timezone").where({ id: orgId }).first();
   return organization?.timezone ?? "Asia/Tashkent";
+}
+
+async function shiftContext(
+  actor: AuthTokenPayload,
+  requestedOrgId: number | undefined,
+  date: string
+) {
+  const orgId = resolveOrgIdRequired(actor, requestedOrgId);
+  await assertOrganizationExists(orgId);
+  const timezone = await getOrgTimezone(orgId);
+  return { orgId, ...getOrganizationShiftWindow(date, timezone) };
 }
 
 function isValidDateString(value: string, timezone: string): boolean {
@@ -226,6 +239,70 @@ function splitRevenueByPaymentMethod(paymentsRows: PaymentLedgerRow[]): {
     }
   }
   return { cashRevenue, onlineRevenue, cardRevenue };
+}
+
+export async function getShiftOperatorReport(
+  actor: AuthTokenPayload,
+  requestedOrgId: number | undefined,
+  date: string
+) {
+  const window = await shiftContext(actor, requestedOrgId, date);
+  const row = await db("tb_activity_logs as activity")
+    .innerJoin("tb_users as user", "user.id", "activity.actor_id")
+    .where({ "user.org_id": window.orgId, "user.role": "operator" })
+    .where(timestampRange("activity.created_at", window.from, window.to))
+    .groupBy("user.id", "user.name", "user.login")
+    .select("user.id", "user.name", "user.login")
+    .count<{ id: number; name: string; login: string; actions: string }[]>("activity.id as actions")
+    .orderBy("actions", "desc")
+    .orderBy("user.id", "asc")
+    .first();
+  return {
+    date: window.date,
+    operator: row ? { id: Number(row.id), name: row.name || row.login } : null,
+    actions: Number(row?.actions ?? 0),
+  };
+}
+
+export async function getShiftReport(
+  actor: AuthTokenPayload,
+  requestedOrgId: number | undefined,
+  date: string,
+  operatorId?: number
+) {
+  const window = await shiftContext(actor, requestedOrgId, date);
+  const [paymentsRows, [{ count: exitsCount }]] = await Promise.all([
+    paymentLedgerQuery(window.orgId, window.from, window.to),
+    applyCompletedExitFilter(
+      db<SessionTimeRow>("tb_parking_sessions").where({ org_id: window.orgId })
+    )
+      .where(timestampRange("exited_at", window.from, window.to))
+      .count<{ count: string }[]>("id as count"),
+  ]);
+  const { cashRevenue, onlineRevenue, cardRevenue } = splitRevenueByPaymentMethod(paymentsRows);
+  let forcedOpenSaved = null;
+  if (operatorId !== undefined) {
+    const summary = await getForcedOpenReviewSummary(
+      window.orgId,
+      operatorId,
+      window.from,
+      window.to
+    );
+    if (summary.count > 0) {
+      forcedOpenSaved = { operator_id: operatorId, ...summary };
+    }
+  }
+  return {
+    date: window.date,
+    from: window.from,
+    to: window.to,
+    cash_revenue: cashRevenue,
+    online_revenue: onlineRevenue,
+    card_revenue: cardRevenue,
+    total_revenue: cashRevenue + onlineRevenue + cardRevenue,
+    exits_count: Number(exitsCount),
+    forced_open_saved: forcedOpenSaved,
+  };
 }
 
 async function getSubscriptionRevenue(

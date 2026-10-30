@@ -30,6 +30,32 @@ export async function dailyHandler(req: Request, res: Response) {
   res.json(report);
 }
 
+function parseRequiredDate(req: Request, res: Response): string | null {
+  if (typeof req.query.date !== "string" || req.query.date === "") {
+    res.status(400).json({ message: "date majburiy va YYYY-MM-DD formatida bo'lishi kerak" });
+    return null;
+  }
+  return req.query.date;
+}
+
+export async function shiftOperatorHandler(req: Request, res: Response) {
+  const orgId = parseOptionalOrgIdFromQuery(req, res);
+  if (orgId === null) return;
+  const date = parseRequiredDate(req, res);
+  if (date === null) return;
+  res.json(await reportsService.getShiftOperatorReport(req.user!, orgId, date));
+}
+
+export async function shiftHandler(req: Request, res: Response) {
+  const orgId = parseOptionalOrgIdFromQuery(req, res);
+  if (orgId === null) return;
+  const operatorId = parseOptionalOperatorId(req, res);
+  if (operatorId === null) return;
+  const date = parseRequiredDate(req, res);
+  if (date === null) return;
+  res.json(await reportsService.getShiftReport(req.user!, orgId, date, operatorId));
+}
+
 export async function monthlyHandler(req: Request, res: Response) {
   const orgId = parseOptionalOrgIdFromQuery(req, res);
   if (orgId === null) return;

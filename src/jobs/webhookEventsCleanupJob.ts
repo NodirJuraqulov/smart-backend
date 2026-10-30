@@ -18,6 +18,22 @@ export async function runWebhookEventsCleanup(): Promise<void> {
           db.raw("DATE_SUB(NOW(), INTERVAL ? DAY)", [env.cancelledExitRetentionDays])
         )
     )
+    .whereNotExists(
+      db("tb_exit_candidates as candidate")
+        .select(db.raw("1"))
+        .whereRaw("candidate.webhook_event_id = tb_webhook_events.id")
+        .whereIn("candidate.resolution_type", ["forced_open", "emergency_forced_open"])
+        .where(
+          "candidate.resolved_at",
+          ">=",
+          db.raw("DATE_SUB(NOW(), INTERVAL ? DAY)", [env.forcedOpenRetentionDays])
+        )
+    )
+    .whereNotExists(
+      db("forced_open_reviews as review")
+        .select(db.raw("1"))
+        .whereRaw("review.webhook_event_id = tb_webhook_events.id")
+    )
     .del();
 
   console.log(`Webhook hodisalari tozalandi: ${deletedCount} ta eski yozuv o'chirildi`);
